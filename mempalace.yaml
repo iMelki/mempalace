@@ -1,0 +1,20 @@
+wing: agents
+source: upstream
+# NOTE: This is the upstream mempalace project source (not a repo owned by iMelki).
+# Indexed for reference to understand how palace storage, rooms, and wings work.
+# Do NOT confuse with mempalace-service (the Railway deployment) or ~/.mempalace (local data).
+rooms:
+  - name: core
+    description: Core palace storage, rooms, wings, drawer management
+    keywords: [palace, room, wing, drawer, store, embed, retrieve, query]
+  - name: plugins
+    description: Plugins, extensions, marketplace
+    keywords: [plugin, extension, marketplace, adapter, connector]
+  - name: cli
+    description: CLI commands and tooling
+    keywords: [cli, command, init, mine, search, add, delete]
+  - name: docs
+    description: Documentation, roadmap, changelog
+    keywords: [doc, readme, roadmap, changelog, mission, contributing]
+  - name: general
+    description: Everything else
