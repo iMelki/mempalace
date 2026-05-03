@@ -313,12 +313,18 @@ def tool_status():
         "aaak_dialect": AAAK_SPEC,
     }
     try:
-        all_meta = _get_cached_metadata(col)
-        for m in all_meta:
-            w = m.get("wing", "unknown")
-            r = m.get("room", "unknown")
-            wings[w] = wings.get(w, 0) + 1
-            rooms[r] = rooms.get(r, 0) + 1
+        if count > 10000:
+            logger.info(
+                f"Palace too large ({count} drawers) for full status scan. Returning count only."
+            )
+            result["note"] = "Palace too large for real-time wing/room breakdown."
+        else:
+            all_meta = _get_cached_metadata(col)
+            for m in all_meta:
+                w = m.get("wing", "unknown")
+                r = m.get("room", "unknown")
+                wings[w] = wings.get(w, 0) + 1
+                rooms[r] = rooms.get(r, 0) + 1
     except Exception as e:
         logger.exception("tool_status metadata fetch failed")
         result["error"] = str(e)
