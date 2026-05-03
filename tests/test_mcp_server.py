@@ -250,6 +250,28 @@ class TestReadTools:
         assert "project" in result["wings"]
         assert "notes" in result["wings"]
 
+    def test_status_large_palace_skips_metadata_scan(self, monkeypatch, config, kg):
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace import mcp_server
+
+        class LargeCollection:
+            def count(self):
+                return 10001
+
+        def fail_metadata(*_args, **_kwargs):
+            raise AssertionError("_get_cached_metadata should not run for large palaces")
+
+        monkeypatch.setattr(mcp_server, "_get_collection", lambda create=False: LargeCollection())
+        monkeypatch.setattr(mcp_server, "_get_cached_metadata", fail_metadata)
+
+        result = mcp_server.tool_status()
+
+        assert result["total_drawers"] == 10001
+        assert result["note"] == "Palace too large for real-time wing/room breakdown."
+        assert result["wings"] == {}
+        assert result["rooms"] == {}
+        assert "error" not in result
+
     def test_status_handles_none_metadata_without_partial(
         self, monkeypatch, config, palace_path, kg
     ):

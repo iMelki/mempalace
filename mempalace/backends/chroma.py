@@ -10,6 +10,11 @@ from typing import Any, Optional
 import chromadb
 from chromadb.errors import NotFoundError as _ChromaNotFoundError
 
+try:
+    from chromadb.errors import InvalidCollectionException as _ChromaInvalidCollectionError
+except ImportError:  # pragma: no cover - older chromadb versions
+    _ChromaInvalidCollectionError = _ChromaNotFoundError
+
 from .base import (
     BaseBackend,
     BaseCollection,
@@ -1096,7 +1101,7 @@ class ChromaBackend(BaseBackend):
         if create:
             try:
                 collection = client.get_collection(collection_name, **ef_kwargs)
-            except _ChromaNotFoundError:
+            except (_ChromaNotFoundError, _ChromaInvalidCollectionError):
                 collection = client.create_collection(
                     collection_name,
                     metadata={
