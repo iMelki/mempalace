@@ -1,0 +1,36 @@
+name: Sync from Upstream
+
+on:
+  schedule:
+    # Every Monday at 04:00 UTC
+    - cron: '0 4 * * 1'
+  workflow_dispatch:
+
+jobs:
+  sync:
+    name: Sync fork main with milla-jovovich/mempalace
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Merge upstream into fork main
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            try {
+              await github.rest.repos.mergeUpstream({
+                owner: context.repo.owner,
+                repo:  context.repo.repo,
+                branch: 'main',
+              });
+              core.info('Upstream sync complete — fork main is up to date.');
+            } catch (err) {
+              if (err.status === 409) {
+                core.warning('Merge conflict detected. Manual reconciliation required.');
+                core.setFailed('Upstream sync skipped due to conflict — reconcile manually.');
+              } else {
+                throw err;
+              }
+            }

@@ -1,13 +1,8 @@
-# Default owners for everything
-* @milla-jovovich @bensig @igorls
+# Default ownership for the portfolio operations repository.
+* @iMelki
 
-# Core library
-mempalace/ @milla-jovovich @bensig
+# Governance and agent-safety changes require explicit owner review.
+/PRD.md @iMelki
+/agent-guardrails.md @iMelki
+/.github/ @iMelki
 
-# CI and workflows
-.github/ @bensig
-
-# Plugins and integrations
-.claude-plugin/ @bensig
-.codex-plugin/ @bensig
-integrations/ @bensig
