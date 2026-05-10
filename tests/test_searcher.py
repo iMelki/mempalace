@@ -120,6 +120,7 @@ class TestSearchMemories:
             result = search_memories("JWT", "/fake/path", n_results=3)
 
         assert drawers.calls == [9, 4, 2]
+        assert result["fallback"]["mode"] == "hnsw_result_retry"
         assert result["fallback"]["drawer_n_results_requested"] == 9
         assert result["fallback"]["drawer_n_results_used"] == 2
         assert result["results"][0]["text"] == "JWT authentication tokens"

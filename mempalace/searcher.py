@@ -506,7 +506,10 @@ def _bm25_only_via_sqlite(
                 "filters": {"wing": wing, "room": room},
                 "total_before_filter": 0,
                 "results": [],
-                "fallback": "bm25_only_via_sqlite",
+                "fallback": {
+                    "mode": "bm25_only_via_sqlite",
+                    "reason": "no_sqlite_candidates",
+                },
             }
 
         placeholders = ",".join(["?"] * len(candidate_ids))
@@ -570,8 +573,10 @@ def _bm25_only_via_sqlite(
         "filters": {"wing": wing, "room": room},
         "total_before_filter": len(candidates),
         "results": hits,
-        "fallback": "bm25_only_via_sqlite",
-        "fallback_reason": "vector_search_disabled",
+        "fallback": {
+            "mode": "bm25_only_via_sqlite",
+            "reason": "vector_search_disabled",
+        },
     }
 
 
@@ -646,6 +651,8 @@ def search_memories(
 
     # Gather closet hits (best-per-source) to build a boost lookup.
     closet_boost_by_source: dict = {}  # source_file -> (rank, closet_dist, preview)
+    closet_requested = 0
+    closet_returned = 0
     try:
         closets_col = get_closets_collection(palace_path, create=False)
         ckwargs = {
@@ -795,9 +802,14 @@ def search_memories(
         "total_before_filter": len(_first_or_empty(drawer_results, "documents")),
         "results": hits,
         "fallback": {
+            "mode": (
+                "hnsw_result_retry"
+                if drawer_requested != drawer_returned or closet_requested != closet_returned
+                else "none"
+            ),
             "drawer_n_results_requested": drawer_requested,
             "drawer_n_results_used": drawer_returned,
-            "closet_n_results_requested": closet_requested if "closet_requested" in locals() else 0,
-            "closet_n_results_used": closet_returned if "closet_returned" in locals() else 0,
+            "closet_n_results_requested": closet_requested,
+            "closet_n_results_used": closet_returned,
         },
     }

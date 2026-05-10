@@ -261,7 +261,11 @@ class TestReadTools:
         def fail_metadata(*_args, **_kwargs):
             raise AssertionError("_get_cached_metadata should not run for large palaces")
 
-        monkeypatch.setattr(mcp_server, "_get_collection", lambda create=False: LargeCollection())
+        monkeypatch.setattr(
+            mcp_server,
+            "_get_collection",
+            lambda create=False, with_embedding=True: LargeCollection(),
+        )
         monkeypatch.setattr(mcp_server, "_get_cached_metadata", fail_metadata)
 
         result = mcp_server.tool_status()
@@ -270,6 +274,28 @@ class TestReadTools:
         assert result["note"] == "Palace too large for real-time wing/room breakdown."
         assert result["wings"] == {}
         assert result["rooms"] == {}
+        assert "error" not in result
+
+    def test_status_does_not_resolve_embedding_function(self, monkeypatch, config, palace_path, kg):
+        import chromadb
+
+        _patch_mcp_server(monkeypatch, config, kg)
+        client = chromadb.PersistentClient(path=palace_path)
+        del client
+        from mempalace import mcp_server
+
+        def fail_resolve():
+            raise AssertionError("tool_status should not resolve embedding functions")
+
+        monkeypatch.setattr(
+            mcp_server.ChromaBackend,
+            "_resolve_embedding_function",
+            staticmethod(fail_resolve),
+        )
+
+        result = mcp_server.tool_status()
+
+        assert result["total_drawers"] == 0
         assert "error" not in result
 
     def test_status_handles_none_metadata_without_partial(
@@ -897,7 +923,11 @@ class TestCacheInvalidation:
         from mempalace import mcp_server
 
         # Make _get_collection always return None
-        monkeypatch.setattr(mcp_server, "_get_collection", lambda create=False: None)
+        monkeypatch.setattr(
+            mcp_server,
+            "_get_collection",
+            lambda create=False, with_embedding=True: None,
+        )
 
         result = mcp_server.tool_reconnect()
         assert result["success"] is False

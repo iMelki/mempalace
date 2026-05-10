@@ -279,13 +279,15 @@ def _get_client():
     return _client_cache
 
 
-def _get_collection(create=False):
+def _get_collection(create=False, with_embedding=True):
     """Return the ChromaDB collection, caching the client between calls."""
     global _collection_cache, _metadata_cache, _metadata_cache_time
     try:
         client = _get_client()
-        ef = ChromaBackend._resolve_embedding_function()
-        ef_kwargs = {"embedding_function": ef} if ef is not None else {}
+        ef_kwargs = {}
+        if with_embedding:
+            ef = ChromaBackend._resolve_embedding_function()
+            ef_kwargs = {"embedding_function": ef} if ef is not None else {}
         if create:
             # hnsw:num_threads=1 disables ChromaDB's multi-threaded ParallelFor
             # HNSW insert path, which has a race in repairConnectionsForUpdate /
@@ -472,7 +474,7 @@ def tool_status():
     # A plain configured directory is not yet a palace and should still report
     # the historical "No palace found" error, while a cold-start DB with no
     # mempalace_drawers collection should bootstrap cleanly (#830).
-    col = _get_collection(create=db_exists)
+    col = _get_collection(create=db_exists, with_embedding=False)
     if not col:
         return _no_palace()
     count = col.count()

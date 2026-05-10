@@ -95,12 +95,8 @@ def _reset_mcp_cache():
 
 @pytest.fixture(autouse=True)
 def _force_test_embedding_function(monkeypatch):
-    from mempalace import embedding
     from mempalace.backends.chroma import ChromaBackend
 
-    monkeypatch.setattr(
-        embedding, "get_embedding_function", lambda device=None: _TEST_EMBEDDING_FUNCTION
-    )
     monkeypatch.setattr(
         ChromaBackend,
         "_resolve_embedding_function",
