@@ -2,6 +2,24 @@
 
 Thanks for wanting to help. MemPalace is open source and we welcome contributions of all sizes — from typo fixes to new features.
 
+## iMelki Fork Governance
+
+This fork also follows the portfolio-wide governance baseline for AI/human agent work:
+
+1. Create scoped work from `.github/ISSUE_TEMPLATE/agent_task.md` when assigning tasks to agents.
+2. Link relevant docs, issues, PRs, and plans before implementation.
+3. Classify work with risk, agent suitability, and allowed file scope.
+4. Use labels from `.github/labels.yml`, including `domain:memory` when applicable.
+5. Maintain `OPEN_TASKS.md` as the local task index.
+
+Use the agent branch convention:
+
+```text
+agent/{agent-name}/{issue-number}-{slug}
+```
+
+Request human review for medium, high, and critical risk changes. Treat memory ingestion, sync, MCP behavior, provider configuration, and search ranking/retrieval behavior as functional changes that need targeted tests.
+
 ## Getting Started
 
 ```bash
