@@ -125,6 +125,18 @@ class TestSearchMemories:
         assert result["fallback"]["drawer_n_results_used"] == 2
         assert result["results"][0]["text"] == "JWT authentication tokens"
 
+    def test_search_memories_sqlite_fallback_reports_object_metadata(
+        self, palace_path, seeded_collection
+    ):
+        result = search_memories("JWT authentication", palace_path, vector_disabled=True)
+
+        assert isinstance(result["fallback"], dict)
+        assert result["fallback"]["mode"] == "bm25_only_via_sqlite"
+        assert result["fallback"]["reason"] in {
+            "vector_search_disabled",
+            "no_sqlite_candidates",
+        }
+
     def test_search_memories_handles_none_metadata(self):
         """API path: `None` entries in the drawer results' metadatas list must
         fall back to the sentinel strings (wing/room 'unknown', source '?')

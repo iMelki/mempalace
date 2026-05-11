@@ -104,6 +104,11 @@ def _force_test_embedding_function(monkeypatch):
     )
 
 
+@pytest.fixture
+def test_embedding_function():
+    return _TEST_EMBEDDING_FUNCTION
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _isolate_home():
     """Ensure HOME points to a temp dir for the entire test session.
