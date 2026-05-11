@@ -4,6 +4,7 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Optional
 
 import pytest
 
@@ -11,7 +12,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_HOOKS_DIR = REPO_ROOT / ".claude-plugin" / "hooks"
 
 
-def _find_bash() -> str | None:
+def _find_bash() -> Optional[str]:
     if os.name == "nt":
         for candidate in (
             Path("C:/Program Files/Git/bin/bash.exe"),

@@ -1,6 +1,7 @@
 import os
 import sqlite3
 from pathlib import Path
+from typing import Optional
 
 import chromadb
 import pytest
@@ -767,7 +768,7 @@ def test_make_client_quarantines_each_palace_independently(tmp_path, monkeypatch
 # ── _pin_hnsw_threads (per-process retrofit, separate from this PR's gate) ──
 
 
-def _effective_hnsw_num_threads(collection) -> int | None:
+def _effective_hnsw_num_threads(collection) -> Optional[int]:
     metadata = getattr(collection, "metadata", None)
     if isinstance(metadata, dict) and metadata.get("hnsw:num_threads") is not None:
         return metadata.get("hnsw:num_threads")
