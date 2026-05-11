@@ -45,7 +45,7 @@ class _DeterministicEmbeddingFunction:
     def name() -> str:
         return "default"
 
-    def __call__(self, input):
+    def _embed_many(self, input):
         embeddings = []
         for item in input:
             text = item if isinstance(item, str) else ""
@@ -62,6 +62,15 @@ class _DeterministicEmbeddingFunction:
             norm = math.sqrt(sum(value * value for value in vector)) or 1.0
             embeddings.append([value / norm for value in vector])
         return embeddings
+
+    def __call__(self, input):
+        return self._embed_many(input)
+
+    def embed_documents(self, input):
+        return self._embed_many(input)
+
+    def embed_query(self, input):
+        return self._embed_many([input])[0]
 
 
 _TEST_EMBEDDING_FUNCTION = _DeterministicEmbeddingFunction()
