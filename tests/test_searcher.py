@@ -89,6 +89,54 @@ class TestSearchMemories:
         assert result["filters"]["wing"] == "project"
         assert result["filters"]["room"] == "backend"
 
+    def test_search_memories_hnsw_fallback_reports_requested_and_used_counts(self):
+        class HnswLimitedCollection:
+            def __init__(self):
+                self.calls = []
+
+            def query(self, **kwargs):
+                self.calls.append(kwargs["n_results"])
+                if kwargs["n_results"] > 2:
+                    raise RuntimeError(
+                        "Cannot return the results in a contigious 2D array. Probably ef or M is too small"
+                    )
+                return {
+                    "ids": [["drawer_1"]],
+                    "documents": [["JWT authentication tokens"]],
+                    "metadatas": [
+                        [{"wing": "project", "room": "backend", "source_file": "auth.py"}]
+                    ],
+                    "distances": [[0.1]],
+                }
+
+        drawers = HnswLimitedCollection()
+
+        with (
+            patch("mempalace.searcher.get_collection", return_value=drawers),
+            patch(
+                "mempalace.searcher.get_closets_collection", side_effect=RuntimeError("no closets")
+            ),
+        ):
+            result = search_memories("JWT", "/fake/path", n_results=3)
+
+        assert drawers.calls == [9, 4, 2]
+        assert result["fallback"]["mode"] == "hnsw_result_retry"
+        assert result["fallback"]["drawer_n_results_requested"] == 9
+        assert result["fallback"]["drawer_n_results_used"] == 2
+        assert result["results"][0]["text"] == "JWT authentication tokens"
+
+    def test_search_memories_sqlite_fallback_reports_object_metadata(
+        self, palace_path, seeded_collection
+    ):
+        result = search_memories("JWT authentication", palace_path, vector_disabled=True)
+
+        assert isinstance(result["fallback"], dict)
+        assert result["fallback"]["mode"] == "bm25_only_via_sqlite"
+        assert result["fallback"]["reason"] in {
+            "vector_search_disabled",
+            "no_sqlite_candidates",
+        }
+
     def test_search_memories_handles_none_metadata(self):
         """API path: `None` entries in the drawer results' metadatas list must
         fall back to the sentinel strings (wing/room 'unknown', source '?')

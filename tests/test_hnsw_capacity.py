@@ -399,7 +399,7 @@ def palace_with_drawers(tmp_path):
 
 def test_bm25_fallback_returns_matches(palace_with_drawers):
     out = _bm25_only_via_sqlite("segfault chromadb", str(palace_with_drawers), n_results=5)
-    assert out["fallback"] == "bm25_only_via_sqlite"
+    assert out["fallback"]["mode"] == "bm25_only_via_sqlite"
     assert len(out["results"]) >= 1
     top = out["results"][0]
     # The incident drawer is the closest BM25 match for these terms.
@@ -427,7 +427,7 @@ def test_bm25_fallback_handles_short_query(palace_with_drawers):
     not crash, must fall back to the recency window."""
     out = _bm25_only_via_sqlite("a", str(palace_with_drawers), n_results=5)
     # Falls back to recency window; returns whatever it can rank.
-    assert out["fallback"] == "bm25_only_via_sqlite"
+    assert out["fallback"]["mode"] == "bm25_only_via_sqlite"
     assert isinstance(out["results"], list)
 
 

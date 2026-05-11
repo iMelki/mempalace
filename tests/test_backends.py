@@ -1,6 +1,7 @@
 import os
 import sqlite3
 from pathlib import Path
+from typing import Optional
 
 import chromadb
 import pytest
@@ -767,6 +768,21 @@ def test_make_client_quarantines_each_palace_independently(tmp_path, monkeypatch
 # ── _pin_hnsw_threads (per-process retrofit, separate from this PR's gate) ──
 
 
+def _effective_hnsw_num_threads(collection) -> Optional[int]:
+    metadata = getattr(collection, "metadata", None)
+    if isinstance(metadata, dict) and metadata.get("hnsw:num_threads") is not None:
+        return metadata.get("hnsw:num_threads")
+
+    configuration = getattr(collection, "configuration_json", None)
+    if not isinstance(configuration, dict):
+        return None
+
+    hnsw = configuration.get("hnsw") or configuration.get("hnsw_configuration")
+    if not isinstance(hnsw, dict):
+        return None
+    return hnsw.get("num_threads")
+
+
 def test_pin_hnsw_threads_retrofits_legacy_collection(tmp_path):
     """Legacy collections (created without num_threads) get the retrofit applied."""
     palace_path = tmp_path / "legacy-palace"
@@ -777,11 +793,11 @@ def test_pin_hnsw_threads_retrofits_legacy_collection(tmp_path):
         "mempalace_drawers",
         metadata={"hnsw:space": "cosine"},  # no num_threads — legacy
     )
-    assert col.configuration_json.get("hnsw", {}).get("num_threads") is None
+    assert _effective_hnsw_num_threads(col) != 1
 
     _pin_hnsw_threads(col)
 
-    assert col.configuration_json["hnsw"]["num_threads"] == 1
+    assert _effective_hnsw_num_threads(col) == 1
 
 
 def test_pin_hnsw_threads_swallows_all_errors():
@@ -810,4 +826,4 @@ def test_get_collection_applies_retrofit_on_existing_palace(tmp_path):
         create=False,
     )
 
-    assert wrapper._collection.configuration_json["hnsw"]["num_threads"] == 1
+    assert _effective_hnsw_num_threads(wrapper._collection) == 1

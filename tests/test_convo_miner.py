@@ -9,7 +9,13 @@ from mempalace.convo_miner import mine_convos
 from mempalace.palace import file_already_mined
 
 
-def test_convo_mining():
+def _open_collection(palace_path: str, embedding_function):
+    client = chromadb.PersistentClient(path=palace_path)
+    col = client.get_collection("mempalace_drawers", embedding_function=embedding_function)
+    return client, col
+
+
+def test_convo_mining(test_embedding_function):
     tmpdir = tempfile.mkdtemp()
     with open(os.path.join(tmpdir, "chat.txt"), "w") as f:
         f.write(
@@ -19,8 +25,7 @@ def test_convo_mining():
     palace_path = os.path.join(tmpdir, "palace")
     mine_convos(tmpdir, palace_path, wing="test_convos")
 
-    client = chromadb.PersistentClient(path=palace_path)
-    col = client.get_collection("mempalace_drawers")
+    client, col = _open_collection(palace_path, test_embedding_function)
     assert col.count() >= 2
 
     # Verify search works
@@ -30,7 +35,7 @@ def test_convo_mining():
     shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-def test_mine_convos_does_not_reprocess_short_files(capsys):
+def test_mine_convos_does_not_reprocess_short_files(capsys, test_embedding_function):
     """Files below MIN_CHUNK_SIZE get a sentinel so they are skipped on re-run."""
     tmpdir = tempfile.mkdtemp()
     try:
@@ -46,8 +51,7 @@ def test_mine_convos_does_not_reprocess_short_files(capsys):
 
         # Verify sentinel was written (resolve path -- macOS /var -> /private/var)
         resolved_file = str(Path(tmpdir).resolve() / "tiny.txt")
-        client = chromadb.PersistentClient(path=palace_path)
-        col = client.get_collection("mempalace_drawers")
+        client, col = _open_collection(palace_path, test_embedding_function)
         assert file_already_mined(col, resolved_file)
 
         # Second run -- file should be skipped
@@ -77,7 +81,7 @@ def test_mine_convos_does_not_reprocess_empty_chunk_files(capsys):
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-def test_mine_convos_rebuilds_stale_drawers_after_schema_bump(capsys):
+def test_mine_convos_rebuilds_stale_drawers_after_schema_bump(capsys, test_embedding_function):
     """When stored drawers have an older normalize_version, the next mine
     silently purges them and refiles — no manual erase required.
 
@@ -100,8 +104,7 @@ def test_mine_convos_rebuilds_stale_drawers_after_schema_bump(capsys):
         mine_convos(tmpdir, palace_path, wing="test")
         capsys.readouterr()
 
-        client = chromadb.PersistentClient(path=palace_path)
-        col = client.get_collection("mempalace_drawers")
+        client, col = _open_collection(palace_path, test_embedding_function)
         resolved = str(Path(tmpdir).resolve() / "chat.txt")
         first_pass = col.get(where={"source_file": resolved})
         first_ids = set(first_pass["ids"])
@@ -144,8 +147,7 @@ def test_mine_convos_rebuilds_stale_drawers_after_schema_bump(capsys):
             "Files skipped (already filed): 0" in out
         ), "stale drawers should force a rebuild, not a skip"
 
-        client = chromadb.PersistentClient(path=palace_path)
-        col = client.get_collection("mempalace_drawers")
+        client, col = _open_collection(palace_path, test_embedding_function)
         rebuilt = col.get(where={"source_file": resolved})
         # Orphan is gone
         assert "orphan_drawer" not in rebuilt["ids"]
