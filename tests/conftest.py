@@ -70,7 +70,9 @@ class _DeterministicEmbeddingFunction:
         return self._embed_many(input)
 
     def embed_query(self, input):
-        return self._embed_many([input])[0]
+        if isinstance(input, str):
+            return self._embed_many([input])
+        return self._embed_many(input)
 
 
 _TEST_EMBEDDING_FUNCTION = _DeterministicEmbeddingFunction()
