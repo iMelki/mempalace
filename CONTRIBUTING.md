@@ -68,12 +68,13 @@ assets/             ← logo + brand
 2. Write your code
 3. Add or update tests if applicable
 4. Run `pytest tests/ -v` — everything must pass
-5. Commit with a clear message following [conventional commits](https://www.conventionalcommits.org/):
+5. Run `pwsh -NoProfile -File scripts/check-markdown-links.ps1` when Markdown docs change
+6. Commit with a clear message following [conventional commits](https://www.conventionalcommits.org/):
    - `feat: add Notion export format`
    - `fix: handle empty transcript files`
    - `docs: update MCP tool descriptions`
    - `bench: add LoCoMo turn-level metrics`
-6. Push to your fork and open a PR against `develop`
+7. Push to your fork and open a PR against `develop`
 
 ## Code Style
 
