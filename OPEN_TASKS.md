@@ -1,10 +1,16 @@
 # MemPalace Open Tasks
 
-Last updated: 2026-05-10
+Last updated: 2026-05-12
 
 This file is the durable local index for active `mempalace` issues.
 
 ## Active Issues
+
+- [#5 - Use relevant skills for market research, competitor analysis, and monetization planning](https://github.com/iMelki/mempalace/issues/5)
+  - Goal: Use the relevant shared skills to map competitors, ICPs, monetization options, and positioning for the user-owned MemPalace fork.
+
+- [#6 - Design and build a landing page](https://github.com/iMelki/mempalace/issues/6)
+  - Goal: Define and implement a landing page for the user-owned MemPalace fork with clear audience, value proposition, proof, and CTA.
 
 - [#1 - Adopt projects-ops repo bootstrap governance baseline](https://github.com/iMelki/mempalace/issues/1)
   - Goal: Align the fork with portfolio-wide governance and hygiene standards.
