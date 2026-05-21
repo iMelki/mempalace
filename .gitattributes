@@ -1,0 +1,16 @@
+* text=auto eol=lf
+*.py text eol=lf
+*.md text eol=lf
+*.toml text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+*.env text eol=lf
+*.env.* text eol=lf
+
+*.json filter=secrets
+*.env filter=secrets
+*.env.* filter=secrets
+*.yaml filter=secrets
+*.yml filter=secrets
+*.toml filter=secrets
