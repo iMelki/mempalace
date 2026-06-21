@@ -8,3 +8,11 @@ repos:
       - id: ruff
         args: [--fix]
       - id: ruff-format
+  - repo: local
+    hooks:
+      - id: markdown-links
+        name: markdown link integrity
+        entry: pwsh -NoProfile -File scripts/check-markdown-links.ps1
+        language: system
+        files: \.(md|mdx)$
+        pass_filenames: false

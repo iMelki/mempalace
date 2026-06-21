@@ -1,13 +1,10 @@
-# Default owners for everything
-* @milla-jovovich @bensig @igorls
+# Default ownership for the iMelki MemPalace fork.
+* @iMelki
 
-# Core library
-mempalace/ @milla-jovovich @bensig
-
-# CI and workflows
-.github/ @bensig
-
-# Plugins and integrations
-.claude-plugin/ @bensig
-.codex-plugin/ @bensig
-integrations/ @bensig
+# Governance and memory-system safety changes require explicit owner review.
+/.github/ @iMelki
+/AGENTS.md @iMelki
+/CONTRIBUTING.md @iMelki
+/OPEN_TASKS.md @iMelki
+/mempalace/ @iMelki
+/integrations/ @iMelki
