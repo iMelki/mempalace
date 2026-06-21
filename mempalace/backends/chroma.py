@@ -10,6 +10,11 @@ from typing import Any, Optional
 import chromadb
 from chromadb.errors import NotFoundError as _ChromaNotFoundError
 
+try:
+    from chromadb.errors import InvalidCollectionException as _ChromaInvalidCollectionError
+except ImportError:  # pragma: no cover - older chromadb versions
+    _ChromaInvalidCollectionError = _ChromaNotFoundError
+
 from .base import (
     BaseBackend,
     BaseCollection,
@@ -572,20 +577,49 @@ def _pin_hnsw_threads(collection) -> None:
     not persist to disk across ``PersistentClient`` reopens, so this must
     run on every ``get_collection`` call, not just once.
     """
+    metadata = getattr(collection, "metadata", None)
+    if isinstance(metadata, dict) and metadata.get("hnsw:num_threads") == 1:
+        return
+
     try:
         from chromadb.api.collection_configuration import (
             UpdateCollectionConfiguration,
             UpdateHNSWConfiguration,
         )
     except ImportError:
-        logger.debug("_pin_hnsw_threads skipped: chromadb too old", exc_info=True)
+        logger.debug("_pin_hnsw_threads configuration API unavailable", exc_info=True)
+    else:
+        try:
+            collection.modify(
+                configuration=UpdateCollectionConfiguration(
+                    hnsw=UpdateHNSWConfiguration(num_threads=1)
+                )
+            )
+            return
+        except Exception:
+            logger.debug("_pin_hnsw_threads configuration retrofit failed", exc_info=True)
+
+    if not isinstance(metadata, dict):
         return
+
+    fallback_metadata = dict(metadata)
+    fallback_metadata["hnsw:num_threads"] = 1
     try:
-        collection.modify(
-            configuration=UpdateCollectionConfiguration(hnsw=UpdateHNSWConfiguration(num_threads=1))
-        )
+        collection.modify(metadata=fallback_metadata)
+    except ValueError as exc:
+        if "distance function" not in str(exc):
+            logger.debug("_pin_hnsw_threads metadata retrofit failed", exc_info=True)
+            return
+        fallback_metadata.pop("hnsw:space", None)
+        try:
+            collection.modify(metadata=fallback_metadata)
+        except Exception:
+            logger.debug(
+                "_pin_hnsw_threads metadata retrofit failed after dropping hnsw:space",
+                exc_info=True,
+            )
     except Exception:
-        logger.debug("_pin_hnsw_threads modify failed", exc_info=True)
+        logger.debug("_pin_hnsw_threads metadata retrofit failed", exc_info=True)
 
 
 _BLOB_FIX_MARKER = ".blob_seq_ids_migrated"
@@ -1118,7 +1152,7 @@ class ChromaBackend(BaseBackend):
         if create:
             try:
                 collection = client.get_collection(collection_name, **ef_kwargs)
-            except _ChromaNotFoundError:
+            except (_ChromaNotFoundError, _ChromaInvalidCollectionError):
                 collection = client.create_collection(
                     collection_name,
                     metadata={

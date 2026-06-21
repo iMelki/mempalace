@@ -4,12 +4,26 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Optional
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_HOOKS_DIR = REPO_ROOT / ".claude-plugin" / "hooks"
-BASH = shutil.which("bash")
+
+
+def _find_bash() -> Optional[str]:
+    if os.name == "nt":
+        for candidate in (
+            Path("C:/Program Files/Git/bin/bash.exe"),
+            Path("C:/Program Files/Git/usr/bin/bash.exe"),
+        ):
+            if candidate.is_file():
+                return str(candidate)
+    return shutil.which("bash")
+
+
+BASH = _find_bash()
 
 pytestmark = pytest.mark.skipif(
     BASH is None,
@@ -23,7 +37,11 @@ SCRIPT_CASES = [
 
 
 def _shell_path(path: Path) -> str:
-    return path.as_posix()
+    posix_path = path.as_posix()
+    drive = path.drive.rstrip(":")
+    if drive:
+        return f"/{drive.lower()}{posix_path[len(path.drive):]}"
+    return posix_path
 
 
 def _write_executable(path: Path, content: str) -> None:

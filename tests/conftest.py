@@ -11,6 +11,9 @@ instead of the real user profile.
 """
 
 import os
+import hashlib
+import math
+import re
 import shutil
 import tempfile
 
@@ -32,6 +35,47 @@ import pytest  # noqa: E402
 
 from mempalace.config import MempalaceConfig  # noqa: E402
 from mempalace.knowledge_graph import KnowledgeGraph  # noqa: E402
+
+
+_TOKEN_RE = re.compile(r"\w+", re.UNICODE)
+
+
+class _DeterministicEmbeddingFunction:
+    @staticmethod
+    def name() -> str:
+        return "default"
+
+    def _embed_many(self, input):
+        embeddings = []
+        for item in input:
+            text = item if isinstance(item, str) else ""
+            vector = [0.0] * 32
+            tokens = _TOKEN_RE.findall(text.lower())
+            if not tokens:
+                vector[0] = 1.0
+            else:
+                for token in tokens:
+                    digest = hashlib.sha256(token.encode("utf-8")).digest()
+                    vector[digest[0] % len(vector)] += 1.0
+                    vector[digest[1] % len(vector)] += 0.5
+
+            norm = math.sqrt(sum(value * value for value in vector)) or 1.0
+            embeddings.append([value / norm for value in vector])
+        return embeddings
+
+    def __call__(self, input):
+        return self._embed_many(input)
+
+    def embed_documents(self, input):
+        return self._embed_many(input)
+
+    def embed_query(self, input):
+        if isinstance(input, str):
+            return self._embed_many([input])
+        return self._embed_many(input)
+
+
+_TEST_EMBEDDING_FUNCTION = _DeterministicEmbeddingFunction()
 
 
 @pytest.fixture(autouse=True)
@@ -58,6 +102,22 @@ def _reset_mcp_cache():
     _clear_cache()
     yield
     _clear_cache()
+
+
+@pytest.fixture(autouse=True)
+def _force_test_embedding_function(monkeypatch):
+    from mempalace.backends.chroma import ChromaBackend
+
+    monkeypatch.setattr(
+        ChromaBackend,
+        "_resolve_embedding_function",
+        staticmethod(lambda: _TEST_EMBEDDING_FUNCTION),
+    )
+
+
+@pytest.fixture
+def test_embedding_function():
+    return _TEST_EMBEDDING_FUNCTION
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -109,7 +169,11 @@ def config(tmp_dir, palace_path):
 def collection(palace_path):
     """A ChromaDB collection pre-seeded in the temp palace."""
     client = chromadb.PersistentClient(path=palace_path)
-    col = client.get_or_create_collection("mempalace_drawers", metadata={"hnsw:space": "cosine"})
+    col = client.get_or_create_collection(
+        "mempalace_drawers",
+        metadata={"hnsw:space": "cosine"},
+        embedding_function=_TEST_EMBEDDING_FUNCTION,
+    )
     yield col
     client.delete_collection("mempalace_drawers")
     del client

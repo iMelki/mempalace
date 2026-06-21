@@ -250,6 +250,54 @@ class TestReadTools:
         assert "project" in result["wings"]
         assert "notes" in result["wings"]
 
+    def test_status_large_palace_skips_metadata_scan(self, monkeypatch, config, kg):
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace import mcp_server
+
+        class LargeCollection:
+            def count(self):
+                return 10001
+
+        def fail_metadata(*_args, **_kwargs):
+            raise AssertionError("_get_cached_metadata should not run for large palaces")
+
+        monkeypatch.setattr(
+            mcp_server,
+            "_get_collection",
+            lambda create=False, with_embedding=True: LargeCollection(),
+        )
+        monkeypatch.setattr(mcp_server, "_get_cached_metadata", fail_metadata)
+
+        result = mcp_server.tool_status()
+
+        assert result["total_drawers"] == 10001
+        assert result["note"] == "Palace too large for real-time wing/room breakdown."
+        assert result["wings"] == {}
+        assert result["rooms"] == {}
+        assert "error" not in result
+
+    def test_status_does_not_resolve_embedding_function(self, monkeypatch, config, palace_path, kg):
+        import chromadb
+
+        _patch_mcp_server(monkeypatch, config, kg)
+        client = chromadb.PersistentClient(path=palace_path)
+        del client
+        from mempalace import mcp_server
+
+        def fail_resolve():
+            raise AssertionError("tool_status should not resolve embedding functions")
+
+        monkeypatch.setattr(
+            mcp_server.ChromaBackend,
+            "_resolve_embedding_function",
+            staticmethod(fail_resolve),
+        )
+
+        result = mcp_server.tool_status()
+
+        assert result["total_drawers"] == 0
+        assert "error" not in result
+
     def test_status_handles_none_metadata_without_partial(
         self, monkeypatch, config, palace_path, kg
     ):
@@ -513,6 +561,25 @@ class TestWriteTools:
             threshold=0.99,
         )
         assert result["is_duplicate"] is False
+
+    def test_check_duplicate_short_circuits_when_vector_disabled(self, monkeypatch):
+        from mempalace import mcp_server
+
+        monkeypatch.setattr(
+            mcp_server,
+            "hnsw_capacity_status",
+            lambda *_args, **_kwargs: {"diverged": True, "message": "capacity mismatch"},
+        )
+
+        def fail_get_collection():
+            raise AssertionError("_get_collection must not run when vector search is disabled")
+
+        monkeypatch.setattr(mcp_server, "_get_collection", fail_get_collection)
+        result = mcp_server.tool_check_duplicate("content")
+
+        assert result["is_duplicate"] is False
+        assert result["vector_disabled"] is True
+        assert result["vector_disabled_reason"] == "capacity mismatch"
 
     def test_get_drawer(self, monkeypatch, config, palace_path, seeded_collection, kg):
         _patch_mcp_server(monkeypatch, config, kg)
@@ -1024,7 +1091,11 @@ class TestCacheInvalidation:
         from mempalace import mcp_server
 
         # Make _get_collection always return None
-        monkeypatch.setattr(mcp_server, "_get_collection", lambda create=False: None)
+        monkeypatch.setattr(
+            mcp_server,
+            "_get_collection",
+            lambda create=False, with_embedding=True: None,
+        )
 
         result = mcp_server.tool_reconnect()
         assert result["success"] is False

@@ -49,6 +49,7 @@ import hashlib  # noqa: E402
 import time  # noqa: E402
 from datetime import date, datetime  # noqa: E402
 from pathlib import Path  # noqa: E402
+from typing import Optional  # noqa: E402
 
 from .config import (  # noqa: E402
     MempalaceConfig,
@@ -58,6 +59,11 @@ from .config import (  # noqa: E402
 )
 from .version import __version__  # noqa: E402
 from chromadb.errors import NotFoundError as _ChromaNotFoundError  # noqa: E402
+
+try:  # noqa: E402
+    from chromadb.errors import InvalidCollectionException as _ChromaInvalidCollectionError
+except ImportError:  # pragma: no cover - older chromadb versions
+    _ChromaInvalidCollectionError = _ChromaNotFoundError
 
 from .backends.chroma import (  # noqa: E402
     ChromaBackend,
@@ -128,7 +134,7 @@ _vector_disabled_reason = ""
 # Optional[dict] (not ``dict | None``) keeps Python 3.9 import-time
 # parsing happy — PEP 604 unions in annotations only became unconditional
 # at module-eval time in 3.10.
-_vector_capacity_status = None  # type: Optional[dict]
+_vector_capacity_status: Optional[dict] = None
 
 
 def _refresh_vector_disabled_flag() -> None:
@@ -273,7 +279,7 @@ def _get_client():
     return _client_cache
 
 
-def _get_collection(create=False):
+def _get_collection(create=False, with_embedding=True):
     """Return the ChromaDB collection, caching the client between calls."""
     global _collection_cache, _metadata_cache, _metadata_cache_time
     try:
@@ -295,8 +301,10 @@ def _get_collection(create=False):
         # zero-cost. Reuse the backend helper so the two call sites can't
         # drift on logging or fallback semantics.
         if create:
-            ef = ChromaBackend._resolve_embedding_function()
-            ef_kwargs = {"embedding_function": ef} if ef is not None else {}
+            ef_kwargs = {}
+            if with_embedding:
+                ef = ChromaBackend._resolve_embedding_function()
+                ef_kwargs = {"embedding_function": ef} if ef is not None else {}
             # hnsw:num_threads=1 disables ChromaDB's multi-threaded ParallelFor
             # HNSW insert path, which has a race in repairConnectionsForUpdate /
             # addPoint (see issues #974, #965). Set via metadata on fresh
@@ -311,7 +319,7 @@ def _get_collection(create=False):
             # collections, mirroring the backend-layer fix from #1262.
             try:
                 raw = client.get_collection(_config.collection_name, **ef_kwargs)
-            except _ChromaNotFoundError:
+            except (_ChromaNotFoundError, _ChromaInvalidCollectionError):
                 raw = client.create_collection(
                     _config.collection_name,
                     metadata={
@@ -326,8 +334,10 @@ def _get_collection(create=False):
             _metadata_cache = None
             _metadata_cache_time = 0
         elif _collection_cache is None:
-            ef = ChromaBackend._resolve_embedding_function()
-            ef_kwargs = {"embedding_function": ef} if ef is not None else {}
+            ef_kwargs = {}
+            if with_embedding:
+                ef = ChromaBackend._resolve_embedding_function()
+                ef_kwargs = {"embedding_function": ef} if ef is not None else {}
             raw = client.get_collection(_config.collection_name, **ef_kwargs)
             _pin_hnsw_threads(raw)
             _collection_cache = ChromaCollection(raw)
@@ -479,10 +489,11 @@ def tool_status():
     if _vector_disabled:
         return _tool_status_via_sqlite()
 
-    # Use create=True only when a palace DB already exists on disk -- this
-    # bootstraps the ChromaDB collection on a valid-but-empty palace without
-    # accidentally creating a palace in a non-existent directory (#830).
-    col = _get_collection(create=db_exists)
+    # Allow create=True only after ChromaDB has materialized the sqlite file.
+    # A plain configured directory is not yet a palace and should still report
+    # the historical "No palace found" error, while a cold-start DB with no
+    # mempalace_drawers collection should bootstrap cleanly (#830).
+    col = _get_collection(create=db_exists, with_embedding=False)
     if not col:
         return _no_palace()
     count = col.count()
@@ -496,13 +507,19 @@ def tool_status():
         "aaak_dialect": AAAK_SPEC,
     }
     try:
-        all_meta = _get_cached_metadata(col)
-        for m in all_meta:
-            m = m or {}
-            w = m.get("wing", "unknown")
-            r = m.get("room", "unknown")
-            wings[w] = wings.get(w, 0) + 1
-            rooms[r] = rooms.get(r, 0) + 1
+        if count > 10000:
+            logger.info(
+                f"Palace too large ({count} drawers) for full status scan. Returning count only."
+            )
+            result["note"] = "Palace too large for real-time wing/room breakdown."
+        else:
+            all_meta = _get_cached_metadata(col)
+            for m in all_meta:
+                m = m or {}
+                w = m.get("wing", "unknown")
+                r = m.get("room", "unknown")
+                wings[w] = wings.get(w, 0) + 1
+                rooms[r] = rooms.get(r, 0) + 1
     except Exception as e:
         logger.exception("tool_status metadata fetch failed")
         result["error"] = str(e)
@@ -661,9 +678,7 @@ def tool_search(
 
 
 def tool_check_duplicate(content: str, threshold: float = 0.9):
-    col = _get_collection()
-    if not col:
-        return _no_palace()
+    _refresh_vector_disabled_flag()
     if _vector_disabled:
         # Without a usable HNSW we can't compute cosine similarity for
         # near-duplicate detection. Report the limitation rather than
@@ -678,6 +693,9 @@ def tool_check_duplicate(content: str, threshold: float = 0.9):
                 "duplicate detection requires vector search; run `mempalace repair` to restore"
             ),
         }
+    col = _get_collection()
+    if not col:
+        return _no_palace()
     try:
         results = col.query(
             query_texts=[content],

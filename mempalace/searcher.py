@@ -23,6 +23,7 @@ from .palace import get_closets_collection, get_collection
 _CLOSET_DRAWER_REF_RE = re.compile(r"→([\w,]+)")
 
 logger = logging.getLogger("mempalace_mcp")
+_HNSW_RESULT_ERROR = "Probably ef or M is too small"
 
 
 class SearchError(Exception):
@@ -45,6 +46,31 @@ def _first_or_empty(results, key: str) -> list:
     if not outer:
         return []
     return outer[0] or []
+
+
+def _query_with_hnsw_fallback(col, **kwargs):
+    """Retry Chroma queries with a smaller ``n_results`` on HNSW over-ask errors.
+
+    Some filtered searches fail with:
+    ``Cannot return the results in a contigious 2D array. Probably ef or M is too small``
+    even though smaller ``n_results`` values succeed. This is an HNSW/chromadb
+    runtime edge case, not a bad query. We degrade gracefully instead of
+    surfacing a hard error to the caller.
+    """
+    requested = max(1, int(kwargs.get("n_results", 1)))
+    current = requested
+    while True:
+        try:
+            payload = dict(kwargs)
+            payload["n_results"] = current
+            return col.query(**payload), requested, current
+        except RuntimeError as exc:
+            if _HNSW_RESULT_ERROR not in str(exc) or current <= 1:
+                raise
+            if current <= 3:
+                current = 2 if current == 3 else 1
+            else:
+                current = max(2, current // 2)
 
 
 def _tokenize(text: str) -> list:
@@ -317,7 +343,7 @@ def search(query: str, palace_path: str, wing: str = None, room: str = None, n_r
         if where:
             kwargs["where"] = where
 
-        results = col.query(**kwargs)
+        results, requested, returned = _query_with_hnsw_fallback(col, **kwargs)
 
     except Exception as e:
         print(f"\n  Search error: {e}")
@@ -340,7 +366,7 @@ def search(query: str, palace_path: str, wing: str = None, room: str = None, n_r
     # `_hybrid_rank`; do the same here so CLI results match what agents
     # see via `mempalace_search`.
     hits = [
-        {"text": doc, "distance": float(dist), "metadata": meta or {}}
+        {"text": doc or "", "distance": float(dist), "metadata": meta or {}}
         for doc, meta, dist in zip(docs, metas, dists)
     ]
     hits = _hybrid_rank(hits, query)
@@ -352,6 +378,10 @@ def search(query: str, palace_path: str, wing: str = None, room: str = None, n_r
     if room:
         print(f"  Room: {room}")
     print(f"{'=' * 60}\n")
+    if returned != requested:
+        print(
+            f"  Note: search fell back from top-{requested} to top-{returned} due to local HNSW limits.\n"
+        )
 
     for i, hit in enumerate(hits, 1):
         vec_sim = round(max(0.0, 1 - hit["distance"]), 3)
@@ -486,7 +516,10 @@ def _bm25_only_via_sqlite(
                 "filters": {"wing": wing, "room": room},
                 "total_before_filter": 0,
                 "results": [],
-                "fallback": "bm25_only_via_sqlite",
+                "fallback": {
+                    "mode": "bm25_only_via_sqlite",
+                    "reason": "no_sqlite_candidates",
+                },
             }
 
         placeholders = ",".join(["?"] * len(candidate_ids))
@@ -564,8 +597,10 @@ def _bm25_only_via_sqlite(
         "filters": {"wing": wing, "room": room},
         "total_before_filter": len(candidates),
         "results": hits,
-        "fallback": "bm25_only_via_sqlite",
-        "fallback_reason": "vector_search_disabled",
+        "fallback": {
+            "mode": "bm25_only_via_sqlite",
+            "reason": "vector_search_disabled",
+        },
     }
 
 
@@ -767,12 +802,16 @@ def search_memories(
         }
         if where:
             dkwargs["where"] = where
-        drawer_results = drawers_col.query(**dkwargs)
+        drawer_results, drawer_requested, drawer_returned = _query_with_hnsw_fallback(
+            drawers_col, **dkwargs
+        )
     except Exception as e:
         return {"error": f"Search error: {e}"}
 
     # Gather closet hits (best-per-source) to build a boost lookup.
     closet_boost_by_source: dict = {}  # source_file -> (rank, closet_dist, preview)
+    closet_requested = 0
+    closet_returned = 0
     try:
         closets_col = get_closets_collection(palace_path, create=False)
         ckwargs = {
@@ -782,7 +821,9 @@ def search_memories(
         }
         if where:
             ckwargs["where"] = where
-        closet_results = closets_col.query(**ckwargs)
+        closet_results, closet_requested, closet_returned = _query_with_hnsw_fallback(
+            closets_col, **ckwargs
+        )
         for rank, (cdoc, cmeta, cdist) in enumerate(
             zip(
                 _first_or_empty(closet_results, "documents"),
@@ -940,4 +981,15 @@ def search_memories(
         "filters": {"wing": wing, "room": room},
         "total_before_filter": len(_first_or_empty(drawer_results, "documents")),
         "results": hits,
+        "fallback": {
+            "mode": (
+                "hnsw_result_retry"
+                if drawer_requested != drawer_returned or closet_requested != closet_returned
+                else "none"
+            ),
+            "drawer_n_results_requested": drawer_requested,
+            "drawer_n_results_used": drawer_returned,
+            "closet_n_results_requested": closet_requested,
+            "closet_n_results_used": closet_returned,
+        },
     }
