@@ -21,6 +21,11 @@ This file is the durable local index for active `mempalace` issues.
 
 ## Recently Completed
 
+- [#10 - Install git-toolkit secrets filter and pre-commit hooks from monthly health](https://github.com/iMelki/mempalace/issues/10)
+  - 2026-06-23: repaired the local git-toolkit hook cache path by reinstalling
+    the secrets filter and commit hooks, added the baseline deep-scan ignore
+    file, and verified the repo-health audit reports `grade=OK`, `warn=0`,
+    `fail=0`.
 - Markdown link validation baseline added on 2026-05-12.
   - Added `scripts/check-markdown-links.ps1`, wired it into `.pre-commit-config.yaml`, and documented the docs check in `CONTRIBUTING.md`.
 - [#1 - Adopt projects-ops repo bootstrap governance baseline](https://github.com/iMelki/mempalace/issues/1)

@@ -10,6 +10,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Bug Fixes
 
+- **Local hook governance.** Reinstalled the git-toolkit secrets filter and
+  commit hooks, added the baseline `.git-secrets-ignore` deep-scan exclusions,
+  and verified the governance audit is clean. (#10)
 - **Repo baseline hygiene.** Added tracked `.gitattributes` secrets-filter
   rules and local `.git-secrets.json` ignore coverage so downstream repos and
   operator audits stop flagging the MemPalace checkout as governance-drifted.
