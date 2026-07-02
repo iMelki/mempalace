@@ -372,6 +372,73 @@ def test_status_missing_palace_does_not_create_empty_collection(tmp_path, capsys
     assert not palace_path.exists()
 
 
+def test_status_reads_sqlite_counts_without_opening_collection(tmp_path, capsys):
+    """status should survive a damaged/quarantined HNSW segment.
+
+    The command only needs wing/room counts, so it can read the Chroma SQLite
+    metadata tables directly instead of opening the native vector collection.
+    """
+    import sqlite3
+    from unittest.mock import patch
+
+    palace_path = tmp_path / "palace"
+    palace_path.mkdir()
+    conn = sqlite3.connect(palace_path / "chroma.sqlite3")
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE collections (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL
+            );
+            CREATE TABLE segments (
+                id TEXT PRIMARY KEY,
+                type TEXT NOT NULL,
+                scope TEXT NOT NULL,
+                collection TEXT NOT NULL
+            );
+            CREATE TABLE embeddings (
+                id INTEGER PRIMARY KEY,
+                segment_id TEXT NOT NULL,
+                embedding_id TEXT NOT NULL,
+                seq_id BLOB NOT NULL,
+                created_at TIMESTAMP
+            );
+            CREATE TABLE embedding_metadata (
+                id INTEGER,
+                key TEXT NOT NULL,
+                string_value TEXT,
+                int_value INTEGER,
+                float_value REAL,
+                bool_value INTEGER,
+                PRIMARY KEY (id, key)
+            );
+            INSERT INTO collections (id, name) VALUES ('c1', 'mempalace_drawers');
+            INSERT INTO segments (id, type, scope, collection)
+                VALUES ('s1', 'urn:chroma:segment/metadata/sqlite', 'METADATA', 'c1');
+            INSERT INTO embeddings (id, segment_id, embedding_id, seq_id)
+                VALUES (1, 's1', 'drawer-1', x'0001');
+            INSERT INTO embeddings (id, segment_id, embedding_id, seq_id)
+                VALUES (2, 's1', 'drawer-2', x'0002');
+            INSERT INTO embedding_metadata (id, key, string_value)
+                VALUES (1, 'wing', 'agents');
+            INSERT INTO embedding_metadata (id, key, string_value)
+                VALUES (1, 'room', 'general');
+            """
+        )
+    finally:
+        conn.close()
+
+    with patch("mempalace.miner.get_collection", side_effect=AssertionError("should not open")):
+        status(str(palace_path))
+
+    out = capsys.readouterr().out
+    assert "MemPalace Status — 2 drawers" in out
+    assert "WING: agents" in out
+    assert "ROOM: general" in out
+    assert "WING: ?" in out
+
+
 def test_status_handles_none_metadata_without_crash(tmp_path, capsys):
     """status must not crash when col.get returns a None entry in metadatas.
 

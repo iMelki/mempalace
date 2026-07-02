@@ -10,6 +10,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Bug Fixes
 
+- **`mempalace status` no longer opens the crash-prone drawers HNSW segment just
+  to print counts.** The status path now reads collection and room totals
+  directly from `chroma.sqlite3` first, falling back to Chroma pagination only
+  when SQLite metadata is unavailable. This keeps local status/reporting usable
+  after a persisted HNSW segment is quarantined for a Chroma native crash; full
+  historical vector rebuild is tracked separately in #12.
 - **Local hook governance.** Reinstalled the git-toolkit secrets filter and
   commit hooks, added the baseline `.git-secrets-ignore` deep-scan exclusions,
   and verified the governance audit is clean. (#10)

@@ -1,10 +1,16 @@
 # MemPalace Open Tasks
 
-Last updated: 2026-06-23
+Last updated: 2026-07-02
 
 This file is the durable local index for active `mempalace` issues.
 
 ## Active Issues
+
+- [#12 - Rebuild quarantined drawers HNSW segment after local crash repair](https://github.com/iMelki/mempalace/issues/12)
+  - Goal: Rebuild or replay the quarantined drawers vector segment from the
+    2026-07-02 local repair, then verify `mempalace status`,
+    `repair-status`, and representative search behavior before removing any
+    preserved segment directories.
 
 - [#5 - Use relevant skills for market research, competitor analysis, and monetization planning](https://github.com/iMelki/mempalace/issues/5)
   - Goal: Use the relevant shared skills to map competitors, ICPs, monetization options, and positioning for the user-owned MemPalace fork.
