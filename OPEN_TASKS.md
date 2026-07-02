@@ -6,6 +6,15 @@ This file is the durable local index for active `mempalace` issues.
 
 ## Active Issues
 
+- [#13 - Chroma HNSW segment diverged from SQLite drawer metadata](https://github.com/iMelki/mempalace/issues/13)
+  - Goal: make the July 2026 Chroma SQLite/HNSW divergence impossible to miss,
+    keep vector fallback mode explicit in MemSys, and complete a supervised
+    replay/rebuild only under an approved maintenance window.
+  - Status: Bug report filed after live evidence showed drawers
+    `sqlite=820,220` and `hnsw=3,168`. The repair CLI now detects divergence,
+    supports SQLite-only dry-run, and refuses large replay without
+    `--confirm-large-reembed`; full vector replay remains tracked through #12.
+
 - [#12 - Rebuild quarantined drawers HNSW segment after local crash repair](https://github.com/iMelki/mempalace/issues/12)
   - Goal: Rebuild or replay the quarantined drawers vector segment from the
     2026-07-02 local repair, then verify `mempalace status`,
