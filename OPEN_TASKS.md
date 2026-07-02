@@ -57,6 +57,15 @@ This file is the durable local index for active `mempalace` issues.
     `UnknownIssuer`; focused tests passed through the globally installed
     Python 3.13 `pytest.exe`.
 
+- [#17 - Markdown link hook has confusing manual-scope failures](https://github.com/iMelki/mempalace/issues/17)
+  - Goal: make manual focused pre-commit verification match operator intent and
+    keep full-repo Markdown link validation either clean or explicitly
+    baselined.
+  - Status: bug report filed after `pre-commit run --files ...` failed by
+    scanning unrelated tracked Markdown when nothing was staged. The normal
+    staged hook passed for the SQLite replay commit, so this is a verification
+    ergonomics/docs-baseline issue rather than a blocker for #16.
+
 - [#5 - Use relevant skills for market research, competitor analysis, and monetization planning](https://github.com/iMelki/mempalace/issues/5)
   - Goal: Use the relevant shared skills to map competitors, ICPs, monetization options, and positioning for the user-owned MemPalace fork.
 
