@@ -675,14 +675,29 @@ def cmd_repair(args):
     if getattr(args, "mode", "legacy") == "sqlite-replay":
         from .repair import repair_sqlite_replay
 
-        repair_sqlite_replay(
-            palace_path,
-            dry_run=getattr(args, "dry_run", False),
-            assume_yes=getattr(args, "yes", False),
-            backup=getattr(args, "backup", True),
-            batch_size=getattr(args, "batch_size", 1000),
-            confirm_large_reembed=getattr(args, "confirm_large_reembed", False),
-        )
+        kwargs = {
+            "dry_run": getattr(args, "dry_run", False),
+            "assume_yes": getattr(args, "yes", False),
+            "backup": getattr(args, "backup", True),
+            "batch_size": getattr(args, "batch_size", 1000),
+            "confirm_large_reembed": getattr(args, "confirm_large_reembed", False),
+            "max_rows": getattr(args, "max_rows", None),
+            "max_batches": getattr(args, "max_batches", None),
+            "artifact_dir": getattr(args, "artifact_dir", None),
+        }
+        if getattr(args, "json", False):
+            import contextlib
+            import io
+            import json
+
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                result = repair_sqlite_replay(palace_path, **kwargs)
+            payload = dict(result)
+            payload["stdout"] = stdout.getvalue().splitlines()
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        else:
+            repair_sqlite_replay(palace_path, **kwargs)
         return
 
     db_path = os.path.join(palace_path, "chroma.sqlite3")
@@ -1240,6 +1255,30 @@ def main():
         help="Replay batch size for --mode sqlite-replay (default: 1000)",
     )
     p_repair.add_argument(
+        "--max-rows",
+        type=int,
+        default=None,
+        help=(
+            "Abort --mode sqlite-replay before mutation when planned replay rows exceed this bound"
+        ),
+    )
+    p_repair.add_argument(
+        "--max-batches",
+        type=int,
+        default=None,
+        help=(
+            "Abort --mode sqlite-replay before mutation when planned replay batches exceed this bound"
+        ),
+    )
+    p_repair.add_argument(
+        "--artifact-dir",
+        default=None,
+        help=(
+            "Directory for sqlite-replay result.json and events.jsonl "
+            "(default: <palace>/.mempalace/repair-runs/<run>)"
+        ),
+    )
+    p_repair.add_argument(
         "--confirm-large-reembed",
         action="store_true",
         help=(
@@ -1251,6 +1290,11 @@ def main():
         "--dry-run",
         action="store_true",
         help="Print plan and exit without mutation (--mode sqlite-replay or max-seq-id)",
+    )
+    p_repair.add_argument(
+        "--json",
+        action="store_true",
+        help="Print sqlite-replay result JSON (human output is captured under stdout)",
     )
 
     # repair-status — read-only HNSW capacity health check (#1222)

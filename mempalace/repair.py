@@ -30,17 +30,61 @@ Usage (from CLI):
 """
 
 import argparse
+import json
 import os
 import pickle
 import shutil
 import sqlite3
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Iterator, Optional
 
 COLLECTION_NAME = "mempalace_drawers"
 ChromaBackend = None
 hnsw_capacity_status = None
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _write_json_file(path: str, payload: dict[str, Any]) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, sort_keys=True)
+        f.write("\n")
+
+
+def _append_jsonl(path: str, payload: dict[str, Any]) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(payload, sort_keys=True))
+        f.write("\n")
+
+
+def _sqlite_replay_artifact_paths(
+    palace_path: str, *, artifact_dir: Optional[str], run_id: str
+) -> dict[str, str]:
+    if artifact_dir:
+        resolved_dir = os.path.abspath(os.path.expanduser(artifact_dir))
+    else:
+        resolved_dir = os.path.join(
+            palace_path,
+            ".mempalace",
+            "repair-runs",
+            f"sqlite-replay-{run_id}",
+        )
+    return {
+        "artifact_dir": resolved_dir,
+        "result_json": os.path.join(resolved_dir, "result.json"),
+        "events_log": os.path.join(resolved_dir, "events.jsonl"),
+    }
+
+
+def _planned_batches(count: int, batch_size: int) -> int:
+    if count <= 0:
+        return 0
+    return (count + batch_size - 1) // batch_size
 
 
 def _get_chroma_backend_cls():
@@ -684,7 +728,7 @@ def iter_drawers_from_sqlite(
         conn.close()
 
 
-def repair_sqlite_replay(
+def repair_sqlite_replay(  # noqa: C901
     palace_path: str,
     *,
     dry_run: bool = False,
@@ -692,6 +736,9 @@ def repair_sqlite_replay(
     backup: bool = True,
     batch_size: int = 1000,
     confirm_large_reembed: bool = False,
+    max_rows: Optional[int] = None,
+    max_batches: Optional[int] = None,
+    artifact_dir: Optional[str] = None,
     collection_name: str = COLLECTION_NAME,
 ) -> dict[str, Any]:
     """Rebuild the drawers vector index from SQLite metadata rows.
@@ -706,34 +753,116 @@ def repair_sqlite_replay(
 
     palace_path = os.path.abspath(os.path.expanduser(palace_path))
     db_path = os.path.join(palace_path, "chroma.sqlite3")
+    started_monotonic = time.time()
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     result: dict[str, Any] = {
+        "operation": "sqlite-replay",
+        "run_id": run_id,
         "palace_path": palace_path,
+        "source_collection": collection_name,
+        "target_collection": collection_name,
         "collection": collection_name,
         "dry_run": dry_run,
         "aborted": False,
+        "status": "running",
+        "started_at": _utc_now_iso(),
+        "finished_at": None,
+        "duration_seconds": None,
         "source_count": 0,
         "document_count": 0,
         "document_count_exact": True,
+        "planned_reembed_count": 0,
+        "planned_batches": 0,
         "replayed": 0,
+        "batches_replayed": 0,
         "backup": None,
+        "backup_requested": backup,
+        "backup_note": None,
+        "source_snapshot": None,
+        "artifact_dir": None,
+        "result_json": None,
+        "events_log": None,
+        "max_rows": max_rows,
+        "max_batches": max_batches,
+        "batch_size": batch_size,
+        "bounded": max_rows is not None or max_batches is not None,
+        "partial_live_collection": False,
+        "live_collection_state": "unchanged",
+        "rollback_attempted": False,
+        "rollback_succeeded": False,
+        "verified_count": None,
+        "resume_supported": False,
+        "warnings": [],
+        "events": [],
     }
+
+    def ensure_artifacts() -> None:
+        if result["artifact_dir"]:
+            return
+        paths = _sqlite_replay_artifact_paths(palace_path, artifact_dir=artifact_dir, run_id=run_id)
+        result.update(paths)
+        os.makedirs(paths["artifact_dir"], exist_ok=True)
+
+    def write_result() -> None:
+        result_json = result.get("result_json")
+        if result_json:
+            _write_json_file(str(result_json), result)
+
+    def event(name: str, **fields: Any) -> None:
+        payload = {"ts": _utc_now_iso(), "event": name, **fields}
+        result["events"].append(payload)
+        events_log = result.get("events_log")
+        if events_log:
+            _append_jsonl(str(events_log), payload)
+
+    def finish(
+        status: str,
+        *,
+        reason: Optional[str] = None,
+        aborted: Optional[bool] = None,
+        error: Optional[str] = None,
+    ) -> dict[str, Any]:
+        result["status"] = status
+        if reason is not None:
+            result["reason"] = reason
+        if aborted is not None:
+            result["aborted"] = aborted
+        if error is not None:
+            result["error"] = error
+        result["finished_at"] = _utc_now_iso()
+        result["duration_seconds"] = round(max(time.time() - started_monotonic, 0), 3)
+        write_result()
+        return result
 
     print(f"\n{'=' * 55}")
     print("  MemPalace Repair — SQLite Replay")
     print(f"{'=' * 55}\n")
     print(f"  Palace:     {palace_path}")
-    print(f"  Collection: {collection_name}")
+    print(f"  Source:     {collection_name}")
+    print(f"  Target:     {collection_name}")
+
+    if batch_size < 1:
+        raise ValueError("batch_size must be positive")
+    if max_rows is not None and max_rows < 1:
+        raise ValueError("max_rows must be positive")
+    if max_batches is not None and max_batches < 1:
+        raise ValueError("max_batches must be positive")
 
     if not os.path.isdir(palace_path):
         print(f"  No palace found at {palace_path}")
-        result["aborted"] = True
-        result["reason"] = "palace-missing"
-        return result
+        if artifact_dir:
+            ensure_artifacts()
+            event("aborted", reason="palace-missing")
+        return finish("aborted", reason="palace-missing", aborted=True)
     if not contains_palace_database(palace_path):
         print(f"  No palace database found at {db_path}")
-        result["aborted"] = True
-        result["reason"] = "db-missing"
-        return result
+        if artifact_dir:
+            ensure_artifacts()
+            event("aborted", reason="db-missing")
+        return finish("aborted", reason="db-missing", aborted=True)
+
+    ensure_artifacts()
+    event("started")
 
     source_count = _sqlite_collection_count(db_path, collection_name)
     skip_exact_document_count = source_count > SQLITE_REPLAY_DRY_RUN_EXACT_DOC_LIMIT and (
@@ -746,6 +875,17 @@ def repair_sqlite_replay(
         document_count = _sqlite_document_count(db_path, collection_name)
     result["source_count"] = source_count
     result["document_count"] = document_count
+    planned_reembed_count = document_count if result["document_count_exact"] else source_count
+    result["planned_reembed_count"] = planned_reembed_count
+    result["planned_batches"] = _planned_batches(planned_reembed_count, batch_size)
+    event(
+        "planned",
+        source_count=source_count,
+        document_count=document_count,
+        document_count_exact=result["document_count_exact"],
+        planned_reembed_count=planned_reembed_count,
+        planned_batches=result["planned_batches"],
+    )
     print(f"  SQLite rows: {source_count:,}")
     if result["document_count_exact"]:
         print(f"  Documents:   {document_count:,}")
@@ -754,30 +894,64 @@ def repair_sqlite_replay(
 
     if source_count == 0:
         print("  Nothing to replay.")
-        return result
+        event("completed", reason="empty-source")
+        return finish("completed", reason="empty-source")
     if document_count < source_count:
         missing = source_count - document_count
         print(f"  Warning: {missing:,} row(s) have no document payload and will be skipped.")
+        result["warnings"].append(f"{missing} row(s) have no document payload and will be skipped")
+
+    if max_rows is not None and planned_reembed_count > max_rows:
+        print()
+        print(
+            f"  ABORT: replay would re-embed {planned_reembed_count:,} documents, "
+            f"above --max-rows {max_rows:,}."
+        )
+        print("  No collection was deleted or rewritten.")
+        event(
+            "aborted",
+            reason="max-rows-exceeded",
+            planned_reembed_count=planned_reembed_count,
+            max_rows=max_rows,
+        )
+        print(f"\n{'=' * 55}\n")
+        return finish("aborted", reason="max-rows-exceeded", aborted=True)
+
+    if max_batches is not None and result["planned_batches"] > max_batches:
+        print()
+        print(
+            f"  ABORT: replay would need {result['planned_batches']:,} batches, "
+            f"above --max-batches {max_batches:,}."
+        )
+        print("  No collection was deleted or rewritten.")
+        event(
+            "aborted",
+            reason="max-batches-exceeded",
+            planned_batches=result["planned_batches"],
+            max_batches=max_batches,
+        )
+        print(f"\n{'=' * 55}\n")
+        return finish("aborted", reason="max-batches-exceeded", aborted=True)
 
     if dry_run:
-        print("\n  DRY RUN — no collection was deleted or rewritten.")
+        print("\n  DRY RUN - no collection was deleted or rewritten.")
         if result["document_count_exact"]:
             replay_label = f"{document_count:,}"
         else:
             replay_label = f"up to {source_count:,}"
         print(f"  Would replay {replay_label} drawers from SQLite in batches of {batch_size:,}.")
+        print(f"  Planned batches: {result['planned_batches']:,}")
+        print(f"  Artifacts: {result['artifact_dir']}")
         if source_count > SQLITE_REPLAY_LARGE_REEMBED_LIMIT:
             print(
                 "  Note: non-dry-run replay currently re-embeds documents; "
                 "large palaces require --confirm-large-reembed."
             )
+        event("dry-run")
         print(f"\n{'=' * 55}\n")
-        return result
+        return finish("dry-run")
 
-    planned_reembed_count = document_count if result["document_count_exact"] else source_count
     if planned_reembed_count > SQLITE_REPLAY_LARGE_REEMBED_LIMIT and not confirm_large_reembed:
-        result["aborted"] = True
-        result["reason"] = "large-reembed-not-confirmed"
         print()
         print(
             f"  ABORT: replay would re-embed up to {planned_reembed_count:,} documents. "
@@ -787,23 +961,37 @@ def repair_sqlite_replay(
         print(
             "  Re-run with --confirm-large-reembed only when a long rebuild window is acceptable."
         )
+        event(
+            "aborted",
+            reason="large-reembed-not-confirmed",
+            planned_reembed_count=planned_reembed_count,
+        )
         print(f"\n{'=' * 55}\n")
-        return result
+        return finish("aborted", reason="large-reembed-not-confirmed", aborted=True)
 
     if not confirm_destructive_action(
         "Repair from SQLite replay", palace_path, assume_yes=assume_yes
     ):
-        result["aborted"] = True
-        result["reason"] = "user-aborted"
-        return result
+        event("aborted", reason="user-aborted")
+        return finish("aborted", reason="user-aborted", aborted=True)
 
-    source_db = db_path
-    if backup:
-        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        source_db = os.path.join(palace_path, f"chroma.sqlite3.sqlite-replay-source-{timestamp}")
-        print(f"  Snapshot: {source_db}")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%fZ")
+    source_db = os.path.join(palace_path, f"chroma.sqlite3.sqlite-replay-source-{timestamp}")
+    print(f"  Snapshot: {source_db}")
+    if not backup:
+        warning = "--no-backup requested; source snapshot is still required for safe replay"
+        result["warnings"].append(warning)
+        result["backup_note"] = warning
+        print(f"  Warning: {warning}.")
+    try:
         shutil.copy2(db_path, source_db)
-        result["backup"] = source_db
+    except Exception as exc:
+        print(f"  ERROR creating source snapshot: {exc}")
+        event("failed", reason="snapshot-failed", error=str(exc))
+        return finish("failed", reason="snapshot-failed", aborted=True, error=str(exc))
+    result["backup"] = source_db
+    result["source_snapshot"] = source_db
+    event("snapshot-created", source_snapshot=source_db)
 
     _close_chroma_handles(palace_path)
     backend = _get_chroma_backend_cls()()
@@ -811,15 +999,27 @@ def repair_sqlite_replay(
     try:
         backend.delete_collection(palace_path, collection_name)
     except Exception as exc:
-        result["aborted"] = True
-        result["reason"] = "delete-failed"
-        result["error"] = str(exc)
         print(f"  ERROR deleting collection: {exc}")
         print("  No replay performed; source snapshot is intact.")
-        return result
+        event("failed", reason="delete-failed", error=str(exc))
+        return finish("failed", reason="delete-failed", aborted=True, error=str(exc))
+    result["live_collection_state"] = "deleted"
+    event("collection-deleted")
 
-    new_col = backend.create_collection(palace_path, collection_name)
+    try:
+        new_col = backend.create_collection(palace_path, collection_name)
+    except Exception as exc:
+        result["partial_live_collection"] = True
+        result["live_collection_state"] = "absent-or-partial"
+        print(f"  ERROR creating replacement collection: {exc}")
+        print(f"  Recovery source remains at: {source_db}")
+        event("failed", reason="create-failed", error=str(exc))
+        return finish("failed", reason="create-failed", aborted=True, error=str(exc))
+    result["live_collection_state"] = "empty-replacement"
+    event("collection-created")
+
     replayed = 0
+    batches_replayed = 0
     t0 = time.time()
     try:
         for batch in iter_drawers_from_sqlite(
@@ -831,28 +1031,61 @@ def repair_sqlite_replay(
                 metadatas=[record["metadata"] for record in batch],
             )
             replayed += len(batch)
+            batches_replayed += 1
+            result["replayed"] = replayed
+            result["batches_replayed"] = batches_replayed
             elapsed = max(time.time() - t0, 0.001)
             rate = replayed / elapsed
-            eta = (document_count - replayed) / max(rate, 0.001)
+            eta = (planned_reembed_count - replayed) / max(rate, 0.001)
+            event(
+                "batch-replayed",
+                batch_rows=len(batch),
+                replayed=replayed,
+                batches_replayed=batches_replayed,
+                rate_per_second=round(rate, 3),
+                eta_seconds=round(max(eta, 0), 3),
+            )
             print(
-                f"  Replayed {replayed:,}/{document_count:,} drawers "
+                f"  Replayed {replayed:,}/{planned_reembed_count:,} drawers "
                 f"({rate:.1f}/s, eta {eta / 60:.1f}m)..."
             )
     except Exception as exc:
-        result["aborted"] = True
-        result["reason"] = "replay-failed"
-        result["error"] = str(exc)
-        result["replayed"] = replayed
+        result["partial_live_collection"] = True
+        result["live_collection_state"] = "partial"
         print(f"\n  ERROR during SQLite replay after {replayed:,} drawers: {exc}")
         print(f"  Recovery source remains at: {source_db}")
-        raise
+        event("failed", reason="replay-failed", error=str(exc), replayed=replayed)
+        return finish("failed", reason="replay-failed", aborted=True, error=str(exc))
 
     result["replayed"] = replayed
+    result["batches_replayed"] = batches_replayed
+    result["live_collection_state"] = "replayed"
+
+    try:
+        verified_count = new_col.count()
+    except Exception as exc:
+        result["verification_error"] = str(exc)
+        event("verification-unavailable", error=str(exc))
+    else:
+        if isinstance(verified_count, int):
+            result["verified_count"] = verified_count
+            event("verified", verified_count=verified_count)
+            if verified_count != replayed:
+                result["partial_live_collection"] = True
+                result["live_collection_state"] = "verification-mismatch"
+                print(
+                    f"  ERROR: verification count {verified_count:,} does not match "
+                    f"replayed drawers {replayed:,}."
+                )
+                return finish("failed", reason="verification-mismatch", aborted=True)
+
     print(f"\n  SQLite replay complete. {replayed:,} drawers rebuilt.")
     if result["backup"]:
         print(f"  Source snapshot: {result['backup']}")
+    print(f"  Artifacts: {result['artifact_dir']}")
+    event("completed", replayed=replayed, batches_replayed=batches_replayed)
     print(f"\n{'=' * 55}\n")
-    return result
+    return finish("completed")
 
 
 def rebuild_index(palace_path=None, confirm_truncation_ok: bool = False):

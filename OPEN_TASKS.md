@@ -35,17 +35,21 @@ This file is the durable local index for active `mempalace` issues.
   - 2026-07-03 update: host pressure preflight was normal
     (`memoryUsedPct=45.48`, `shouldProceed=true`), but no replay mutation was
     run because the current CLI still lacks a max-row/max-batch maintenance
-    bound or checkpoint/resume. The next safe implementation step is #15.
+    bound or checkpoint/resume. The next safe implementation step is #16.
 
-- [#15 - SQLite replay lacks bounded window, checkpoint, and structured repair artifacts](https://github.com/iMelki/mempalace/issues/15)
+- [#16 - SQLite replay lacks bounded window, checkpoint, and structured repair artifacts](https://github.com/iMelki/mempalace/issues/16)
   - Goal: add operator-grade controls before replaying the full 820,220-row
     drawers segment: max-row/max-batch limits, durable logs/JSON, checkpoint or
     explicit no-resume safety, and rollback docs.
   - Status: bug report filed from the #12/#13 preflight. Current
     `--batch-size` controls only the per-upsert chunk size and is not a bounded
     replay window.
+  - 2026-07-03 update: implementation in progress adds pre-mutation
+    `--max-rows` / `--max-batches` gates, `result.json` + `events.jsonl`
+    artifacts, explicit `resume_supported=false`, and a forced immutable source
+    snapshot even when callers pass `--no-backup`.
 
-- [#16 - Local test bootstrap depends on fragile PATH and PyPI TLS state](https://github.com/iMelki/mempalace/issues/16)
+- [#15 - Local test bootstrap depends on fragile PATH and PyPI TLS state](https://github.com/iMelki/mempalace/issues/15)
   - Goal: make focused MemPalace tests runnable without guessing which Python
     is on `PATH` or relying on a fresh PyPI download during repair work.
   - Status: bug report filed after `python -m pytest` resolved to a lean Hermes

@@ -19,6 +19,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   `--confirm-large-reembed` is explicitly supplied. The focused repair tests
   also run with pytest's cache provider disabled so a broken local
   `.pytest_cache` ACL cannot mask repair-path regressions.
+- **SQLite replay now has operator-grade bounds and artifacts.** `repair --mode
+  sqlite-replay` accepts `--max-rows`, `--max-batches`, `--artifact-dir`, and
+  `--json`; bounds abort before any Chroma collection is opened or deleted,
+  every valid run writes `result.json` plus `events.jsonl`, and non-dry replay
+  always reads from an immutable source snapshot even if `--no-backup` is
+  supplied. Partial resume is explicitly unsupported (`resume_supported=false`)
+  until a real checkpointed replay is implemented. (#16)
 - **`mempalace repair-status` is now dependency-light too.** The HNSW capacity
   probe reads SQLite plus `index_metadata.pickle` locally instead of importing
   the Chroma backend package, so status still reports drawer/closet divergence
@@ -55,8 +62,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   during the automation dry run.
 - **Repair CLI reference caught up with the SQLite replay workflow.** The CLI
   docs now show `repair-status`, `repair --mode sqlite-replay --dry-run`,
-  `--batch-size`, and `--confirm-large-reembed`, with the caveat that
-  `--batch-size` is not a total replay limit. (#15)
+  `--batch-size`, `--max-rows`, `--max-batches`, `--artifact-dir`, `--json`,
+  and `--confirm-large-reembed`, with the caveat that `--batch-size` is not a
+  total replay limit. (#16)
 
 ---
 

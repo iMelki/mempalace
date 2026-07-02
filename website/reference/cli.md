@@ -148,8 +148,8 @@ Rebuild palace vector index from stored data. Fixes segfaults after database cor
 
 ```bash
 mempalace repair
-mempalace repair --mode sqlite-replay --dry-run --batch-size 1000
-mempalace repair --mode sqlite-replay --batch-size 1000 --backup --yes --confirm-large-reembed
+mempalace repair --mode sqlite-replay --dry-run --batch-size 1000 --max-rows 100000
+mempalace repair --mode sqlite-replay --batch-size 1000 --max-batches 820 --yes --confirm-large-reembed
 ```
 
 | Option | Description |
@@ -158,12 +158,18 @@ mempalace repair --mode sqlite-replay --batch-size 1000 --backup --yes --confirm
 | `--mode sqlite-replay` | Rebuild the drawers collection from `chroma.sqlite3` metadata rows. |
 | `--dry-run` | Print the replay plan without deleting or rewriting the collection. |
 | `--batch-size` | Per-upsert replay chunk size. This is not a total row limit or bounded maintenance window. |
-| `--backup` / `--no-backup` | Copy the source SQLite database before mutation. Backup is on by default. |
+| `--max-rows` | Abort before mutation when the planned replay would exceed this many document rows. |
+| `--max-batches` | Abort before mutation when the planned replay would exceed this many replay batches. |
+| `--artifact-dir` | Write `result.json` and `events.jsonl` to an explicit directory. Defaults to `<palace>/.mempalace/repair-runs/<run>`. |
+| `--json` | Print machine-readable run output; human console lines are captured under `stdout`. |
+| `--backup` / `--no-backup` | Historical toggle. SQLite replay still creates an immutable source snapshot before mutation, even when `--no-backup` is supplied, because replay cannot safely read from the live DB after deleting the target collection. |
 | `--confirm-large-reembed` | Required when SQLite replay would re-embed more than 100,000 documents. This can run for hours. |
 
 For diverged HNSW incidents, run `repair-status` and the SQLite replay dry-run
 first. Schedule the non-dry replay only after a full palace backup and a quiet
-maintenance window.
+maintenance window. `--max-rows` and `--max-batches` are preflight gates, not
+partial replay controls: if either bound is lower than the planned full replay,
+the command aborts before deleting the target collection.
 
 ## `mempalace mcp`
 
