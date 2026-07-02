@@ -635,7 +635,7 @@ def cmd_migrate(args):
 
 
 def cmd_status(args):
-    from .miner import status
+    from .status import status
 
     palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
     status(palace_path=palace_path)

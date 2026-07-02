@@ -1,6 +1,6 @@
 # MemPalace Open Tasks
 
-Last updated: 2026-07-02
+Last updated: 2026-07-03
 
 This file is the durable local index for active `mempalace` issues.
 
@@ -14,6 +14,10 @@ This file is the durable local index for active `mempalace` issues.
     `sqlite=820,220` and `hnsw=3,168`. The repair CLI now detects divergence,
     supports SQLite-only dry-run, and refuses large replay without
     `--confirm-large-reembed`; full vector replay remains tracked through #12.
+  - 2026-07-03 update: post-reboot read-only proof still shows drawers
+    `sqlite=820,220`, `hnsw=3,168`, divergence `817,052`; closets remain within
+    tolerance (`sqlite=12,107`, `hnsw=11,826`). BM25 fallback remains the safe
+    path until the HNSW replay completes.
 
 - [#12 - Rebuild quarantined drawers HNSW segment after local crash repair](https://github.com/iMelki/mempalace/issues/12)
   - Goal: Rebuild or replay the quarantined drawers vector segment from the
@@ -28,6 +32,26 @@ This file is the durable local index for active `mempalace` issues.
     was restored, the partial collection was removed, and BM25 fallback remains
     the safe search path until an explicit `--confirm-large-reembed` window is
     scheduled.
+  - 2026-07-03 update: host pressure preflight was normal
+    (`memoryUsedPct=45.48`, `shouldProceed=true`), but no replay mutation was
+    run because the current CLI still lacks a max-row/max-batch maintenance
+    bound or checkpoint/resume. The next safe implementation step is #15.
+
+- [#15 - SQLite replay lacks bounded window, checkpoint, and structured repair artifacts](https://github.com/iMelki/mempalace/issues/15)
+  - Goal: add operator-grade controls before replaying the full 820,220-row
+    drawers segment: max-row/max-batch limits, durable logs/JSON, checkpoint or
+    explicit no-resume safety, and rollback docs.
+  - Status: bug report filed from the #12/#13 preflight. Current
+    `--batch-size` controls only the per-upsert chunk size and is not a bounded
+    replay window.
+
+- [#16 - Local test bootstrap depends on fragile PATH and PyPI TLS state](https://github.com/iMelki/mempalace/issues/16)
+  - Goal: make focused MemPalace tests runnable without guessing which Python
+    is on `PATH` or relying on a fresh PyPI download during repair work.
+  - Status: bug report filed after `python -m pytest` resolved to a lean Hermes
+    venv without pytest and `uv run` failed fetching `idna==3.11` with
+    `UnknownIssuer`; focused tests passed through the globally installed
+    Python 3.13 `pytest.exe`.
 
 - [#5 - Use relevant skills for market research, competitor analysis, and monetization planning](https://github.com/iMelki/mempalace/issues/5)
   - Goal: Use the relevant shared skills to map competitors, ICPs, monetization options, and positioning for the user-owned MemPalace fork.
@@ -43,6 +67,11 @@ This file is the durable local index for active `mempalace` issues.
   - Status: Open (preserved branch `agent/codex/mempalace-search-mcp-wip`).
 
 ## Recently Completed
+
+- [#14 - mempalace status imports Chroma before SQLite fallback in lean runtimes](https://github.com/iMelki/mempalace/issues/14)
+  - 2026-07-03: split CLI status into dependency-light `mempalace.status`,
+    added regression tests, and live-verified `python -m mempalace.cli status`
+    prints the 820,220-drawer SQLite status without importing `chromadb`.
 
 - [#10 - Install git-toolkit secrets filter and pre-commit hooks from monthly health](https://github.com/iMelki/mempalace/issues/10)
   - 2026-06-23: repaired the local git-toolkit hook cache path by reinstalling

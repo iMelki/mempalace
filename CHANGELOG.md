@@ -29,6 +29,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   when SQLite metadata is unavailable. This keeps local status/reporting usable
   after a persisted HNSW segment is quarantined for a Chroma native crash; full
   historical vector rebuild is tracked separately in #12.
+- **`mempalace status` no longer imports the mining/vector stack before the
+  SQLite-first fallback can run.** The CLI now routes status through a
+  dependency-light module, so lean local runtimes without `chromadb` can still
+  report SQLite drawer totals during a vector incident. The regression tests pin
+  both the lazy CLI import and the `METADATA`-segment ground-truth count. (#14)
 - **Pre-push tests no longer depend on Chroma's default ONNX model download.**
   The miner tests that open raw Chroma collections now use the repo's
   deterministic test embedding fixture, keeping the suite offline-safe when TLS
@@ -48,6 +53,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   basic JSON-LD, and a public `robots.txt` pointing at the sitemap. Build-output
   validation is tracked in #11 because local website dependencies were absent
   during the automation dry run.
+- **Repair CLI reference caught up with the SQLite replay workflow.** The CLI
+  docs now show `repair-status`, `repair --mode sqlite-replay --dry-run`,
+  `--batch-size`, and `--confirm-large-reembed`, with the caveat that
+  `--batch-size` is not a total replay limit. (#15)
 
 ---
 

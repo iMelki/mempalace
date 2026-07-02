@@ -30,22 +30,21 @@ from mempalace.cli import (
 def test_cmd_status_default_palace(mock_config_cls):
     mock_config_cls.return_value.palace_path = "/fake/palace"
     args = argparse.Namespace(palace=None)
-    mock_miner = MagicMock()
-    with patch.dict("sys.modules", {"mempalace.miner": mock_miner}):
-        cmd_status(args)
-        mock_miner.status.assert_called_once_with(palace_path="/fake/palace")
+    with patch("mempalace.status.status") as mock_status:
+        with patch.dict("sys.modules", {"mempalace.miner": None}):
+            cmd_status(args)
+    mock_status.assert_called_once_with(palace_path="/fake/palace")
 
 
 @patch("mempalace.cli.MempalaceConfig")
 def test_cmd_status_custom_palace(mock_config_cls):
     args = argparse.Namespace(palace="~/my_palace")
-    mock_miner = MagicMock()
-    with patch.dict("sys.modules", {"mempalace.miner": mock_miner}):
+    with patch("mempalace.status.status") as mock_status:
         cmd_status(args)
         import os
 
         expected = os.path.expanduser("~/my_palace")
-        mock_miner.status.assert_called_once_with(palace_path=expected)
+        mock_status.assert_called_once_with(palace_path=expected)
 
 
 # ── cmd_search ─────────────────────────────────────────────────────────

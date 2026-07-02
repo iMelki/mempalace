@@ -124,15 +124,46 @@ Show what's been filed — drawer count, wing/room breakdown.
 mempalace status
 ```
 
+`status` reads `chroma.sqlite3` first and falls back to the Chroma collection
+only when SQLite metadata is unavailable. This keeps status usable when the
+persisted HNSW vector segment is damaged, quarantined, or unavailable in a lean
+runtime.
+
+## `mempalace repair-status`
+
+Compare SQLite metadata counts with persisted HNSW element counts without
+opening a Chroma client.
+
+```bash
+mempalace repair-status
+```
+
+Use this before any repair. A large `DIVERGED` drawers result means vector
+search is missing drawers and `repair --mode sqlite-replay --dry-run` is the
+next safe command.
+
 ## `mempalace repair`
 
 Rebuild palace vector index from stored data. Fixes segfaults after database corruption.
 
 ```bash
 mempalace repair
+mempalace repair --mode sqlite-replay --dry-run --batch-size 1000
+mempalace repair --mode sqlite-replay --batch-size 1000 --backup --yes --confirm-large-reembed
 ```
 
-Creates a backup at `<palace_path>.backup` before rebuilding.
+| Option | Description |
+|--------|-------------|
+| `--mode legacy` | Legacy full-palace rebuild through the Chroma collection layer. Avoid this when `repair-status` says HNSW is diverged. |
+| `--mode sqlite-replay` | Rebuild the drawers collection from `chroma.sqlite3` metadata rows. |
+| `--dry-run` | Print the replay plan without deleting or rewriting the collection. |
+| `--batch-size` | Per-upsert replay chunk size. This is not a total row limit or bounded maintenance window. |
+| `--backup` / `--no-backup` | Copy the source SQLite database before mutation. Backup is on by default. |
+| `--confirm-large-reembed` | Required when SQLite replay would re-embed more than 100,000 documents. This can run for hours. |
+
+For diverged HNSW incidents, run `repair-status` and the SQLite replay dry-run
+first. Schedule the non-dry replay only after a full palace backup and a quiet
+maintenance window.
 
 ## `mempalace mcp`
 
