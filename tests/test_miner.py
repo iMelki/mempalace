@@ -270,14 +270,16 @@ def test_entity_metadata_finds_cyrillic_names(monkeypatch):
     assert "Михаил" in result, f"Cyrillic name not found in entity metadata: {result!r}"
 
 
-def test_file_already_mined_check_mtime():
+def test_file_already_mined_check_mtime(test_embedding_function):
     tmpdir = tempfile.mkdtemp()
     try:
         palace_path = os.path.join(tmpdir, "palace")
         os.makedirs(palace_path)
         client = chromadb.PersistentClient(path=palace_path)
         col = client.get_or_create_collection(
-            "mempalace_drawers", metadata={"hnsw:space": "cosine"}
+            "mempalace_drawers",
+            metadata={"hnsw:space": "cosine"},
+            embedding_function=test_embedding_function,
         )
 
         test_file = os.path.join(tmpdir, "test.txt")
@@ -516,14 +518,17 @@ def test_process_file_uses_bounded_upsert_batches(tmp_path, monkeypatch):
 # rebuilt on the next mine. These tests pin that contract.
 
 
-def test_file_already_mined_returns_false_for_stale_normalize_version():
+def test_file_already_mined_returns_false_for_stale_normalize_version(test_embedding_function):
     """Pre-v2 drawers (no field, or older integer) must not short-circuit."""
     tmpdir = tempfile.mkdtemp()
     try:
         palace_path = os.path.join(tmpdir, "palace")
         os.makedirs(palace_path)
         client = chromadb.PersistentClient(path=palace_path)
-        col = client.get_or_create_collection("mempalace_drawers")
+        col = client.get_or_create_collection(
+            "mempalace_drawers",
+            embedding_function=test_embedding_function,
+        )
 
         # Pre-v2 drawer: no normalize_version field at all
         col.add(
@@ -558,14 +563,17 @@ def test_file_already_mined_returns_false_for_stale_normalize_version():
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-def test_add_drawer_stamps_normalize_version(tmp_path):
+def test_add_drawer_stamps_normalize_version(tmp_path, test_embedding_function):
     """Fresh drawers carry the current schema version so future upgrades work."""
     from mempalace.miner import add_drawer
 
     palace_path = tmp_path / "palace"
     palace_path.mkdir()
     client = chromadb.PersistentClient(path=str(palace_path))
-    col = client.get_or_create_collection("mempalace_drawers")
+    col = client.get_or_create_collection(
+        "mempalace_drawers",
+        embedding_function=test_embedding_function,
+    )
     try:
         added = add_drawer(
             collection=col,

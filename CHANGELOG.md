@@ -16,6 +16,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   when SQLite metadata is unavailable. This keeps local status/reporting usable
   after a persisted HNSW segment is quarantined for a Chroma native crash; full
   historical vector rebuild is tracked separately in #12.
+- **Pre-push tests no longer depend on Chroma's default ONNX model download.**
+  The miner tests that open raw Chroma collections now use the repo's
+  deterministic test embedding fixture, keeping the suite offline-safe when TLS
+  or model-cache state is unavailable.
 - **Local hook governance.** Reinstalled the git-toolkit secrets filter and
   commit hooks, added the baseline `.git-secrets-ignore` deep-scan exclusions,
   and verified the governance audit is clean. (#10)
