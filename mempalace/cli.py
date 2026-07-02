@@ -652,7 +652,6 @@ def cmd_repair_status(args):
 def cmd_repair(args):
     """Rebuild palace vector index from SQLite metadata."""
     import shutil
-    from .backends.chroma import ChromaBackend
     from .migrate import confirm_destructive_action, contains_palace_database
     from .repair import TruncationDetected, check_extraction_safety
 
@@ -673,6 +672,19 @@ def cmd_repair(args):
         )
         return
 
+    if getattr(args, "mode", "legacy") == "sqlite-replay":
+        from .repair import repair_sqlite_replay
+
+        repair_sqlite_replay(
+            palace_path,
+            dry_run=getattr(args, "dry_run", False),
+            assume_yes=getattr(args, "yes", False),
+            backup=getattr(args, "backup", True),
+            batch_size=getattr(args, "batch_size", 1000),
+            confirm_large_reembed=getattr(args, "confirm_large_reembed", False),
+        )
+        return
+
     db_path = os.path.join(palace_path, "chroma.sqlite3")
 
     if not os.path.isdir(palace_path):
@@ -686,6 +698,8 @@ def cmd_repair(args):
     print("  MemPalace Repair")
     print(f"{'=' * 55}\n")
     print(f"  Palace: {palace_path}")
+
+    from .backends.chroma import ChromaBackend
 
     backend = ChromaBackend()
 
@@ -1175,10 +1189,7 @@ def main():
     # repair
     p_repair = sub.add_parser(
         "repair",
-        help=(
-            "Rebuild palace vector index (legacy mode) or un-poison max_seq_id rows "
-            "(--mode max-seq-id)"
-        ),
+        help=("Rebuild palace vector index, replay from SQLite, or un-poison max_seq_id rows"),
     )
     p_repair.add_argument(
         "--yes", action="store_true", help="Skip confirmation for destructive changes"
@@ -1195,10 +1206,11 @@ def main():
     )
     p_repair.add_argument(
         "--mode",
-        choices=["legacy", "max-seq-id"],
+        choices=["legacy", "sqlite-replay", "max-seq-id"],
         default="legacy",
         help=(
             "legacy: full-palace rebuild (default). "
+            "sqlite-replay: rebuild drawers from chroma.sqlite3 metadata when HNSW is diverged. "
             "max-seq-id: un-poison max_seq_id rows corrupted by the legacy 0.6.x shim."
         ),
     )
@@ -1222,9 +1234,23 @@ def main():
         help="Back up SQLite before mutation (default: on)",
     )
     p_repair.add_argument(
+        "--batch-size",
+        type=int,
+        default=1000,
+        help="Replay batch size for --mode sqlite-replay (default: 1000)",
+    )
+    p_repair.add_argument(
+        "--confirm-large-reembed",
+        action="store_true",
+        help=(
+            "Allow --mode sqlite-replay to re-embed more than 100,000 documents. "
+            "This can run for hours and consume substantial CPU/GPU."
+        ),
+    )
+    p_repair.add_argument(
         "--dry-run",
         action="store_true",
-        help="Print detected poisoned rows and exit without mutation (--mode max-seq-id only)",
+        help="Print plan and exit without mutation (--mode sqlite-replay or max-seq-id)",
     )
 
     # repair-status — read-only HNSW capacity health check (#1222)

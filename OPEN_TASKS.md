@@ -11,6 +11,14 @@ This file is the durable local index for active `mempalace` issues.
     2026-07-02 local repair, then verify `mempalace status`,
     `repair-status`, and representative search behavior before removing any
     preserved segment directories.
+  - 2026-07-02 update: added `repair --mode sqlite-replay` with SQLite-only
+    dry-run, snapshot restore, progress, and a large re-embed confirmation
+    guard. Live dry-run validated 820,220 SQLite drawer rows. A full replay was
+    intentionally stopped after the first 1,000-row batch because rebuilding
+    all vectors would be a long maintenance job; the original SQLite database
+    was restored, the partial collection was removed, and BM25 fallback remains
+    the safe search path until an explicit `--confirm-large-reembed` window is
+    scheduled.
 
 - [#5 - Use relevant skills for market research, competitor analysis, and monetization planning](https://github.com/iMelki/mempalace/issues/5)
   - Goal: Use the relevant shared skills to map competitors, ICPs, monetization options, and positioning for the user-owned MemPalace fork.

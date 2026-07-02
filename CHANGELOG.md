@@ -10,6 +10,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Bug Fixes
 
+- **`mempalace repair --mode sqlite-replay` now gives large diverged palaces a
+  safe recovery path.** Dry-run reads the Chroma SQLite metadata segment without
+  importing Chroma, reconstructs typed drawer documents/metadata, and reports
+  replay scope before any destructive work. Approved runs snapshot
+  `chroma.sqlite3`, rebuild only the `mempalace_drawers` collection, stream
+  progress with ETA, and refuse large re-embedding runs unless
+  `--confirm-large-reembed` is explicitly supplied. The focused repair tests
+  also run with pytest's cache provider disabled so a broken local
+  `.pytest_cache` ACL cannot mask repair-path regressions.
+- **`mempalace repair-status` is now dependency-light too.** The HNSW capacity
+  probe reads SQLite plus `index_metadata.pickle` locally instead of importing
+  the Chroma backend package, so status still reports drawer/closet divergence
+  in a lean Python runtime that lacks `chromadb`.
 - **`mempalace status` no longer opens the crash-prone drawers HNSW segment just
   to print counts.** The status path now reads collection and room totals
   directly from `chroma.sqlite3` first, falling back to Chroma pagination only
