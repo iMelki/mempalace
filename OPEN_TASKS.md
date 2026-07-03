@@ -11,12 +11,13 @@ This file is the durable local index for active `mempalace` issues.
     keep vector fallback mode explicit in MemSys, and complete a supervised
     replay/rebuild only under an approved maintenance window.
   - Status: Bug report filed after live evidence showed drawers
-    `sqlite=832,966` and `hnsw=15,766`. The repair CLI now detects divergence,
+    `sqlite=834,850` and `hnsw=17,800`. The repair CLI now detects divergence,
     supports SQLite-only dry-run, and refuses large replay without
     `--confirm-large-reembed`; full vector replay remains tracked through #12.
-  - 2026-07-03 update: sub-agent read-only proof still shows drawers
-    `sqlite=832,966`, `hnsw=15,766`, divergence `817,200`; closets remain within
-    tolerance (`sqlite=12,107`, `hnsw=11,826`). BM25 fallback remains the safe
+  - 2026-07-03 update: read-only sidecar proof after the Claude provider-chat
+    drain shows drawers `sqlite=834,850`, `hnsw=17,800`, divergence `817,050`;
+    closets remain within tolerance (`sqlite=12,107`, `hnsw=11,826`). Bridge
+    logs still report `vector_disabled=true`, so BM25 fallback remains the safe
     path until the HNSW replay completes.
 
 - [#12 - Rebuild quarantined drawers HNSW segment after local crash repair](https://github.com/iMelki/mempalace/issues/12)
@@ -33,11 +34,13 @@ This file is the durable local index for active `mempalace` issues.
     the safe search path until an explicit `--confirm-large-reembed` window is
     scheduled.
   - 2026-07-03 update: current read-only proof reports drawers
-    `sqlite=832,966`, `hnsw=15,766`, divergence `817,200`. Artifacted dry-run
+    `sqlite=834,850`, `hnsw=17,800`, divergence `817,050`. Artifacted dry-run
     at
     `S:\source\CCAI\Assistants\tools\Memory\mempalace\.codex\artifacts\hnsw-sqlite-proof-20260703-111445\sqlite-replay-dry-run\result.json`
     planned `832,966` replay rows in `833` batches, replayed `0`, and left the
-    live collection unchanged. Fresh palace backup
+    live collection unchanged; it predates the final Claude provider-chat drain,
+    so a fresh pre-replay dry-run should be captured before non-dry replay.
+    Fresh palace backup
     `C:\Users\Milky\.mempalace\backups\palace-2026-07-03-1126-pre-hnsw-sqlite-replay.tar.gz`
     is verified tar-readable (`14,561.7 MB` compressed in `1,016.7s`; inventory
     now has `11` palace archives and `0` zero-size palace archives). Schedule
@@ -55,6 +58,14 @@ This file is the durable local index for active `mempalace` issues.
     artifacts, explicit `resume_supported=false`, and a forced immutable source
     snapshot even when callers pass `--no-backup`. These are abort gates and
     observability artifacts, not resumable partial replay controls.
+
+- [#18 - repair-status lacks machine-readable read-only parity artifacts](https://github.com/iMelki/mempalace/issues/18)
+  - Goal: let agents and incident bundles capture HNSW/SQLite parity counts
+    without scraping human text or launching a replay dry-run.
+  - Status: bug report filed from the 2026-07-03 sidecar preflight. Current
+    workaround is to record `repair-status` text output plus existing replay
+    dry-run artifacts; desired fix is `repair-status --json` and optional
+    read-only artifact output.
 
 - [#15 - Local test bootstrap depends on fragile PATH and PyPI TLS state](https://github.com/iMelki/mempalace/issues/15)
   - Goal: make focused MemPalace tests runnable without guessing which Python

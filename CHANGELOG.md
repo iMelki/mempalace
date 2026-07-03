@@ -55,6 +55,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Documentation
 
+- **HNSW incident tracking now reflects the post-provider-chat SQLite growth.**
+  The local task index and GitHub issue readbacks were refreshed after the
+  Claude provider-chat drain: drawers now show SQLite `834,850`, HNSW `17,800`,
+  divergence `817,050`, and bridge fallback still `vector_disabled=true`.
+  Filed #18 for a machine-readable `repair-status --json` proof path so future
+  incident bundles do not have to scrape human text or run replay dry-runs just
+  to capture parity counts.
 - **Website SEO/GEO baseline.** Added VitePress sitemap configuration,
   per-page canonical and `og:url` metadata, absolute Open Graph image URLs,
   basic JSON-LD, and a public `robots.txt` pointing at the sitemap. Build-output
