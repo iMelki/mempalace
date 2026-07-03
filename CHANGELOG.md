@@ -57,8 +57,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **HNSW incident tracking now reflects the post-provider-chat SQLite growth.**
   The local task index and GitHub issue readbacks were refreshed after the
-  Claude provider-chat drain: drawers now show SQLite `834,850`, HNSW `17,800`,
-  divergence `817,050`, and bridge fallback still `vector_disabled=true`.
+  first bounded Codex provider-chat batch: drawers now show SQLite `835,732`,
+  HNSW `17,800`, divergence `817,932`, and bridge fallback still
+  `vector_disabled=true`.
   Filed #18 for a machine-readable `repair-status --json` proof path so future
   incident bundles do not have to scrape human text or run replay dry-runs just
   to capture parity counts.
