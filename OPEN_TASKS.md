@@ -14,6 +14,11 @@ This file is the durable local index for active `mempalace` issues.
     `sqlite=851,964` and `hnsw=33,982`. The repair CLI now detects divergence,
     supports SQLite-only dry-run, and refuses large replay without
     `--confirm-large-reembed`; full vector replay remains tracked through #12.
+  - 2026-07-03 final provider-chat drain update: current `repair-status`
+    after the final Codex batches reports drawers `sqlite=856,510`,
+    `hnsw=38,471`, divergence `818,039`; closets remain within tolerance at
+    `sqlite=12,107`, `hnsw=11,826`, divergence `281`. This is still
+    `DIVERGED` for drawers and still requires the supervised #12 replay.
   - 2026-07-03 update: read-only proof after the latest Codex provider-chat
     drain window shows drawers `sqlite=851,964`, `hnsw=33,982`, divergence
     `817,982`; closets remain within tolerance (`sqlite=12,107`, `hnsw=11,826`,
@@ -47,6 +52,13 @@ This file is the durable local index for active `mempalace` issues.
     is verified tar-readable (`14,561.7 MB` compressed in `1,016.7s`; inventory
     now has `11` palace archives and `0` zero-size palace archives). Schedule
     the non-dry replay only inside an approved quiet maintenance window.
+  - 2026-07-03 fresh dry-run update: after the final Codex provider-chat drain,
+    `python -m mempalace.cli repair --mode sqlite-replay --dry-run
+    --batch-size 1000` planned `856,510` rows in `857` batches, replayed `0`,
+    and left the live collection unchanged. Artifact:
+    `C:\Users\Milky\.mempalace\palace\.mempalace\repair-runs\sqlite-replay-20260703T121156644960Z\result.json`.
+    The existing backup predates the final `+4,546` drawer growth, so a fresh
+    palace backup is required before any non-dry replay.
 
 - [#16 - SQLite replay lacks bounded window, checkpoint, and structured repair artifacts](https://github.com/iMelki/mempalace/issues/16)
   - Goal: add operator-grade controls before replaying the full 851,964-row
@@ -71,6 +83,10 @@ This file is the durable local index for active `mempalace` issues.
   - 2026-07-03 update: fresh proof still confirms the gap. `repair-status`
     reports drawers `sqlite=851,964`, `hnsw=33,982`, divergence `817,982`, but
     `repair-status --help` exposes no JSON or artifact option.
+  - 2026-07-03 final drain update: fresh `repair-status` reports drawers
+    `sqlite=856,510`, `hnsw=38,471`, divergence `818,039`, and
+    `repair-status --help` still exposes only human-readable help/no JSON
+    artifact output.
 
 - [#15 - Local test bootstrap depends on fragile PATH and PyPI TLS state](https://github.com/iMelki/mempalace/issues/15)
   - Goal: make focused MemPalace tests runnable without guessing which Python

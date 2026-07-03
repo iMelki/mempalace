@@ -55,6 +55,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Documentation
 
+- **HNSW incident tracking now reflects the final Codex provider-chat drain and
+  fresh replay dry-run.** Current `repair-status` evidence reports drawers
+  SQLite `856,510`, HNSW `38,471`, divergence `818,039`, and closets still
+  within tolerance at SQLite `12,107`, HNSW `11,826`, divergence `281`.
+  The fresh SQLite replay dry-run planned `856,510` rows in `857` batches,
+  replayed `0`, and left the live collection unchanged; the existing
+  pre-replay backup predates this latest growth, so a fresh backup remains
+  required before any non-dry replay.
 - **HNSW incident tracking now reflects the post-provider-chat SQLite growth.**
   The local task index and GitHub issue readbacks were refreshed after the
   latest bounded Codex provider-chat drain window: drawers now show SQLite
