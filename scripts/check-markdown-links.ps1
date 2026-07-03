@@ -43,11 +43,32 @@ function Resolve-MarkdownTarget {
     $cleanTarget = $cleanTarget.Split('#')[0].Split('?')[0]
     if ([string]::IsNullOrWhiteSpace($cleanTarget)) { return $null }
 
+    $candidateBases = @()
     if ($cleanTarget.StartsWith('/')) {
-        return [System.IO.Path]::GetFullPath((Join-Path $RepoRoot $cleanTarget.TrimStart('/','\')))
+        $relativeTarget = $cleanTarget.TrimStart('/','\')
+        $websiteRoot = [System.IO.Path]::GetFullPath((Join-Path $RepoRoot 'website'))
+        $sourceFullPath = [System.IO.Path]::GetFullPath($SourceDirectory)
+        if ($sourceFullPath.StartsWith($websiteRoot + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $candidateBases += [System.IO.Path]::GetFullPath((Join-Path $websiteRoot $relativeTarget))
+        }
+        $candidateBases += [System.IO.Path]::GetFullPath((Join-Path $RepoRoot $relativeTarget))
+    }
+    else {
+        $candidateBases += [System.IO.Path]::GetFullPath((Join-Path $SourceDirectory $cleanTarget))
     }
 
-    return [System.IO.Path]::GetFullPath((Join-Path $SourceDirectory $cleanTarget))
+    $candidates = New-Object System.Collections.Generic.List[string]
+    foreach ($candidate in $candidateBases) {
+        $candidates.Add($candidate)
+        if ([string]::IsNullOrWhiteSpace([System.IO.Path]::GetExtension($candidate))) {
+            $candidates.Add("$candidate.md")
+            $candidates.Add("$candidate.mdx")
+            $candidates.Add((Join-Path $candidate 'index.md'))
+            $candidates.Add((Join-Path $candidate 'index.mdx'))
+        }
+    }
+
+    return $candidates | Sort-Object -Unique
 }
 
 function Test-IsRepoLocalPath {
@@ -127,11 +148,25 @@ foreach ($file in $markdownFiles) {
         $matches = [regex]::Matches($line, $pattern)
         foreach ($match in $matches) {
             $target = $match.Groups[1].Value
-            $resolved = Resolve-MarkdownTarget -RepoRoot $repoRoot -SourceDirectory $file.DirectoryName -Target $target
-            if ($null -eq $resolved) { continue }
-            if (-not (Test-IsRepoLocalPath -RepoRoot $repoRoot -CandidatePath $resolved)) { continue }
+            $resolvedCandidates = @(Resolve-MarkdownTarget -RepoRoot $repoRoot -SourceDirectory $file.DirectoryName -Target $target)
+            if ($resolvedCandidates.Count -eq 0) { continue }
 
-            if (-not (Test-Path -LiteralPath $resolved)) {
+            $repoLocalCandidates = @(
+                $resolvedCandidates | Where-Object {
+                    Test-IsRepoLocalPath -RepoRoot $repoRoot -CandidatePath $_
+                }
+            )
+            if ($repoLocalCandidates.Count -eq 0) { continue }
+
+            $targetExists = $false
+            foreach ($candidate in $repoLocalCandidates) {
+                if (Test-Path -LiteralPath $candidate) {
+                    $targetExists = $true
+                    break
+                }
+            }
+
+            if (-not $targetExists) {
                 $broken.Add([pscustomobject]@{
                     File = $file.FullName
                     Line = $index + 1

@@ -60,9 +60,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   SQLite `856,510`, HNSW `38,471`, divergence `818,039`, and closets still
   within tolerance at SQLite `12,107`, HNSW `11,826`, divergence `281`.
   The fresh SQLite replay dry-run planned `856,510` rows in `857` batches,
-  replayed `0`, and left the live collection unchanged; the existing
-  pre-replay backup predates this latest growth, so a fresh backup remains
-  required before any non-dry replay.
+  replayed `0`, and left the live collection unchanged. A post-drain palace
+  backup is now verified tar-readable at
+  `C:\Users\Milky\.mempalace\backups\palace-2026-07-03-1526-pre-hnsw-sqlite-replay-final-drain.tar.gz`
+  (`14,636.8 MB` compressed in `986.5s`; total `1,062.6s`; upload disabled),
+  satisfying the fresh-backup gate before any supervised non-dry replay.
 - **HNSW incident tracking now reflects the post-provider-chat SQLite growth.**
   The local task index and GitHub issue readbacks were refreshed after the
   latest bounded Codex provider-chat drain window: drawers now show SQLite

@@ -57,8 +57,13 @@ This file is the durable local index for active `mempalace` issues.
     --batch-size 1000` planned `856,510` rows in `857` batches, replayed `0`,
     and left the live collection unchanged. Artifact:
     `C:\Users\Milky\.mempalace\palace\.mempalace\repair-runs\sqlite-replay-20260703T121156644960Z\result.json`.
-    The existing backup predates the final `+4,546` drawer growth, so a fresh
-    palace backup is required before any non-dry replay.
+    Fresh palace backup
+    `C:\Users\Milky\.mempalace\backups\palace-2026-07-03-1526-pre-hnsw-sqlite-replay-final-drain.tar.gz`
+    is verified tar-readable (`14,636.8 MB` compressed in `986.5s`; total
+    `1,062.6s`; upload disabled). Durable logs:
+    `S:\source\CCAI\Assistants\tools\Memory\mempalace\.codex\artifacts\palace-backup-20260703T152629\backup.stdout.log`.
+    The previous fresh-backup gate is satisfied; non-dry replay still requires
+    an approved quiet window plus the #16 bounds/artifact guards.
 
 - [#16 - SQLite replay lacks bounded window, checkpoint, and structured repair artifacts](https://github.com/iMelki/mempalace/issues/16)
   - Goal: add operator-grade controls before replaying the full 851,964-row
