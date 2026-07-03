@@ -11,11 +11,11 @@ This file is the durable local index for active `mempalace` issues.
     keep vector fallback mode explicit in MemSys, and complete a supervised
     replay/rebuild only under an approved maintenance window.
   - Status: Bug report filed after live evidence showed drawers
-    `sqlite=820,220` and `hnsw=3,168`. The repair CLI now detects divergence,
+    `sqlite=831,184` and `hnsw=13,748`. The repair CLI now detects divergence,
     supports SQLite-only dry-run, and refuses large replay without
     `--confirm-large-reembed`; full vector replay remains tracked through #12.
   - 2026-07-03 update: post-reboot read-only proof still shows drawers
-    `sqlite=820,220`, `hnsw=3,168`, divergence `817,052`; closets remain within
+    `sqlite=831,184`, `hnsw=13,748`, divergence `817,436`; closets remain within
     tolerance (`sqlite=12,107`, `hnsw=11,826`). BM25 fallback remains the safe
     path until the HNSW replay completes.
 
@@ -32,22 +32,27 @@ This file is the durable local index for active `mempalace` issues.
     was restored, the partial collection was removed, and BM25 fallback remains
     the safe search path until an explicit `--confirm-large-reembed` window is
     scheduled.
-  - 2026-07-03 update: host pressure preflight was normal
-    (`memoryUsedPct=45.48`, `shouldProceed=true`), but no replay mutation was
-    run because the current CLI still lacks a max-row/max-batch maintenance
-    bound or checkpoint/resume. The next safe implementation step is #16.
+  - 2026-07-03 update: current read-only proof reports drawers
+    `sqlite=831,184`, `hnsw=13,748`, divergence `817,436`. The backup inventory
+    has `10` palace backups with newest
+    `C:\Users\Milky\.mempalace\backups\palace-2026-06-28-0300.tar.gz` and no
+    zero-size palace backups. Before any non-dry replay, take a fresh
+    `pre-hnsw-sqlite-replay` palace backup, run an artifacted dry-run, then
+    schedule the non-dry replay only inside an approved quiet maintenance
+    window.
 
 - [#16 - SQLite replay lacks bounded window, checkpoint, and structured repair artifacts](https://github.com/iMelki/mempalace/issues/16)
-  - Goal: add operator-grade controls before replaying the full 820,220-row
+  - Goal: add operator-grade controls before replaying the full 831,184-row
     drawers segment: max-row/max-batch limits, durable logs/JSON, checkpoint or
     explicit no-resume safety, and rollback docs.
   - Status: bug report filed from the #12/#13 preflight. Current
     `--batch-size` controls only the per-upsert chunk size and is not a bounded
     replay window.
-  - 2026-07-03 update: implementation in progress adds pre-mutation
+  - 2026-07-03 update: CLI/changelog support now includes pre-mutation
     `--max-rows` / `--max-batches` gates, `result.json` + `events.jsonl`
     artifacts, explicit `resume_supported=false`, and a forced immutable source
-    snapshot even when callers pass `--no-backup`.
+    snapshot even when callers pass `--no-backup`. These are abort gates and
+    observability artifacts, not resumable partial replay controls.
 
 - [#15 - Local test bootstrap depends on fragile PATH and PyPI TLS state](https://github.com/iMelki/mempalace/issues/15)
   - Goal: make focused MemPalace tests runnable without guessing which Python
