@@ -58,7 +58,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **HNSW incident tracking now reflects the post-provider-chat SQLite growth.**
   The local task index and GitHub issue readbacks were refreshed after the
   latest bounded Codex provider-chat drain window: drawers now show SQLite
-  `848,029`, HNSW `30,471`, divergence `817,558`, and bridge fallback still
+  `851,964`, HNSW `33,982`, divergence `817,982`, and bridge fallback still
   `vector_disabled=true`.
   Filed #18 for a machine-readable `repair-status --json` proof path so future
   incident bundles do not have to scrape human text or run replay dry-runs just

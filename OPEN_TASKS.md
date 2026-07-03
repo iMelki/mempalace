@@ -11,12 +11,12 @@ This file is the durable local index for active `mempalace` issues.
     keep vector fallback mode explicit in MemSys, and complete a supervised
     replay/rebuild only under an approved maintenance window.
   - Status: Bug report filed after live evidence showed drawers
-    `sqlite=848,029` and `hnsw=30,471`. The repair CLI now detects divergence,
+    `sqlite=851,964` and `hnsw=33,982`. The repair CLI now detects divergence,
     supports SQLite-only dry-run, and refuses large replay without
     `--confirm-large-reembed`; full vector replay remains tracked through #12.
   - 2026-07-03 update: read-only proof after the latest Codex provider-chat
-    drain window shows drawers `sqlite=848,029`, `hnsw=30,471`, divergence
-    `817,558`; closets remain within tolerance (`sqlite=12,107`, `hnsw=11,826`,
+    drain window shows drawers `sqlite=851,964`, `hnsw=33,982`, divergence
+    `817,982`; closets remain within tolerance (`sqlite=12,107`, `hnsw=11,826`,
     divergence `281`). Bridge logs still report
     `vector_disabled=true`, so BM25 fallback remains the safe path until the
     HNSW replay completes.
@@ -35,7 +35,7 @@ This file is the durable local index for active `mempalace` issues.
     the safe search path until an explicit `--confirm-large-reembed` window is
     scheduled.
   - 2026-07-03 update: current read-only proof reports drawers
-    `sqlite=848,029`, `hnsw=30,471`, divergence `817,558`. Artifacted dry-run
+    `sqlite=851,964`, `hnsw=33,982`, divergence `817,982`. Artifacted dry-run
     at
     `S:\source\CCAI\Assistants\tools\Memory\mempalace\.codex\artifacts\hnsw-sqlite-proof-20260703-111445\sqlite-replay-dry-run\result.json`
     planned `832,966` replay rows in `833` batches, replayed `0`, and left the
@@ -49,7 +49,7 @@ This file is the durable local index for active `mempalace` issues.
     the non-dry replay only inside an approved quiet maintenance window.
 
 - [#16 - SQLite replay lacks bounded window, checkpoint, and structured repair artifacts](https://github.com/iMelki/mempalace/issues/16)
-  - Goal: add operator-grade controls before replaying the full 848,029-row
+  - Goal: add operator-grade controls before replaying the full 851,964-row
     drawers segment: max-row/max-batch limits, durable logs/JSON, checkpoint or
     explicit no-resume safety, and rollback docs.
   - Status: bug report filed from the #12/#13 preflight. Current
@@ -69,7 +69,7 @@ This file is the durable local index for active `mempalace` issues.
     dry-run artifacts; desired fix is `repair-status --json` and optional
     read-only artifact output.
   - 2026-07-03 update: fresh proof still confirms the gap. `repair-status`
-    reports drawers `sqlite=848,029`, `hnsw=30,471`, divergence `817,558`, but
+    reports drawers `sqlite=851,964`, `hnsw=33,982`, divergence `817,982`, but
     `repair-status --help` exposes no JSON or artifact option.
 
 - [#15 - Local test bootstrap depends on fragile PATH and PyPI TLS state](https://github.com/iMelki/mempalace/issues/15)
