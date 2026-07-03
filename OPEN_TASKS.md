@@ -11,11 +11,11 @@ This file is the durable local index for active `mempalace` issues.
     keep vector fallback mode explicit in MemSys, and complete a supervised
     replay/rebuild only under an approved maintenance window.
   - Status: Bug report filed after live evidence showed drawers
-    `sqlite=831,184` and `hnsw=13,748`. The repair CLI now detects divergence,
+    `sqlite=832,966` and `hnsw=15,766`. The repair CLI now detects divergence,
     supports SQLite-only dry-run, and refuses large replay without
     `--confirm-large-reembed`; full vector replay remains tracked through #12.
-  - 2026-07-03 update: post-reboot read-only proof still shows drawers
-    `sqlite=831,184`, `hnsw=13,748`, divergence `817,436`; closets remain within
+  - 2026-07-03 update: sub-agent read-only proof still shows drawers
+    `sqlite=832,966`, `hnsw=15,766`, divergence `817,200`; closets remain within
     tolerance (`sqlite=12,107`, `hnsw=11,826`). BM25 fallback remains the safe
     path until the HNSW replay completes.
 
@@ -33,13 +33,15 @@ This file is the durable local index for active `mempalace` issues.
     the safe search path until an explicit `--confirm-large-reembed` window is
     scheduled.
   - 2026-07-03 update: current read-only proof reports drawers
-    `sqlite=831,184`, `hnsw=13,748`, divergence `817,436`. The backup inventory
-    has `10` palace backups with newest
-    `C:\Users\Milky\.mempalace\backups\palace-2026-06-28-0300.tar.gz` and no
-    zero-size palace backups. Before any non-dry replay, take a fresh
-    `pre-hnsw-sqlite-replay` palace backup, run an artifacted dry-run, then
-    schedule the non-dry replay only inside an approved quiet maintenance
-    window.
+    `sqlite=832,966`, `hnsw=15,766`, divergence `817,200`. Artifacted dry-run
+    at
+    `S:\source\CCAI\Assistants\tools\Memory\mempalace\.codex\artifacts\hnsw-sqlite-proof-20260703-111445\sqlite-replay-dry-run\result.json`
+    planned `832,966` replay rows in `833` batches, replayed `0`, and left the
+    live collection unchanged. Fresh palace backup
+    `C:\Users\Milky\.mempalace\backups\palace-2026-07-03-1126-pre-hnsw-sqlite-replay.tar.gz`
+    is verified tar-readable (`14,561.7 MB` compressed in `1,016.7s`; inventory
+    now has `11` palace archives and `0` zero-size palace archives). Schedule
+    the non-dry replay only inside an approved quiet maintenance window.
 
 - [#16 - SQLite replay lacks bounded window, checkpoint, and structured repair artifacts](https://github.com/iMelki/mempalace/issues/16)
   - Goal: add operator-grade controls before replaying the full 831,184-row
