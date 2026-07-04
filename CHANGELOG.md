@@ -8,6 +8,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [3.3.5] — unreleased
 
+### Operations
+
+- **2026-07-04: drawers HNSW segment fully rebuilt and verified (#12 closed).**
+  The supervised non-dry `repair --mode sqlite-replay` completed
+  2026-07-03T18:13:13Z with `replayed=verified_count=856,510`, zero warnings,
+  in ~5h10m. Post-replay `repair-status`: drawers `sqlite=861,715` /
+  `hnsw=850,000` (divergence `11,715`, within flush-lag tolerance, down from
+  `818,039`). #13 was retitled to track the remaining real blocker: the
+  MemSys-side `mempalace_mcp_wrapper.py` still unconditionally forces
+  keyword-only search (April 2026 chromadb-crash workaround), so restored
+  vector data is not yet reachable through MCP search.
+
 ### Bug Fixes
 
 - **`mempalace repair --mode sqlite-replay` now gives large diverged palaces a

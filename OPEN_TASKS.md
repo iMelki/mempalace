@@ -1,69 +1,31 @@
 # MemPalace Open Tasks
 
-Last updated: 2026-07-03
+Last updated: 2026-07-04
 
 This file is the durable local index for active `mempalace` issues.
 
 ## Active Issues
 
-- [#13 - Chroma HNSW segment diverged from SQLite drawer metadata](https://github.com/iMelki/mempalace/issues/13)
-  - Goal: make the July 2026 Chroma SQLite/HNSW divergence impossible to miss,
-    keep vector fallback mode explicit in MemSys, and complete a supervised
-    replay/rebuild only under an approved maintenance window.
-  - Status: Bug report filed after live evidence showed drawers
-    `sqlite=851,964` and `hnsw=33,982`. The repair CLI now detects divergence,
-    supports SQLite-only dry-run, and refuses large replay without
-    `--confirm-large-reembed`; full vector replay remains tracked through #12.
-  - 2026-07-03 final provider-chat drain update: current `repair-status`
-    after the final Codex batches reports drawers `sqlite=856,510`,
-    `hnsw=38,471`, divergence `818,039`; closets remain within tolerance at
-    `sqlite=12,107`, `hnsw=11,826`, divergence `281`. This is still
-    `DIVERGED` for drawers and still requires the supervised #12 replay.
-  - 2026-07-03 update: read-only proof after the latest Codex provider-chat
-    drain window shows drawers `sqlite=851,964`, `hnsw=33,982`, divergence
-    `817,982`; closets remain within tolerance (`sqlite=12,107`, `hnsw=11,826`,
-    divergence `281`). Bridge logs still report
-    `vector_disabled=true`, so BM25 fallback remains the safe path until the
-    HNSW replay completes.
-
-- [#12 - Rebuild quarantined drawers HNSW segment after local crash repair](https://github.com/iMelki/mempalace/issues/12)
-  - Goal: Rebuild or replay the quarantined drawers vector segment from the
-    2026-07-02 local repair, then verify `mempalace status`,
-    `repair-status`, and representative search behavior before removing any
-    preserved segment directories.
-  - 2026-07-02 update: added `repair --mode sqlite-replay` with SQLite-only
-    dry-run, snapshot restore, progress, and a large re-embed confirmation
-    guard. Live dry-run validated 820,220 SQLite drawer rows. A full replay was
-    intentionally stopped after the first 1,000-row batch because rebuilding
-    all vectors would be a long maintenance job; the original SQLite database
-    was restored, the partial collection was removed, and BM25 fallback remains
-    the safe search path until an explicit `--confirm-large-reembed` window is
-    scheduled.
-  - 2026-07-03 update: current read-only proof reports drawers
-    `sqlite=851,964`, `hnsw=33,982`, divergence `817,982`. Artifacted dry-run
-    at
-    `S:\source\CCAI\Assistants\tools\Memory\mempalace\.codex\artifacts\hnsw-sqlite-proof-20260703-111445\sqlite-replay-dry-run\result.json`
-    planned `832,966` replay rows in `833` batches, replayed `0`, and left the
-    live collection unchanged; it now predates both the final Claude drain and
-    the latest Codex provider-chat drain windows, so a fresh pre-replay dry-run
-    should be captured before non-dry replay.
-    Fresh palace backup
-    `C:\Users\Milky\.mempalace\backups\palace-2026-07-03-1126-pre-hnsw-sqlite-replay.tar.gz`
-    is verified tar-readable (`14,561.7 MB` compressed in `1,016.7s`; inventory
-    now has `11` palace archives and `0` zero-size palace archives). Schedule
-    the non-dry replay only inside an approved quiet maintenance window.
-  - 2026-07-03 fresh dry-run update: after the final Codex provider-chat drain,
-    `python -m mempalace.cli repair --mode sqlite-replay --dry-run
-    --batch-size 1000` planned `856,510` rows in `857` batches, replayed `0`,
-    and left the live collection unchanged. Artifact:
-    `C:\Users\Milky\.mempalace\palace\.mempalace\repair-runs\sqlite-replay-20260703T121156644960Z\result.json`.
-    Fresh palace backup
-    `C:\Users\Milky\.mempalace\backups\palace-2026-07-03-1526-pre-hnsw-sqlite-replay-final-drain.tar.gz`
-    is verified tar-readable (`14,636.8 MB` compressed in `986.5s`; total
-    `1,062.6s`; upload disabled). Durable logs:
-    `S:\source\CCAI\Assistants\tools\Memory\mempalace\.codex\artifacts\palace-backup-20260703T152629\backup.stdout.log`.
-    The previous fresh-backup gate is satisfied; non-dry replay still requires
-    an approved quiet window plus the #16 bounds/artifact guards.
+- [#13 - mempalace_mcp_wrapper unconditionally disables real vector search (permanent keyword-only fallback since 2026-04)](https://github.com/iMelki/mempalace/issues/13)
+  - Retitled 2026-07-04. The original count-divergence this issue was filed
+    for is fixed (see #12, closed): post-replay `repair-status` reports
+    drawers `sqlite=861,715`, `hnsw=850,000`, divergence `11,715`,
+    `status=OK (within flush-lag tolerance)`.
+  - The remaining, bigger problem: live `mempalace_search` still returns
+    `"_search_mode": "text_match"` with note `"Keyword matching (HNSW index
+    unreadable after Rust migration)"`. Root cause is
+    `agent-settings/shared/tools/mempalace_mcp_wrapper.py` (2026-04-20
+    chromadb crash workaround, see
+    `agent-settings/shared/memory/mempalace-mcp-crash-report-2026-04-20.md`):
+    Patch 4 unconditionally replaces `search_memories()` with keyword-only
+    `get(where_document)` regardless of current HNSW readability, and Patch 3
+    skips HNSW init entirely. Semantic/vector search has therefore been
+    silently keyword-only since April 2026, independent of the July replay.
+  - Next: verify on an ISOLATED palace copy (never live — the original
+    failure was a 0xC0000005 segfault) whether current chromadb/mempalace
+    pins can read the rebuilt HNSW files; then relax wrapper patches behind a
+    feature flag, or make the keyword fallback a visible CoreHealth warning
+    instead of a silent note.
 
 - [#16 - SQLite replay lacks bounded window, checkpoint, and structured repair artifacts](https://github.com/iMelki/mempalace/issues/16)
   - Goal: add operator-grade controls before replaying the full 851,964-row
@@ -124,6 +86,22 @@ This file is the durable local index for active `mempalace` issues.
   - Status: Open (preserved branch `agent/codex/mempalace-search-mcp-wip`).
 
 ## Recently Completed
+
+- [#12 - Rebuild quarantined drawers HNSW segment after local crash repair](https://github.com/iMelki/mempalace/issues/12)
+  - 2026-07-04: closed with proof. The non-dry
+    `repair --mode sqlite-replay` run completed 2026-07-03T18:13:13Z:
+    `status=completed`, `replayed=856,510 == planned_reembed_count`,
+    `verified_count=856,510`, `warnings=[]`, duration `18,621.7s` (~5h10m).
+    Result artifact:
+    `C:\Users\Milky\.mempalace\repair-runs\sqlite-replay-final-20260703T130250Z\result.json`.
+    Follow-up `repair-status` (2026-07-04): drawers `sqlite=861,715`,
+    `hnsw=850,000`, divergence `11,715`, `status=OK`; closets
+    `sqlite=12,107`, `hnsw=11,826`, divergence `281`, `status=OK`. Divergence
+    fell from `818,039` to `11,715` (98.6% convergence); the remainder is
+    ordinary flush lag. The stale post-replay maintenance marker was archived
+    to `maintenance-audits\archived-markers\` and cleared, and router/bridge
+    were formally restored (see agent-settings#201/#209 for the follow-up
+    launcher/bridge reliability bugs found in the same pass).
 
 - [#14 - mempalace status imports Chroma before SQLite fallback in lean runtimes](https://github.com/iMelki/mempalace/issues/14)
   - 2026-07-03: split CLI status into dependency-light `mempalace.status`,
