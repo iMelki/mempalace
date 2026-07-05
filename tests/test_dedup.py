@@ -269,3 +269,25 @@ def test_dedup_palace_no_groups(mock_backend_cls, mock_groups, mock_dedup_group,
     mock_groups.return_value = {}
     dedup.dedup_palace(palace_path=str(tmp_path), dry_run=True)
     mock_dedup_group.assert_not_called()
+
+
+def test_cli_bare_invocation_defaults_to_dry_run():
+    """Safety regression (iMelki/mempalace#19): bare `python -m mempalace.dedup`
+    must be a dry-run preview; live deletion requires an explicit --apply."""
+    import subprocess
+    import sys
+
+    # --apply and --dry-run together must be rejected (argparse error, exit 2)
+    res = subprocess.run(
+        [sys.executable, "-m", "mempalace.dedup", "--apply", "--dry-run"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert res.returncode == 2
+    assert "mutually exclusive" in res.stderr
+
+    # bare invocation against a nonexistent palace should never reach a live
+    # delete path; we only assert the parser wiring here (dry_run=not apply)
+    src = open("mempalace/dedup.py", encoding="utf-8").read()
+    assert "dry_run=not args.apply" in src

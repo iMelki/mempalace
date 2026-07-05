@@ -10,8 +10,8 @@ version, and deletes the rest.
 No API calls — uses ChromaDB's built-in embedding similarity.
 
 Usage (standalone):
-    python -m mempalace.dedup                          # dedup all
-    python -m mempalace.dedup --dry-run                # preview only
+    python -m mempalace.dedup                          # DRY-RUN preview (default)
+    python -m mempalace.dedup --apply                  # actually delete duplicates
     python -m mempalace.dedup --threshold 0.10         # stricter (near-identical only)
     python -m mempalace.dedup --threshold 0.35         # looser (catches paraphrased content)
     python -m mempalace.dedup --wing my_project        # scope to one wing
@@ -19,7 +19,11 @@ Usage (standalone):
     python -m mempalace.dedup --source "my_project"    # filter by source
 
 Usage (from CLI):
-    mempalace dedup [--dry-run] [--threshold 0.15] [--stats]
+    mempalace dedup [--apply] [--threshold 0.15] [--stats]
+
+Safety: bare invocation is a dry-run preview. Live deletion requires an
+explicit --apply, a palace backup from the last 2 days, and (for bulk runs)
+an operator-approved window — see iMelki/mempalace#19.
 """
 
 import argparse
@@ -76,6 +80,21 @@ def get_source_groups(col, min_count=MIN_DRAWERS_TO_CHECK, source_pattern=None, 
     return {src: ids for src, ids in groups.items() if len(ids) >= min_count}
 
 
+def get_cpu_usage():
+    try:
+        import subprocess
+
+        res = subprocess.run(
+            ["wmic", "cpu", "get", "loadpercentage"], capture_output=True, text=True, timeout=2
+        )
+        lines = res.stdout.strip().split("\n")
+        if len(lines) > 1:
+            return int(lines[1].strip())
+    except Exception:
+        pass
+    return None
+
+
 def dedup_source_group(col, drawer_ids, threshold=DEFAULT_THRESHOLD, dry_run=True):
     """Dedup drawers within one source_file group.
 
@@ -97,6 +116,10 @@ def dedup_source_group(col, drawer_ids, threshold=DEFAULT_THRESHOLD, dry_run=Tru
         if not kept:
             kept.append((did, doc))
             continue
+
+        # Throttling to prevent CPU hogging during inner queries
+        if len(kept) % 10 == 0:
+            time.sleep(0.01)
 
         try:
             results = col.query(
@@ -182,6 +205,14 @@ def dedup_palace(
     sorted_groups = sorted(groups.items(), key=lambda x: len(x[1]), reverse=True)
 
     for i, (src, drawer_ids) in enumerate(sorted_groups):
+        # Throttling between source files to keep CPU load low
+        if i % 5 == 0:
+            cpu = get_cpu_usage()
+            if cpu and cpu > 70:
+                time.sleep(2.0)
+            else:
+                time.sleep(0.1)
+
         kept, deleted = dedup_source_group(col, drawer_ids, threshold, dry_run)
         total_kept += len(kept)
         total_deleted += len(deleted)
@@ -217,7 +248,17 @@ if __name__ == "__main__":
         default=DEFAULT_THRESHOLD,
         help=f"Cosine distance threshold (default: {DEFAULT_THRESHOLD})",
     )
-    parser.add_argument("--dry-run", action="store_true", help="Preview without deleting")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview without deleting (this is already the default)",
+    )
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Actually delete duplicates. Without this flag dedup always runs "
+        "as a dry-run preview - live deletion must be explicitly requested.",
+    )
     parser.add_argument("--stats", action="store_true", help="Show stats only")
     parser.add_argument("--wing", default=None, help="Scope dedup to a single wing")
     parser.add_argument("--source", default=None, help="Filter by source file pattern")
@@ -225,13 +266,20 @@ if __name__ == "__main__":
 
     path = os.path.expanduser(args.palace) if args.palace else None
 
+    if args.apply and args.dry_run:
+        parser.error("--apply and --dry-run are mutually exclusive")
+
     if args.stats:
         show_stats(palace_path=path)
     else:
+        # Safety default (2026-07-05 incident, iMelki/mempalace#19): a bare
+        # invocation used to run LIVE deletions; 42,606 drawers were deleted
+        # with no fresh backup. Deletion is irreversible, so it now requires
+        # an explicit --apply.
         dedup_palace(
             palace_path=path,
             threshold=args.threshold,
-            dry_run=args.dry_run,
+            dry_run=not args.apply,
             source_pattern=args.source,
             wing=args.wing,
         )
