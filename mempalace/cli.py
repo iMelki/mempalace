@@ -642,11 +642,15 @@ def cmd_status(args):
 
 
 def cmd_repair_status(args):
-    """Read-only HNSW capacity health check (#1222)."""
+    """Read-only HNSW capacity health check (#1222, #18)."""
     from .repair import status as repair_status
 
     palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
-    repair_status(palace_path=palace_path)
+    repair_status(
+        palace_path=palace_path,
+        as_json=getattr(args, "json", False),
+        artifact_dir=getattr(args, "artifact_dir", None),
+    )
 
 
 def cmd_repair(args):
@@ -1298,9 +1302,22 @@ def main():
     )
 
     # repair-status — read-only HNSW capacity health check (#1222)
-    sub.add_parser(
+    p_repair_status = sub.add_parser(
         "repair-status",
         help="Compare sqlite vs HNSW element counts (read-only; never opens a chromadb client)",
+    )
+    p_repair_status.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit a single machine-readable status JSON object to stdout instead of the human summary",
+    )
+    p_repair_status.add_argument(
+        "--artifact-dir",
+        default=None,
+        help=(
+            "Also write the same status JSON to a timestamped repair-status-<UTC>.json "
+            "file in this directory (read-only probe; never creates a repair-run directory)"
+        ),
     )
 
     # mcp

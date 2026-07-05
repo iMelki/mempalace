@@ -1,6 +1,6 @@
 # MemPalace Open Tasks
 
-Last updated: 2026-07-04
+Last updated: 2026-07-05
 
 This file is the durable local index for active `mempalace` issues.
 
@@ -40,21 +40,6 @@ This file is the durable local index for active `mempalace` issues.
     snapshot even when callers pass `--no-backup`. These are abort gates and
     observability artifacts, not resumable partial replay controls.
 
-- [#18 - repair-status lacks machine-readable read-only parity artifacts](https://github.com/iMelki/mempalace/issues/18)
-  - Goal: let agents and incident bundles capture HNSW/SQLite parity counts
-    without scraping human text or launching a replay dry-run.
-  - Status: bug report filed from the 2026-07-03 sidecar preflight. Current
-    workaround is to record `repair-status` text output plus existing replay
-    dry-run artifacts; desired fix is `repair-status --json` and optional
-    read-only artifact output.
-  - 2026-07-03 update: fresh proof still confirms the gap. `repair-status`
-    reports drawers `sqlite=851,964`, `hnsw=33,982`, divergence `817,982`, but
-    `repair-status --help` exposes no JSON or artifact option.
-  - 2026-07-03 final drain update: fresh `repair-status` reports drawers
-    `sqlite=856,510`, `hnsw=38,471`, divergence `818,039`, and
-    `repair-status --help` still exposes only human-readable help/no JSON
-    artifact output.
-
 - [#15 - Local test bootstrap depends on fragile PATH and PyPI TLS state](https://github.com/iMelki/mempalace/issues/15)
   - Goal: make focused MemPalace tests runnable without guessing which Python
     is on `PATH` or relying on a fresh PyPI download during repair work.
@@ -86,6 +71,19 @@ This file is the durable local index for active `mempalace` issues.
   - Status: Open (preserved branch `agent/codex/mempalace-search-mcp-wip`).
 
 ## Recently Completed
+
+- [#18 - repair-status lacks machine-readable read-only parity artifacts](https://github.com/iMelki/mempalace/issues/18)
+  - 2026-07-05: implemented `mempalace repair-status --json` (single JSON
+    object to stdout: schema `mempalace.repair-status.v1`, palace path, UTC
+    timestamp, per-collection `sqlite_count`/`hnsw_count`/`divergence`/
+    `status`/`note`) plus optional `--artifact-dir` writing the same JSON to
+    a timestamped `repair-status-<UTC>.json` file with no repair-run
+    directory. Default human output verified byte-identical against the
+    dd6a158 baseline on the live palace; live `--json` readback reported
+    drawers `sqlite=868,028`, `hnsw=850,000`, divergence `18,028`, `OK` and
+    closets `12,107`/`11,826`/`281`, `OK`. Tests cover drawers-diverged,
+    closets-within-tolerance, missing palace, artifact writing, human-path
+    preservation, lean-runtime (blocked `chromadb` import), and CLI wiring.
 
 - [#12 - Rebuild quarantined drawers HNSW segment after local crash repair](https://github.com/iMelki/mempalace/issues/12)
   - 2026-07-04: closed with proof. The non-dry

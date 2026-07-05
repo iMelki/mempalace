@@ -8,6 +8,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [3.3.5] — unreleased
 
+### Added
+
+- **`mempalace repair-status --json` — machine-readable read-only parity
+  status.** Emits a single JSON object to stdout with a schema identifier
+  (`mempalace.repair-status.v1`), palace path, UTC timestamp, and
+  per-collection (drawers, closets) `sqlite_count`, `hnsw_count`,
+  `divergence`, `status` (`OK`/`DIVERGED`), and `note` — so incident bundles
+  and sidecar agents can capture exact SQLite-vs-HNSW parity counts without
+  scraping console text or launching a replay dry-run. An optional
+  `--artifact-dir` writes the same JSON to a timestamped
+  `repair-status-<UTC>.json` file without ever creating a repair-run
+  directory. The default human output is byte-identical when the flags are
+  absent, and the probe stays dependency-light (works in lean runtimes
+  without `chromadb`). (#18)
+
 ### Operations
 
 - **2026-07-04: drawers HNSW segment fully rebuilt and verified (#12 closed).**

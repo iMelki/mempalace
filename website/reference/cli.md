@@ -136,7 +136,14 @@ opening a Chroma client.
 
 ```bash
 mempalace repair-status
+mempalace repair-status --json
+mempalace repair-status --json --artifact-dir /path/to/incident-bundle
 ```
+
+| Option | Description |
+|--------|-------------|
+| `--json` | Emit a single machine-readable status JSON object to stdout instead of the human summary. Includes a schema identifier, palace path, UTC timestamp, and per-collection (drawers, closets) `sqlite_count`, `hnsw_count`, `divergence`, `status` (`OK`/`DIVERGED`), and `note`. |
+| `--artifact-dir` | Also write the same status JSON to a timestamped `repair-status-<UTC>.json` file in this directory. The probe stays read-only and never creates a repair-run directory. Without `--json`, the human output is unchanged and the artifact is still written. |
 
 Use this before any repair. A large `DIVERGED` drawers result means vector
 search is missing drawers and `repair --mode sqlite-replay --dry-run` is the

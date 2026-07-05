@@ -460,6 +460,182 @@ def test_repair_status_quiet_on_healthy_palace(tmp_path, capsys):
     assert "Recommended" not in captured
 
 
+# ── repair-status --json / --artifact-dir (#18) ───────────────────────
+
+
+def _seed_extra_collection(
+    palace: str,
+    collection_name: str,
+    sqlite_count: int,
+    segment_id: str,
+    id_offset: int = 1_000_000,
+) -> None:
+    """Add a second collection + VECTOR segment to an existing seeded db."""
+    db_path = os.path.join(palace, "chroma.sqlite3")
+    conn = sqlite3.connect(db_path)
+    try:
+        col_id = f"col-{collection_name}"
+        conn.execute("INSERT INTO collections (id, name) VALUES (?, ?)", (col_id, collection_name))
+        conn.execute(
+            "INSERT INTO segments (id, collection, scope) VALUES (?, ?, 'VECTOR')",
+            (segment_id, col_id),
+        )
+        conn.execute(
+            "INSERT INTO segments (id, collection, scope) VALUES (?, ?, 'METADATA')",
+            (f"{segment_id}-meta", col_id),
+        )
+        for i in range(sqlite_count):
+            conn.execute(
+                """INSERT INTO embeddings (id, segment_id, embedding_id, seq_id)
+                   VALUES (?, ?, ?, ?)""",
+                (id_offset + i, segment_id, f"c-{i}", b"\x00\x00\x00\x00\x00\x00\x00\x01"),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_repair_status_json_diverged_drawers_and_ok_closets(tmp_path, capsys):
+    """--json emits one parseable JSON object covering both collections."""
+    import json
+
+    from mempalace.repair import REPAIR_STATUS_SCHEMA, status as repair_status
+
+    _seed_chroma_db(str(tmp_path), sqlite_count=20_000, segment_id="seg-d")
+    _write_pickle(str(tmp_path), "seg-d", hnsw_count=2_000)
+    _seed_extra_collection(str(tmp_path), "mempalace_closets", sqlite_count=500, segment_id="seg-c")
+    _write_pickle(str(tmp_path), "seg-c", hnsw_count=480)
+
+    payload = repair_status(palace_path=str(tmp_path), as_json=True)
+    captured = capsys.readouterr().out
+    # The entire stdout is exactly one JSON object — no human banner lines.
+    parsed = json.loads(captured)
+    assert parsed == payload
+    assert "MemPalace Repair" not in captured
+
+    assert parsed["schema"] == REPAIR_STATUS_SCHEMA
+    assert parsed["palace_path"] == str(tmp_path)
+    assert parsed["palace_found"] is True
+    assert parsed["generated_at_utc"].endswith("Z")
+    assert parsed["artifact_path"] is None
+
+    drawers = parsed["collections"]["drawers"]
+    assert drawers["collection"] == "mempalace_drawers"
+    assert drawers["sqlite_count"] == 20_000
+    assert drawers["hnsw_count"] == 2_000
+    assert drawers["divergence"] == 18_000
+    assert drawers["status"] == "DIVERGED"
+    assert "invisible to vector search" in drawers["note"]
+
+    closets = parsed["collections"]["closets"]
+    assert closets["collection"] == "mempalace_closets"
+    assert closets["sqlite_count"] == 500
+    assert closets["hnsw_count"] == 480
+    assert closets["divergence"] == 20
+    assert closets["status"] == "OK"
+    assert "flush-lag tolerance" in closets["note"]
+
+
+def test_repair_status_json_no_palace(tmp_path, capsys):
+    import json
+
+    from mempalace.repair import status as repair_status
+
+    missing = os.path.join(str(tmp_path), "nope")
+    payload = repair_status(palace_path=missing, as_json=True)
+    parsed = json.loads(capsys.readouterr().out)
+    assert parsed == payload
+    assert parsed["palace_found"] is False
+    assert parsed["collections"] == {}
+
+
+def test_repair_status_artifact_dir_writes_single_timestamped_file(tmp_path, capsys):
+    """--artifact-dir writes the same JSON to one flat file — no repair-run dir."""
+    import json
+
+    from mempalace.repair import status as repair_status
+
+    palace = tmp_path / "palace"
+    palace.mkdir()
+    _seed_chroma_db(str(palace), sqlite_count=500, segment_id="seg-a")
+    _write_pickle(str(palace), "seg-a", hnsw_count=480)
+    artifact_dir = tmp_path / "artifacts"
+
+    payload = repair_status(palace_path=str(palace), as_json=True, artifact_dir=str(artifact_dir))
+    captured = capsys.readouterr().out
+
+    files = list(artifact_dir.glob("repair-status-*.json"))
+    assert len(files) == 1
+    on_disk = json.loads(files[0].read_text(encoding="utf-8"))
+    assert on_disk == payload == json.loads(captured)
+    assert payload["artifact_path"] == str(files[0])
+    # Read-only probe: nothing written inside the palace itself.
+    assert not (palace / ".mempalace").exists()
+
+
+def test_repair_status_artifact_dir_keeps_human_output(tmp_path, capsys):
+    """--artifact-dir without --json still prints the unchanged human summary."""
+    from mempalace.repair import status as repair_status
+
+    palace = tmp_path / "palace"
+    palace.mkdir()
+    _seed_chroma_db(str(palace), sqlite_count=500, segment_id="seg-h")
+    _write_pickle(str(palace), "seg-h", hnsw_count=480)
+    artifact_dir = tmp_path / "artifacts"
+
+    out = repair_status(palace_path=str(palace), artifact_dir=str(artifact_dir))
+    captured = capsys.readouterr().out
+    assert "MemPalace Repair — Status" in captured
+    assert "DIVERGED" not in captured
+    # Legacy return shape is preserved on the human path.
+    assert out["drawers"]["diverged"] is False
+    assert len(list(artifact_dir.glob("repair-status-*.json"))) == 1
+
+
+def test_repair_status_json_lean_runtime_blocks_chroma_import(tmp_path, capsys, monkeypatch):
+    """--json must work when chromadb cannot be imported (lean sidecar runtime)."""
+    import builtins
+    import json
+
+    from mempalace.repair import status as repair_status
+
+    seg = "seg-lean"
+    _seed_chroma_db(str(tmp_path), sqlite_count=20_000, segment_id=seg)
+    _write_pickle(str(tmp_path), seg, hnsw_count=2_000)
+
+    real_import = builtins.__import__
+
+    def guarded(name, *args, **kwargs):
+        if name == "chromadb" or name.startswith("chromadb."):
+            raise ImportError(f"blocked in lean-runtime test: {name}")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guarded)
+    payload = repair_status(palace_path=str(tmp_path), as_json=True)
+    parsed = json.loads(capsys.readouterr().out)
+    assert parsed == payload
+    assert parsed["collections"]["drawers"]["status"] == "DIVERGED"
+
+
+def test_cli_repair_status_json_flag(tmp_path, capsys, monkeypatch):
+    """`mempalace repair-status --json` is wired through the CLI dispatcher."""
+    import json
+
+    from mempalace import cli
+
+    seg = "seg-cli"
+    _seed_chroma_db(str(tmp_path), sqlite_count=500, segment_id=seg)
+    _write_pickle(str(tmp_path), seg, hnsw_count=480)
+    monkeypatch.setattr(
+        "sys.argv",
+        ["mempalace", "--palace", str(tmp_path), "repair-status", "--json"],
+    )
+    cli.main()
+    parsed = json.loads(capsys.readouterr().out)
+    assert parsed["collections"]["drawers"]["status"] == "OK"
+    assert parsed["palace_path"] == str(tmp_path)
+
+
 # ── tool_status sqlite fallback (#1222 short-circuit) ─────────────────
 
 

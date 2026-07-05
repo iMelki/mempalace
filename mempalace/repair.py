@@ -40,6 +40,8 @@ from datetime import datetime, timezone
 from typing import Any, Iterator, Optional
 
 COLLECTION_NAME = "mempalace_drawers"
+CLOSETS_COLLECTION_NAME = "mempalace_closets"
+REPAIR_STATUS_SCHEMA = "mempalace.repair-status.v1"
 ChromaBackend = None
 hnsw_capacity_status = None
 
@@ -1194,7 +1196,57 @@ def rebuild_index(palace_path=None, confirm_truncation_ok: bool = False):
     print(f"\n{'=' * 55}\n")
 
 
-def status(palace_path=None) -> dict:
+def status_payload(palace_path=None) -> dict:
+    """Build the machine-readable ``repair-status`` payload (read-only).
+
+    Mirrors the human output of :func:`status` field-for-field so incident
+    bundles and sidecar agents can capture exact SQLite-vs-HNSW parity
+    counts without scraping console text or launching a replay dry-run.
+    Like :func:`status`, it never opens a chromadb client and never
+    imports hnswlib, so it works in lean runtimes too. (#18)
+    """
+    palace_path = palace_path or _get_palace_path()
+    payload: dict[str, Any] = {
+        "schema": REPAIR_STATUS_SCHEMA,
+        "generated_at_utc": _utc_now_iso(),
+        "palace_path": palace_path,
+        "palace_found": os.path.isdir(palace_path),
+        "collections": {},
+    }
+    if not payload["palace_found"]:
+        return payload
+    capacity_status = _get_hnsw_capacity_status()
+    for label, collection_name in (
+        ("drawers", COLLECTION_NAME),
+        ("closets", CLOSETS_COLLECTION_NAME),
+    ):
+        info = capacity_status(palace_path, collection_name)
+        payload["collections"][label] = {
+            "collection": collection_name,
+            "sqlite_count": info["sqlite_count"],
+            "hnsw_count": info["hnsw_count"],
+            "divergence": info["divergence"],
+            "status": "DIVERGED" if info["diverged"] else info["status"].upper(),
+            "note": info["message"],
+        }
+    return payload
+
+
+def _write_status_artifact(payload: dict, artifact_dir: str) -> str:
+    """Write the status payload to a timestamped JSON file; return its path.
+
+    A single flat file — deliberately never a repair-run directory — so
+    the probe stays visibly read-only against the palace. (#18)
+    """
+    resolved_dir = os.path.abspath(os.path.expanduser(artifact_dir))
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    artifact_path = os.path.join(resolved_dir, f"repair-status-{stamp}.json")
+    payload["artifact_path"] = artifact_path
+    _write_json_file(artifact_path, payload)
+    return artifact_path
+
+
+def status(palace_path=None, *, as_json=False, artifact_dir=None) -> dict:
     """Read-only health check: compare sqlite vs HNSW element counts.
 
     Catches the #1222 failure mode where chromadb's HNSW segment freezes
@@ -1208,10 +1260,27 @@ def status(palace_path=None) -> dict:
     hnswlib — it reads ``chroma.sqlite3`` and ``index_metadata.pickle``
     directly via :func:`mempalace.backends.chroma.hnsw_capacity_status`.
 
+    With ``as_json=True`` the command prints a single machine-readable
+    JSON object (see :func:`status_payload`) instead of the human
+    summary and returns that payload. ``artifact_dir`` additionally
+    writes the same payload to a timestamped ``repair-status-*.json``
+    file; combined with the default human output it leaves the console
+    text unchanged. (#18)
+
     Returns the capacity-status dict (also printed). Returns a dict with
     ``status="unknown"`` when no palace exists at the given path.
     """
     palace_path = palace_path or _get_palace_path()
+
+    if as_json or artifact_dir:
+        payload = status_payload(palace_path=palace_path)
+        payload["artifact_path"] = None
+        if artifact_dir:
+            _write_status_artifact(payload, artifact_dir)
+        if as_json:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+            return payload
+
     print(f"\n{'=' * 55}")
     print("  MemPalace Repair — Status")
     print(f"{'=' * 55}\n")
@@ -1513,12 +1582,22 @@ if __name__ == "__main__":
     p.add_argument("--palace", default=None, help="Palace directory path")
     p.add_argument("--wing", default=None, help="Scan only this wing")
     p.add_argument("--confirm", action="store_true", help="Actually delete corrupt IDs")
+    p.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable status JSON to stdout (status only)",
+    )
+    p.add_argument(
+        "--artifact-dir",
+        default=None,
+        help="Also write the status JSON to a timestamped file in this directory (status only)",
+    )
     args = p.parse_args()
 
     path = os.path.expanduser(args.palace) if args.palace else None
 
     if args.command == "status":
-        status(palace_path=path)
+        status(palace_path=path, as_json=args.json, artifact_dir=args.artifact_dir)
     elif args.command == "scan":
         scan_palace(palace_path=path, only_wing=args.wing)
     elif args.command == "prune":
