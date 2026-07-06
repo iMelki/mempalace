@@ -10,6 +10,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **`mempalace warm [--json]` — pre-pay the post-mutation first-open cost.**
+  Bulk mutations (dedup `--apply`, sqlite-replay) can leave heavy one-time
+  work for the next palace open (measured `1,004.3s` after the 2026-07-06
+  42,606-drawer dedup, vs `4.6s` warm). `warm` runs a single vector query so
+  that cost lands at mutation time; `dedup --apply` now auto-warms after
+  deletions. Emits `mempalace.warm.v1` JSON with `--json`. (#19)
+
 - **`mempalace repair-status --json` — machine-readable read-only parity
   status.** Emits a single JSON object to stdout with a schema identifier
   (`mempalace.repair-status.v1`), palace path, UTC timestamp, and
