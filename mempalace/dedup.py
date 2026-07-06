@@ -234,7 +234,22 @@ def dedup_palace(
     print(f"  Palace after: {col.count():,} drawers")
 
     if dry_run:
-        print("\n  [DRY RUN] No changes written. Re-run without --dry-run to apply.")
+        print("\n  [DRY RUN] No changes written. Re-run with --apply to delete.")
+
+    if not dry_run and total_deleted:
+        # Post-mutation warm (iMelki/mempalace#19): the first palace open
+        # after bulk deletions can do heavy one-time work (measured 1,004s
+        # after a 42,606-drawer dedup). Pay that cost here, at mutation time,
+        # instead of ambushing the next bridge start or agent query.
+        print("\n  Pre-warming palace after deletions...")
+        t_warm = time.time()
+        try:
+            from .searcher import search_memories
+
+            search_memories("warmup", palace_path, n_results=1)
+            print(f"  Palace warm in {time.time() - t_warm:.1f}s")
+        except Exception as e:
+            print(f"  Warm warning (non-fatal): {e}")
 
     print(f"{'=' * 55}\n")
 

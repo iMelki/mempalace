@@ -653,6 +653,47 @@ def cmd_repair_status(args):
     )
 
 
+def cmd_warm(args):
+    """Pre-warm the vector search stack (embedding model + HNSW + any pending
+    post-mutation work), so the next reader pays seconds, not minutes.
+
+    Bulk mutations (dedup --apply, sqlite-replay) can leave the palace in a
+    state where the FIRST subsequent open does heavy one-time work — measured
+    at 1,004s after a 42,606-drawer dedup on 2026-07-06 (vs 4.6s once warm).
+    Running `mempalace warm` right after any bulk mutation moves that cost to
+    mutation time instead of ambushing the next bridge start or agent query.
+    See iMelki/mempalace#19 and iMelki/agent-settings#209.
+    """
+    import json as _json
+    import time as _time
+
+    from .searcher import search_memories
+
+    palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
+    as_json = getattr(args, "json", False)
+    if not as_json:
+        print(f"Warming palace at {palace_path} (model + HNSW + pending work)...")
+    t0 = _time.time()
+    out = search_memories("warmup", palace_path, n_results=1)
+    elapsed = round(_time.time() - t0, 1)
+    error = out.get("error") if isinstance(out, dict) else f"unexpected result type {type(out)}"
+    payload = {
+        "schema": "mempalace.warm.v1",
+        "palace_path": palace_path,
+        "warm_seconds": elapsed,
+        "ok": error is None,
+        "error": error,
+    }
+    if as_json:
+        print(_json.dumps(payload))
+    elif error:
+        print(f"Warm FAILED after {elapsed}s: {error}")
+    else:
+        print(f"Palace warm in {elapsed}s.")
+    if error:
+        sys.exit(1)
+
+
 def cmd_repair(args):
     """Rebuild palace vector index from SQLite metadata."""
     import shutil
@@ -1320,6 +1361,21 @@ def main():
         ),
     )
 
+    # warm — pre-pay the first-open cost after bulk mutations (#19)
+    p_warm = sub.add_parser(
+        "warm",
+        help=(
+            "Pre-warm vector search (model + HNSW + pending post-mutation work). "
+            "Run after dedup --apply or sqlite-replay so the next reader pays "
+            "seconds, not minutes."
+        ),
+    )
+    p_warm.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit a single machine-readable warm result JSON object to stdout",
+    )
+
     # mcp
     sub.add_parser(
         "mcp",
@@ -1377,6 +1433,7 @@ def main():
         "wake-up": cmd_wakeup,
         "repair": cmd_repair,
         "repair-status": cmd_repair_status,
+        "warm": cmd_warm,
         "migrate": cmd_migrate,
         "status": cmd_status,
     }

@@ -291,3 +291,39 @@ def test_cli_bare_invocation_defaults_to_dry_run():
     # delete path; we only assert the parser wiring here (dry_run=not apply)
     src = open("mempalace/dedup.py", encoding="utf-8").read()
     assert "dry_run=not args.apply" in src
+
+
+def test_live_dedup_prewarns_palace_after_deletions(monkeypatch, capsys):
+    """iMelki/mempalace#19: after live deletions, dedup must pre-warm the
+    palace so the one-time post-mutation open cost is paid at mutation time."""
+    calls = []
+
+    import mempalace.searcher as searcher
+
+    monkeypatch.setattr(
+        searcher,
+        "search_memories",
+        lambda *a, **k: calls.append((a, k)) or {"results": []},
+    )
+    monkeypatch.setattr(dedup, "get_source_groups", lambda *a, **k: {"src.md": ["d1", "d2"]})
+    monkeypatch.setattr(dedup, "dedup_source_group", lambda *a, **k: (["d1"], ["d2"]))
+
+    class _FakeCol:
+        def count(self):
+            return 2
+
+    class _FakeBackend:
+        def get_collection(self, *a, **k):
+            return _FakeCol()
+
+    monkeypatch.setattr(dedup, "ChromaBackend", lambda: _FakeBackend())
+
+    dedup.dedup_palace(palace_path="X:/fake-palace", dry_run=False)
+    out = capsys.readouterr().out
+    assert "Pre-warming palace" in out
+    assert calls, "post-deletion warm did not invoke search_memories"
+
+    # dry runs must NOT warm
+    calls.clear()
+    dedup.dedup_palace(palace_path="X:/fake-palace", dry_run=True)
+    assert not calls
