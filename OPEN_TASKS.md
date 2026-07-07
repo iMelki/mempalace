@@ -1,6 +1,6 @@
 # MemPalace Open Tasks
 
-Last updated: 2026-07-05
+Last updated: 2026-07-07
 
 This file is the durable local index for active `mempalace` issues.
 
@@ -26,6 +26,25 @@ This file is the durable local index for active `mempalace` issues.
     pins can read the rebuilt HNSW files; then relax wrapper patches behind a
     feature flag, or make the keyword fallback a visible CoreHealth warning
     instead of a silent note.
+
+- [#19 - Audit likely duplicate drawers surfaced by #13 probe](https://github.com/iMelki/mempalace/issues/19)
+  - Status: open go/no-go decision. This is a duplicate-drawer audit and
+    dedupe safety lane, not a live deletion approval.
+  - Evidence: `python -m mempalace.dedup --stats` completed read-only on
+    2026-07-07 against the current 825,422-drawer palace. It found 10,945
+    sources with 5+ drawers, 791,410 drawers in those source groups, and a
+    heuristic remaining duplicate estimate of about 292,998 drawers.
+  - Interpretation: the 292,998 number is a coarse estimate (`40%` of drawers
+    in source groups larger than 20), not a reviewed deletion list. Top
+    offenders are mostly bulk repo digests and export staging trees where
+    near-identical chunks can be legitimate.
+  - Safety state: bare `python -m mempalace.dedup` is now dry-run by default;
+    live mutation requires `--apply`. `dedup --apply` auto-runs
+    `mempalace warm` after deletions so the post-mutation cold-open cost is
+    paid during the approved mutation window.
+  - Decision needed: approve or reject a supervised dedup pass. Recommended
+    shape if approved is source-scoped top-10 dry-run first, then `--apply`
+    per source only with fresh backup, artifact logging, and operator sign-off.
 
 - [#16 - SQLite replay lacks bounded window, checkpoint, and structured repair artifacts](https://github.com/iMelki/mempalace/issues/16)
   - Goal: add operator-grade controls before replaying the full 851,964-row

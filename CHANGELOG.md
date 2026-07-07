@@ -32,6 +32,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Operations
 
+- **2026-07-07: duplicate-drawer go/no-go tracking clarified (#19).**
+  `OPEN_TASKS.md` now lists #19 as an active supervised decision lane, records
+  the read-only `dedup --stats` estimate (`~292,998` heuristic remaining
+  duplicates over the 825,422-drawer palace), and keeps live deletion gated on
+  source-scoped dry-run review, fresh backup, artifact logging, and operator
+  sign-off. The estimate is explicitly not a reviewed deletion list.
+
 - **2026-07-04: drawers HNSW segment fully rebuilt and verified (#12 closed).**
   The supervised non-dry `repair --mode sqlite-replay` completed
   2026-07-03T18:13:13Z with `replayed=verified_count=856,510`, zero warnings,
