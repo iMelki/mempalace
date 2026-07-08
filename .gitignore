@@ -37,3 +37,5 @@ venv/
 
 # ChromaDB local data
 *.sqlite3-journal
+!.env.example
+!.env.example.*

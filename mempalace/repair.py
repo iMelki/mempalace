@@ -30,17 +30,234 @@ Usage (from CLI):
 """
 
 import argparse
+import json
 import os
+import pickle
 import shutil
 import sqlite3
 import time
-from datetime import datetime
-from typing import Optional
-
-from .backends.chroma import ChromaBackend, hnsw_capacity_status
-
+from datetime import datetime, timezone
+from typing import Any, Iterator, Optional
 
 COLLECTION_NAME = "mempalace_drawers"
+CLOSETS_COLLECTION_NAME = "mempalace_closets"
+REPAIR_STATUS_SCHEMA = "mempalace.repair-status.v1"
+ChromaBackend = None
+hnsw_capacity_status = None
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _write_json_file(path: str, payload: dict[str, Any]) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, sort_keys=True)
+        f.write("\n")
+
+
+def _append_jsonl(path: str, payload: dict[str, Any]) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(payload, sort_keys=True))
+        f.write("\n")
+
+
+def _sqlite_replay_artifact_paths(
+    palace_path: str, *, artifact_dir: Optional[str], run_id: str
+) -> dict[str, str]:
+    if artifact_dir:
+        resolved_dir = os.path.abspath(os.path.expanduser(artifact_dir))
+    else:
+        resolved_dir = os.path.join(
+            palace_path,
+            ".mempalace",
+            "repair-runs",
+            f"sqlite-replay-{run_id}",
+        )
+    return {
+        "artifact_dir": resolved_dir,
+        "result_json": os.path.join(resolved_dir, "result.json"),
+        "events_log": os.path.join(resolved_dir, "events.jsonl"),
+    }
+
+
+def _planned_batches(count: int, batch_size: int) -> int:
+    if count <= 0:
+        return 0
+    return (count + batch_size - 1) // batch_size
+
+
+def _get_chroma_backend_cls():
+    """Import Chroma lazily so SQLite-only repair modes stay dependency-light."""
+    global ChromaBackend
+    if ChromaBackend is None:
+        from .backends.chroma import ChromaBackend as _ChromaBackend
+
+        ChromaBackend = _ChromaBackend
+    return ChromaBackend
+
+
+def _get_hnsw_capacity_status():
+    """Return the HNSW probe without importing Chroma.
+
+    ``repair-status`` must work in lean Python environments that can read
+    ``chroma.sqlite3`` but do not have ``chromadb`` installed. Importing
+    ``mempalace.backends.chroma`` walks through the package initializer and
+    requires Chroma, so keep the dependency-free probe local to this module.
+    """
+    global hnsw_capacity_status
+    if hnsw_capacity_status is None:
+        hnsw_capacity_status = _hnsw_capacity_status_local
+    return hnsw_capacity_status
+
+
+class _PersistentDataStub:
+    """Minimal stand-in for Chroma's PersistentData during safe unpickling."""
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def __setstate__(self, state):
+        if isinstance(state, dict):
+            self.__dict__.update(state)
+        elif isinstance(state, tuple) and len(state) == 2 and isinstance(state[1], dict):
+            self.__dict__.update(state[1])
+
+
+class _SafePersistentDataUnpickler:
+    _ALLOWED = frozenset(
+        {
+            (
+                "chromadb.segment.impl.vector.local_persistent_hnsw",
+                "PersistentData",
+            ),
+        }
+    )
+
+    @classmethod
+    def load(cls, path: str):
+        class _Restricted(pickle.Unpickler):
+            def find_class(self, module: str, name: str):
+                if (module, name) in cls._ALLOWED:
+                    return _PersistentDataStub
+                raise pickle.UnpicklingError(f"disallowed class: {module}.{name}")
+
+        with open(path, "rb") as f:
+            return _Restricted(f).load()
+
+
+def _hnsw_element_count(palace_path: str, segment_id: str) -> Optional[int]:
+    pickle_path = os.path.join(palace_path, segment_id, "index_metadata.pickle")
+    if not os.path.isfile(pickle_path):
+        return None
+    try:
+        persistent_data = _SafePersistentDataUnpickler.load(pickle_path)
+        if isinstance(persistent_data, dict):
+            id_to_label = persistent_data.get("id_to_label")
+        else:
+            id_to_label = getattr(persistent_data, "id_to_label", None)
+        if isinstance(id_to_label, dict):
+            return len(id_to_label)
+        return None
+    except Exception:
+        return None
+
+
+_HNSW_DIVERGENCE_FALLBACK_FLOOR = 2000
+_HNSW_DIVERGENCE_FRACTION = 0.10
+
+
+def _read_sync_threshold(palace_path: str, collection_name: str) -> int:
+    db_path = os.path.join(palace_path, "chroma.sqlite3")
+    if not os.path.isfile(db_path):
+        return 1000
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT cm.int_value
+                FROM collection_metadata cm
+                JOIN collections c ON cm.collection_id = c.id
+                WHERE c.name = ? AND cm.key = 'hnsw:sync_threshold'
+                """,
+                (collection_name,),
+            )
+            row = cur.fetchone()
+            if row and row[0] is not None:
+                return int(row[0])
+            return 1000
+        finally:
+            conn.close()
+    except Exception:
+        return 1000
+
+
+def _hnsw_capacity_status_local(palace_path: str, collection_name: str = COLLECTION_NAME) -> dict:
+    out: dict[str, Any] = {
+        "segment_id": None,
+        "sqlite_count": None,
+        "hnsw_count": None,
+        "divergence": None,
+        "diverged": False,
+        "status": "unknown",
+        "message": "",
+    }
+
+    try:
+        seg_id = _vector_segment_id(palace_path, collection_name)
+        out["segment_id"] = seg_id
+
+        sqlite_count = _sqlite_embedding_count(palace_path, collection_name)
+        out["sqlite_count"] = sqlite_count
+
+        if seg_id is None or sqlite_count is None:
+            out["message"] = "palace state unreadable; skipping HNSW capacity check"
+            return out
+
+        hnsw_count = _hnsw_element_count(palace_path, seg_id)
+        out["hnsw_count"] = hnsw_count
+
+        sync_threshold = _read_sync_threshold(palace_path, collection_name)
+        divergence_floor = max(_HNSW_DIVERGENCE_FALLBACK_FLOOR, 2 * sync_threshold)
+
+        if hnsw_count is None:
+            if sqlite_count > divergence_floor:
+                out["status"] = "diverged"
+                out["diverged"] = True
+                out["divergence"] = sqlite_count
+                out["message"] = (
+                    f"sqlite holds {sqlite_count:,} embeddings but the HNSW segment "
+                    "has never flushed metadata — vector search will return nothing "
+                    "until the segment is rebuilt. Run `mempalace repair`."
+                )
+            else:
+                out["message"] = "HNSW segment metadata not yet flushed; skipping"
+            return out
+
+        divergence = sqlite_count - hnsw_count
+        out["divergence"] = divergence
+        threshold = max(divergence_floor, int(sqlite_count * _HNSW_DIVERGENCE_FRACTION))
+        if divergence > threshold:
+            out["status"] = "diverged"
+            out["diverged"] = True
+            pct = 100.0 * divergence / max(sqlite_count, 1)
+            out["message"] = (
+                f"HNSW index holds {hnsw_count:,} elements but sqlite has "
+                f"{sqlite_count:,} embeddings — {divergence:,} drawers ({pct:.0f}%) "
+                "are invisible to vector search. Run `mempalace repair` to rebuild."
+            )
+        else:
+            out["status"] = "ok"
+            out["message"] = (
+                f"HNSW {hnsw_count:,} / sqlite {sqlite_count:,} (within flush-lag tolerance)"
+            )
+    except Exception:
+        out["message"] = "HNSW capacity probe raised; skipping"
+    return out
 
 
 def _get_palace_path():
@@ -95,7 +312,7 @@ def scan_palace(palace_path=None, only_wing=None):
     print(f"\n  Palace: {palace_path}")
     print("  Loading...")
 
-    col = ChromaBackend().get_collection(palace_path, COLLECTION_NAME)
+    col = _get_chroma_backend_cls()().get_collection(palace_path, COLLECTION_NAME)
 
     where = {"wing": only_wing} if only_wing else None
     total = col.count()
@@ -178,7 +395,7 @@ def prune_corrupt(palace_path=None, confirm=False):
         print("  Re-run with --confirm to actually delete.")
         return
 
-    col = ChromaBackend().get_collection(palace_path, COLLECTION_NAME)
+    col = _get_chroma_backend_cls()().get_collection(palace_path, COLLECTION_NAME)
     before = col.count()
     print(f"  Collection size before: {before:,}")
 
@@ -214,6 +431,8 @@ def prune_corrupt(palace_path=None, confirm=False):
 # overwrite when this exact value comes back is the simplest signal we
 # can detect without depending on chromadb internals.
 CHROMADB_DEFAULT_GET_LIMIT = 10_000
+SQLITE_REPLAY_DRY_RUN_EXACT_DOC_LIMIT = 100_000
+SQLITE_REPLAY_LARGE_REEMBED_LIMIT = 100_000
 
 
 class TruncationDetected(Exception):
@@ -306,8 +525,6 @@ def sqlite_drawer_count(palace_path: str) -> "int | None":
     if not os.path.exists(sqlite_path):
         return None
     try:
-        import sqlite3
-
         conn = sqlite3.connect(f"file:{sqlite_path}?mode=ro", uri=True)
         try:
             row = conn.execute(
@@ -328,6 +545,549 @@ def sqlite_drawer_count(palace_path: str) -> "int | None":
         # names occasionally rename). Silent fallback is correct here —
         # the cap-detection check still catches the user-reported case.
         return None
+
+
+def _sqlite_embedding_count(palace_path: str, collection_name: str) -> "int | None":
+    sqlite_path = os.path.join(palace_path, "chroma.sqlite3")
+    if not os.path.exists(sqlite_path):
+        return None
+    try:
+        conn = sqlite3.connect(f"file:{sqlite_path}?mode=ro", uri=True)
+        try:
+            row = conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM embeddings e
+                JOIN segments s ON e.segment_id = s.id
+                JOIN collections c ON s.collection = c.id
+                WHERE c.name = ?
+                """,
+                (collection_name,),
+            ).fetchone()
+            return int(row[0]) if row and row[0] is not None else None
+        finally:
+            conn.close()
+    except Exception:
+        return None
+
+
+def _vector_segment_id(palace_path: str, collection_name: str) -> "str | None":
+    sqlite_path = os.path.join(palace_path, "chroma.sqlite3")
+    if not os.path.exists(sqlite_path):
+        return None
+    try:
+        conn = sqlite3.connect(f"file:{sqlite_path}?mode=ro", uri=True)
+        try:
+            row = conn.execute(
+                """
+                SELECT s.id
+                FROM segments s
+                JOIN collections c ON s.collection = c.id
+                WHERE c.name = ? AND s.scope = 'VECTOR'
+                LIMIT 1
+                """,
+                (collection_name,),
+            ).fetchone()
+            return row[0] if row else None
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return None
+
+
+def _sqlite_collection_count(db_path: str, collection_name: str) -> int:
+    """Count metadata-segment rows for a Chroma collection.
+
+    ChromaDB 1.x stores documents and user metadata in the METADATA
+    segment. The VECTOR segment may be stale, quarantined, or missing in
+    the recovery scenarios this module handles, so the direct-SQL replay
+    path deliberately ignores it.
+    """
+    with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
+        row = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM embeddings e
+            JOIN segments s ON e.segment_id = s.id
+            JOIN collections c ON s.collection = c.id
+            WHERE c.name = ?
+              AND s.scope = 'METADATA'
+            """,
+            (collection_name,),
+        ).fetchone()
+    return int(row[0]) if row and row[0] is not None else 0
+
+
+def _sqlite_document_count(db_path: str, collection_name: str) -> int:
+    """Count rows with a non-empty ``chroma:document`` payload."""
+    with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
+        row = conn.execute(
+            """
+            SELECT COUNT(DISTINCT e.id)
+            FROM embeddings e
+            JOIN segments s ON e.segment_id = s.id
+            JOIN collections c ON s.collection = c.id
+            JOIN embedding_metadata em ON em.id = e.id
+            WHERE c.name = ?
+              AND s.scope = 'METADATA'
+              AND em.key = 'chroma:document'
+              AND em.string_value IS NOT NULL
+              AND em.string_value != ''
+            """,
+            (collection_name,),
+        ).fetchone()
+    return int(row[0]) if row and row[0] is not None else 0
+
+
+def _metadata_value(row: sqlite3.Row) -> Any:
+    """Return the typed metadata value from a Chroma ``embedding_metadata`` row."""
+    if row["string_value"] is not None:
+        return row["string_value"]
+    if row["int_value"] is not None:
+        return int(row["int_value"])
+    if row["float_value"] is not None:
+        return float(row["float_value"])
+    if row["bool_value"] is not None:
+        return bool(row["bool_value"])
+    return None
+
+
+def iter_drawers_from_sqlite(
+    db_path: str,
+    *,
+    collection_name: str = COLLECTION_NAME,
+    batch_size: int = 1000,
+) -> Iterator[list[dict[str, Any]]]:
+    """Yield drawer batches reconstructed directly from Chroma SQLite.
+
+    This bypasses the Chroma collection layer, which is exactly what can
+    be truncated or unsafe after HNSW quarantine. Each yielded record has
+    ``id``, ``document``, and ``metadata`` keys suitable for Chroma
+    ``upsert``.
+    """
+    if batch_size < 1:
+        raise ValueError("batch_size must be positive")
+
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        last_row_id = 0
+        while True:
+            rows = conn.execute(
+                """
+                SELECT e.id, e.embedding_id
+                FROM embeddings e
+                JOIN segments s ON e.segment_id = s.id
+                JOIN collections c ON s.collection = c.id
+                WHERE c.name = ?
+                  AND s.scope = 'METADATA'
+                  AND e.id > ?
+                ORDER BY e.id ASC
+                LIMIT ?
+                """,
+                (collection_name, last_row_id, batch_size),
+            ).fetchall()
+            if not rows:
+                break
+
+            row_ids = [int(row["id"]) for row in rows]
+            placeholders = ",".join("?" for _ in row_ids)
+            meta_rows = conn.execute(
+                f"""
+                SELECT id, key, string_value, int_value, float_value, bool_value
+                FROM embedding_metadata
+                WHERE id IN ({placeholders})
+                ORDER BY id ASC, key ASC
+                """,
+                row_ids,
+            ).fetchall()
+
+            by_row_id: dict[int, dict[str, Any]] = {
+                int(row["id"]): {"id": row["embedding_id"], "document": None, "metadata": {}}
+                for row in rows
+            }
+            for meta in meta_rows:
+                row_id = int(meta["id"])
+                record = by_row_id.get(row_id)
+                if record is None:
+                    continue
+                key = str(meta["key"])
+                value = _metadata_value(meta)
+                if key == "chroma:document":
+                    record["document"] = value if isinstance(value, str) else ""
+                elif not key.startswith("chroma:") and value is not None:
+                    record["metadata"][key] = value
+
+            batch = [
+                record
+                for row_id, record in by_row_id.items()
+                if isinstance(record.get("document"), str) and record["document"]
+            ]
+            if batch:
+                yield batch
+            last_row_id = row_ids[-1]
+    finally:
+        conn.close()
+
+
+def repair_sqlite_replay(  # noqa: C901
+    palace_path: str,
+    *,
+    dry_run: bool = False,
+    assume_yes: bool = False,
+    backup: bool = True,
+    batch_size: int = 1000,
+    confirm_large_reembed: bool = False,
+    max_rows: Optional[int] = None,
+    max_batches: Optional[int] = None,
+    artifact_dir: Optional[str] = None,
+    collection_name: str = COLLECTION_NAME,
+) -> dict[str, Any]:
+    """Rebuild the drawers vector index from SQLite metadata rows.
+
+    Use this when ``repair-status`` reports a large SQLite-vs-HNSW
+    divergence and the legacy Chroma extraction path would only see the
+    truncated vector segment. The source SQLite database is copied first;
+    replay streams from that snapshot so deleting the live collection
+    cannot destroy the recovery source.
+    """
+    from .migrate import confirm_destructive_action, contains_palace_database
+
+    palace_path = os.path.abspath(os.path.expanduser(palace_path))
+    db_path = os.path.join(palace_path, "chroma.sqlite3")
+    started_monotonic = time.time()
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    result: dict[str, Any] = {
+        "operation": "sqlite-replay",
+        "run_id": run_id,
+        "palace_path": palace_path,
+        "source_collection": collection_name,
+        "target_collection": collection_name,
+        "collection": collection_name,
+        "dry_run": dry_run,
+        "aborted": False,
+        "status": "running",
+        "started_at": _utc_now_iso(),
+        "finished_at": None,
+        "duration_seconds": None,
+        "source_count": 0,
+        "document_count": 0,
+        "document_count_exact": True,
+        "planned_reembed_count": 0,
+        "planned_batches": 0,
+        "replayed": 0,
+        "batches_replayed": 0,
+        "backup": None,
+        "backup_requested": backup,
+        "backup_note": None,
+        "source_snapshot": None,
+        "artifact_dir": None,
+        "result_json": None,
+        "events_log": None,
+        "max_rows": max_rows,
+        "max_batches": max_batches,
+        "batch_size": batch_size,
+        "bounded": max_rows is not None or max_batches is not None,
+        "partial_live_collection": False,
+        "live_collection_state": "unchanged",
+        "rollback_attempted": False,
+        "rollback_succeeded": False,
+        "verified_count": None,
+        "resume_supported": False,
+        "warnings": [],
+        "events": [],
+    }
+
+    def ensure_artifacts() -> None:
+        if result["artifact_dir"]:
+            return
+        paths = _sqlite_replay_artifact_paths(palace_path, artifact_dir=artifact_dir, run_id=run_id)
+        result.update(paths)
+        os.makedirs(paths["artifact_dir"], exist_ok=True)
+
+    def write_result() -> None:
+        result_json = result.get("result_json")
+        if result_json:
+            _write_json_file(str(result_json), result)
+
+    def event(name: str, **fields: Any) -> None:
+        payload = {"ts": _utc_now_iso(), "event": name, **fields}
+        result["events"].append(payload)
+        events_log = result.get("events_log")
+        if events_log:
+            _append_jsonl(str(events_log), payload)
+
+    def finish(
+        status: str,
+        *,
+        reason: Optional[str] = None,
+        aborted: Optional[bool] = None,
+        error: Optional[str] = None,
+    ) -> dict[str, Any]:
+        result["status"] = status
+        if reason is not None:
+            result["reason"] = reason
+        if aborted is not None:
+            result["aborted"] = aborted
+        if error is not None:
+            result["error"] = error
+        result["finished_at"] = _utc_now_iso()
+        result["duration_seconds"] = round(max(time.time() - started_monotonic, 0), 3)
+        write_result()
+        return result
+
+    print(f"\n{'=' * 55}")
+    print("  MemPalace Repair — SQLite Replay")
+    print(f"{'=' * 55}\n")
+    print(f"  Palace:     {palace_path}")
+    print(f"  Source:     {collection_name}")
+    print(f"  Target:     {collection_name}")
+
+    if batch_size < 1:
+        raise ValueError("batch_size must be positive")
+    if max_rows is not None and max_rows < 1:
+        raise ValueError("max_rows must be positive")
+    if max_batches is not None and max_batches < 1:
+        raise ValueError("max_batches must be positive")
+
+    if not os.path.isdir(palace_path):
+        print(f"  No palace found at {palace_path}")
+        if artifact_dir:
+            ensure_artifacts()
+            event("aborted", reason="palace-missing")
+        return finish("aborted", reason="palace-missing", aborted=True)
+    if not contains_palace_database(palace_path):
+        print(f"  No palace database found at {db_path}")
+        if artifact_dir:
+            ensure_artifacts()
+            event("aborted", reason="db-missing")
+        return finish("aborted", reason="db-missing", aborted=True)
+
+    ensure_artifacts()
+    event("started")
+
+    source_count = _sqlite_collection_count(db_path, collection_name)
+    skip_exact_document_count = source_count > SQLITE_REPLAY_DRY_RUN_EXACT_DOC_LIMIT and (
+        dry_run or (source_count > SQLITE_REPLAY_LARGE_REEMBED_LIMIT and not confirm_large_reembed)
+    )
+    if skip_exact_document_count:
+        document_count = source_count
+        result["document_count_exact"] = False
+    else:
+        document_count = _sqlite_document_count(db_path, collection_name)
+    result["source_count"] = source_count
+    result["document_count"] = document_count
+    planned_reembed_count = document_count if result["document_count_exact"] else source_count
+    result["planned_reembed_count"] = planned_reembed_count
+    result["planned_batches"] = _planned_batches(planned_reembed_count, batch_size)
+    event(
+        "planned",
+        source_count=source_count,
+        document_count=document_count,
+        document_count_exact=result["document_count_exact"],
+        planned_reembed_count=planned_reembed_count,
+        planned_batches=result["planned_batches"],
+    )
+    print(f"  SQLite rows: {source_count:,}")
+    if result["document_count_exact"]:
+        print(f"  Documents:   {document_count:,}")
+    else:
+        print("  Documents:   (exact count deferred; large dry run)")
+
+    if source_count == 0:
+        print("  Nothing to replay.")
+        event("completed", reason="empty-source")
+        return finish("completed", reason="empty-source")
+    if document_count < source_count:
+        missing = source_count - document_count
+        print(f"  Warning: {missing:,} row(s) have no document payload and will be skipped.")
+        result["warnings"].append(f"{missing} row(s) have no document payload and will be skipped")
+
+    if max_rows is not None and planned_reembed_count > max_rows:
+        print()
+        print(
+            f"  ABORT: replay would re-embed {planned_reembed_count:,} documents, "
+            f"above --max-rows {max_rows:,}."
+        )
+        print("  No collection was deleted or rewritten.")
+        event(
+            "aborted",
+            reason="max-rows-exceeded",
+            planned_reembed_count=planned_reembed_count,
+            max_rows=max_rows,
+        )
+        print(f"\n{'=' * 55}\n")
+        return finish("aborted", reason="max-rows-exceeded", aborted=True)
+
+    if max_batches is not None and result["planned_batches"] > max_batches:
+        print()
+        print(
+            f"  ABORT: replay would need {result['planned_batches']:,} batches, "
+            f"above --max-batches {max_batches:,}."
+        )
+        print("  No collection was deleted or rewritten.")
+        event(
+            "aborted",
+            reason="max-batches-exceeded",
+            planned_batches=result["planned_batches"],
+            max_batches=max_batches,
+        )
+        print(f"\n{'=' * 55}\n")
+        return finish("aborted", reason="max-batches-exceeded", aborted=True)
+
+    if dry_run:
+        print("\n  DRY RUN - no collection was deleted or rewritten.")
+        if result["document_count_exact"]:
+            replay_label = f"{document_count:,}"
+        else:
+            replay_label = f"up to {source_count:,}"
+        print(f"  Would replay {replay_label} drawers from SQLite in batches of {batch_size:,}.")
+        print(f"  Planned batches: {result['planned_batches']:,}")
+        print(f"  Artifacts: {result['artifact_dir']}")
+        if source_count > SQLITE_REPLAY_LARGE_REEMBED_LIMIT:
+            print(
+                "  Note: non-dry-run replay currently re-embeds documents; "
+                "large palaces require --confirm-large-reembed."
+            )
+        event("dry-run")
+        print(f"\n{'=' * 55}\n")
+        return finish("dry-run")
+
+    if planned_reembed_count > SQLITE_REPLAY_LARGE_REEMBED_LIMIT and not confirm_large_reembed:
+        print()
+        print(
+            f"  ABORT: replay would re-embed up to {planned_reembed_count:,} documents. "
+            "That is intentionally separate from --yes because it can take hours "
+            "and consume substantial CPU/GPU."
+        )
+        print(
+            "  Re-run with --confirm-large-reembed only when a long rebuild window is acceptable."
+        )
+        event(
+            "aborted",
+            reason="large-reembed-not-confirmed",
+            planned_reembed_count=planned_reembed_count,
+        )
+        print(f"\n{'=' * 55}\n")
+        return finish("aborted", reason="large-reembed-not-confirmed", aborted=True)
+
+    if not confirm_destructive_action(
+        "Repair from SQLite replay", palace_path, assume_yes=assume_yes
+    ):
+        event("aborted", reason="user-aborted")
+        return finish("aborted", reason="user-aborted", aborted=True)
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%fZ")
+    source_db = os.path.join(palace_path, f"chroma.sqlite3.sqlite-replay-source-{timestamp}")
+    print(f"  Snapshot: {source_db}")
+    if not backup:
+        warning = "--no-backup requested; source snapshot is still required for safe replay"
+        result["warnings"].append(warning)
+        result["backup_note"] = warning
+        print(f"  Warning: {warning}.")
+    try:
+        shutil.copy2(db_path, source_db)
+    except Exception as exc:
+        print(f"  ERROR creating source snapshot: {exc}")
+        event("failed", reason="snapshot-failed", error=str(exc))
+        return finish("failed", reason="snapshot-failed", aborted=True, error=str(exc))
+    result["backup"] = source_db
+    result["source_snapshot"] = source_db
+    event("snapshot-created", source_snapshot=source_db)
+
+    _close_chroma_handles(palace_path)
+    backend = _get_chroma_backend_cls()()
+    print("  Rebuilding collection from SQLite snapshot...")
+    try:
+        backend.delete_collection(palace_path, collection_name)
+    except Exception as exc:
+        print(f"  ERROR deleting collection: {exc}")
+        print("  No replay performed; source snapshot is intact.")
+        event("failed", reason="delete-failed", error=str(exc))
+        return finish("failed", reason="delete-failed", aborted=True, error=str(exc))
+    result["live_collection_state"] = "deleted"
+    event("collection-deleted")
+
+    try:
+        new_col = backend.create_collection(palace_path, collection_name)
+    except Exception as exc:
+        result["partial_live_collection"] = True
+        result["live_collection_state"] = "absent-or-partial"
+        print(f"  ERROR creating replacement collection: {exc}")
+        print(f"  Recovery source remains at: {source_db}")
+        event("failed", reason="create-failed", error=str(exc))
+        return finish("failed", reason="create-failed", aborted=True, error=str(exc))
+    result["live_collection_state"] = "empty-replacement"
+    event("collection-created")
+
+    replayed = 0
+    batches_replayed = 0
+    t0 = time.time()
+    try:
+        for batch in iter_drawers_from_sqlite(
+            source_db, collection_name=collection_name, batch_size=batch_size
+        ):
+            new_col.upsert(
+                ids=[record["id"] for record in batch],
+                documents=[record["document"] for record in batch],
+                metadatas=[record["metadata"] for record in batch],
+            )
+            replayed += len(batch)
+            batches_replayed += 1
+            result["replayed"] = replayed
+            result["batches_replayed"] = batches_replayed
+            elapsed = max(time.time() - t0, 0.001)
+            rate = replayed / elapsed
+            eta = (planned_reembed_count - replayed) / max(rate, 0.001)
+            event(
+                "batch-replayed",
+                batch_rows=len(batch),
+                replayed=replayed,
+                batches_replayed=batches_replayed,
+                rate_per_second=round(rate, 3),
+                eta_seconds=round(max(eta, 0), 3),
+            )
+            print(
+                f"  Replayed {replayed:,}/{planned_reembed_count:,} drawers "
+                f"({rate:.1f}/s, eta {eta / 60:.1f}m)..."
+            )
+    except Exception as exc:
+        result["partial_live_collection"] = True
+        result["live_collection_state"] = "partial"
+        print(f"\n  ERROR during SQLite replay after {replayed:,} drawers: {exc}")
+        print(f"  Recovery source remains at: {source_db}")
+        event("failed", reason="replay-failed", error=str(exc), replayed=replayed)
+        return finish("failed", reason="replay-failed", aborted=True, error=str(exc))
+
+    result["replayed"] = replayed
+    result["batches_replayed"] = batches_replayed
+    result["live_collection_state"] = "replayed"
+
+    try:
+        verified_count = new_col.count()
+    except Exception as exc:
+        result["verification_error"] = str(exc)
+        event("verification-unavailable", error=str(exc))
+    else:
+        if isinstance(verified_count, int):
+            result["verified_count"] = verified_count
+            event("verified", verified_count=verified_count)
+            if verified_count != replayed:
+                result["partial_live_collection"] = True
+                result["live_collection_state"] = "verification-mismatch"
+                print(
+                    f"  ERROR: verification count {verified_count:,} does not match "
+                    f"replayed drawers {replayed:,}."
+                )
+                return finish("failed", reason="verification-mismatch", aborted=True)
+
+    print(f"\n  SQLite replay complete. {replayed:,} drawers rebuilt.")
+    if result["backup"]:
+        print(f"  Source snapshot: {result['backup']}")
+    print(f"  Artifacts: {result['artifact_dir']}")
+    event("completed", replayed=replayed, batches_replayed=batches_replayed)
+    print(f"\n{'=' * 55}\n")
+    return finish("completed")
 
 
 def rebuild_index(palace_path=None, confirm_truncation_ok: bool = False):
@@ -355,7 +1115,7 @@ def rebuild_index(palace_path=None, confirm_truncation_ok: bool = False):
     print(f"{'=' * 55}\n")
     print(f"  Palace: {palace_path}")
 
-    backend = ChromaBackend()
+    backend = _get_chroma_backend_cls()()
     try:
         col = backend.get_collection(palace_path, COLLECTION_NAME)
         total = col.count()
@@ -436,7 +1196,57 @@ def rebuild_index(palace_path=None, confirm_truncation_ok: bool = False):
     print(f"\n{'=' * 55}\n")
 
 
-def status(palace_path=None) -> dict:
+def status_payload(palace_path=None) -> dict:
+    """Build the machine-readable ``repair-status`` payload (read-only).
+
+    Mirrors the human output of :func:`status` field-for-field so incident
+    bundles and sidecar agents can capture exact SQLite-vs-HNSW parity
+    counts without scraping console text or launching a replay dry-run.
+    Like :func:`status`, it never opens a chromadb client and never
+    imports hnswlib, so it works in lean runtimes too. (#18)
+    """
+    palace_path = palace_path or _get_palace_path()
+    payload: dict[str, Any] = {
+        "schema": REPAIR_STATUS_SCHEMA,
+        "generated_at_utc": _utc_now_iso(),
+        "palace_path": palace_path,
+        "palace_found": os.path.isdir(palace_path),
+        "collections": {},
+    }
+    if not payload["palace_found"]:
+        return payload
+    capacity_status = _get_hnsw_capacity_status()
+    for label, collection_name in (
+        ("drawers", COLLECTION_NAME),
+        ("closets", CLOSETS_COLLECTION_NAME),
+    ):
+        info = capacity_status(palace_path, collection_name)
+        payload["collections"][label] = {
+            "collection": collection_name,
+            "sqlite_count": info["sqlite_count"],
+            "hnsw_count": info["hnsw_count"],
+            "divergence": info["divergence"],
+            "status": "DIVERGED" if info["diverged"] else info["status"].upper(),
+            "note": info["message"],
+        }
+    return payload
+
+
+def _write_status_artifact(payload: dict, artifact_dir: str) -> str:
+    """Write the status payload to a timestamped JSON file; return its path.
+
+    A single flat file — deliberately never a repair-run directory — so
+    the probe stays visibly read-only against the palace. (#18)
+    """
+    resolved_dir = os.path.abspath(os.path.expanduser(artifact_dir))
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    artifact_path = os.path.join(resolved_dir, f"repair-status-{stamp}.json")
+    payload["artifact_path"] = artifact_path
+    _write_json_file(artifact_path, payload)
+    return artifact_path
+
+
+def status(palace_path=None, *, as_json=False, artifact_dir=None) -> dict:
     """Read-only health check: compare sqlite vs HNSW element counts.
 
     Catches the #1222 failure mode where chromadb's HNSW segment freezes
@@ -450,10 +1260,27 @@ def status(palace_path=None) -> dict:
     hnswlib — it reads ``chroma.sqlite3`` and ``index_metadata.pickle``
     directly via :func:`mempalace.backends.chroma.hnsw_capacity_status`.
 
+    With ``as_json=True`` the command prints a single machine-readable
+    JSON object (see :func:`status_payload`) instead of the human
+    summary and returns that payload. ``artifact_dir`` additionally
+    writes the same payload to a timestamped ``repair-status-*.json``
+    file; combined with the default human output it leaves the console
+    text unchanged. (#18)
+
     Returns the capacity-status dict (also printed). Returns a dict with
     ``status="unknown"`` when no palace exists at the given path.
     """
     palace_path = palace_path or _get_palace_path()
+
+    if as_json or artifact_dir:
+        payload = status_payload(palace_path=palace_path)
+        payload["artifact_path"] = None
+        if artifact_dir:
+            _write_status_artifact(payload, artifact_dir)
+        if as_json:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+            return payload
+
     print(f"\n{'=' * 55}")
     print("  MemPalace Repair — Status")
     print(f"{'=' * 55}\n")
@@ -463,8 +1290,9 @@ def status(palace_path=None) -> dict:
         print("  No palace found.\n")
         return {"status": "unknown", "message": "no palace at path"}
 
-    drawers = hnsw_capacity_status(palace_path, "mempalace_drawers")
-    closets = hnsw_capacity_status(palace_path, "mempalace_closets")
+    capacity_status = _get_hnsw_capacity_status()
+    drawers = capacity_status(palace_path, "mempalace_drawers")
+    closets = capacity_status(palace_path, "mempalace_closets")
 
     for label, info in (("drawers", drawers), ("closets", closets)):
         print(f"\n  [{label}]")
@@ -484,7 +1312,10 @@ def status(palace_path=None) -> dict:
             print(f"    note:           {info['message']}")
 
     if drawers["diverged"] or closets["diverged"]:
-        print("\n  Recommended: run `mempalace repair` to rebuild the index.")
+        print(
+            "\n  Recommended: run `mempalace repair --mode sqlite-replay --dry-run` first. "
+            "Large palaces require an explicit `--confirm-large-reembed` rebuild window."
+        )
     print()
     return {"drawers": drawers, "closets": closets}
 
@@ -499,7 +1330,7 @@ def _close_chroma_handles(palace_path: str) -> None:
     import gc
 
     try:
-        ChromaBackend().close_palace(palace_path)
+        _get_chroma_backend_cls()().close_palace(palace_path)
     except Exception:
         pass
     try:
@@ -751,12 +1582,22 @@ if __name__ == "__main__":
     p.add_argument("--palace", default=None, help="Palace directory path")
     p.add_argument("--wing", default=None, help="Scan only this wing")
     p.add_argument("--confirm", action="store_true", help="Actually delete corrupt IDs")
+    p.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable status JSON to stdout (status only)",
+    )
+    p.add_argument(
+        "--artifact-dir",
+        default=None,
+        help="Also write the status JSON to a timestamped file in this directory (status only)",
+    )
     args = p.parse_args()
 
     path = os.path.expanduser(args.palace) if args.palace else None
 
     if args.command == "status":
-        status(palace_path=path)
+        status(palace_path=path, as_json=args.json, artifact_dir=args.artifact_dir)
     elif args.command == "scan":
         scan_palace(palace_path=path, only_wing=args.wing)
     elif args.command == "prune":

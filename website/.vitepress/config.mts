@@ -9,15 +9,46 @@ function normalizeBase(base?: string): string {
   return base.endsWith('/') ? base : `${base}/`
 }
 
+function normalizeOrigin(origin?: string): string {
+  return (origin || 'https://mempalaceofficial.com').replace(/\/+$/, '')
+}
+
+function canonicalUrlForPage(page: string): string {
+  const pagePath = page
+    .replace(/(^|\/)index\.md$/, '$1')
+    .replace(/\.md$/, '.html')
+    .replace(/^\/+/, '')
+
+  return new URL(pagePath, siteBaseUrl).toString()
+}
+
+const siteDescription = 'Give your AI a memory. Local-first storage and retrieval for AI workflows, with benchmark results and MCP tooling.'
 const docsBase = normalizeBase(process.env.DOCS_BASE || '/')
 const editBranch = process.env.DOCS_EDIT_BRANCH || 'main'
 const gaId = process.env.MEMPALACE_DOCS_GA_ID
+const siteOrigin = normalizeOrigin(process.env.DOCS_SITE_URL)
+const siteBaseUrl = `${siteOrigin}${docsBase}`
+const logoUrl = new URL('mempalace_logo.png', siteBaseUrl).toString()
+const siteJsonLd = {
+  '@context': 'https://schema.org',
+  '@type': 'SoftwareSourceCode',
+  name: 'MemPalace',
+  description: siteDescription,
+  url: siteBaseUrl,
+  codeRepository: 'https://github.com/MemPalace/mempalace',
+  programmingLanguage: ['Python', 'TypeScript'],
+  license: 'https://opensource.org/licenses/MIT',
+  image: logoUrl,
+}
 
 export default withMermaid(
   defineConfig({
     title: 'MemPalace',
-    description: 'Give your AI a memory. Local-first storage and retrieval for AI workflows, with benchmark results and MCP tooling.',
+    description: siteDescription,
     base: docsBase,
+    sitemap: {
+      hostname: siteOrigin,
+    },
 
     head: [
       ['link', { rel: 'icon', href: `${docsBase}mempalace_logo.png` }],
@@ -28,12 +59,24 @@ export default withMermaid(
       ['link', { href: 'https://fonts.googleapis.com/css2?family=Onest:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap', rel: 'stylesheet' }],
       ['meta', { property: 'og:title', content: 'MemPalace — AI Memory System' }],
       ['meta', { property: 'og:description', content: '96.6% LongMemEval recall. Zero API calls. Local, free, open source.' }],
-      ['meta', { property: 'og:image', content: `${docsBase}mempalace_logo.png` }],
+      ['meta', { property: 'og:image', content: logoUrl }],
+      ['meta', { property: 'og:type', content: 'website' }],
+      ['meta', { name: 'twitter:card', content: 'summary_large_image' }],
+      ['script', { type: 'application/ld+json' }, JSON.stringify(siteJsonLd)],
       ...(gaId ? [
         ['script', { async: '', src: `https://www.googletagmanager.com/gtag/js?id=${gaId}` }],
         ['script', {}, `window.dataLayer = window.dataLayer || [];\nfunction gtag(){dataLayer.push(arguments);}\ngtag('js', new Date());\ngtag('config', '${gaId}');`],
       ] as const : []),
     ],
+
+    transformHead({ page }) {
+      const canonicalUrl = canonicalUrlForPage(page)
+
+      return [
+        ['link', { rel: 'canonical', href: canonicalUrl }],
+        ['meta', { property: 'og:url', content: canonicalUrl }],
+      ]
+    },
 
     themeConfig: {
       logo: '/mempalace_logo.png',

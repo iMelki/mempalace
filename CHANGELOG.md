@@ -8,12 +8,122 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [3.3.5] — unreleased
 
+### Added
+
+- **`mempalace warm [--json]` — pre-pay the post-mutation first-open cost.**
+  Bulk mutations (dedup `--apply`, sqlite-replay) can leave heavy one-time
+  work for the next palace open (measured `1,004.3s` after the 2026-07-06
+  42,606-drawer dedup, vs `4.6s` warm). `warm` runs a single vector query so
+  that cost lands at mutation time; `dedup --apply` now auto-warms after
+  deletions. Emits `mempalace.warm.v1` JSON with `--json`. (#19)
+
+- **`mempalace repair-status --json` — machine-readable read-only parity
+  status.** Emits a single JSON object to stdout with a schema identifier
+  (`mempalace.repair-status.v1`), palace path, UTC timestamp, and
+  per-collection (drawers, closets) `sqlite_count`, `hnsw_count`,
+  `divergence`, `status` (`OK`/`DIVERGED`), and `note` — so incident bundles
+  and sidecar agents can capture exact SQLite-vs-HNSW parity counts without
+  scraping console text or launching a replay dry-run. An optional
+  `--artifact-dir` writes the same JSON to a timestamped
+  `repair-status-<UTC>.json` file without ever creating a repair-run
+  directory. The default human output is byte-identical when the flags are
+  absent, and the probe stays dependency-light (works in lean runtimes
+  without `chromadb`). (#18)
+
+### Operations
+
+- **2026-07-07: duplicate-drawer go/no-go tracking clarified (#19).**
+  `OPEN_TASKS.md` now lists #19 as an active supervised decision lane, records
+  the read-only `dedup --stats` estimate (`~292,998` heuristic remaining
+  duplicates over the 825,422-drawer palace), and keeps live deletion gated on
+  source-scoped dry-run review, fresh backup, artifact logging, and operator
+  sign-off. The estimate is explicitly not a reviewed deletion list.
+
+- **2026-07-04: drawers HNSW segment fully rebuilt and verified (#12 closed).**
+  The supervised non-dry `repair --mode sqlite-replay` completed
+  2026-07-03T18:13:13Z with `replayed=verified_count=856,510`, zero warnings,
+  in ~5h10m. Post-replay `repair-status`: drawers `sqlite=861,715` /
+  `hnsw=850,000` (divergence `11,715`, within flush-lag tolerance, down from
+  `818,039`). #13 was retitled to track the remaining real blocker: the
+  MemSys-side `mempalace_mcp_wrapper.py` still unconditionally forces
+  keyword-only search (April 2026 chromadb-crash workaround), so restored
+  vector data is not yet reachable through MCP search.
+
 ### Bug Fixes
 
+- **`mempalace repair --mode sqlite-replay` now gives large diverged palaces a
+  safe recovery path.** Dry-run reads the Chroma SQLite metadata segment without
+  importing Chroma, reconstructs typed drawer documents/metadata, and reports
+  replay scope before any destructive work. Approved runs snapshot
+  `chroma.sqlite3`, rebuild only the `mempalace_drawers` collection, stream
+  progress with ETA, and refuse large re-embedding runs unless
+  `--confirm-large-reembed` is explicitly supplied. The focused repair tests
+  also run with pytest's cache provider disabled so a broken local
+  `.pytest_cache` ACL cannot mask repair-path regressions.
+- **SQLite replay now has operator-grade bounds and artifacts.** `repair --mode
+  sqlite-replay` accepts `--max-rows`, `--max-batches`, `--artifact-dir`, and
+  `--json`; bounds abort before any Chroma collection is opened or deleted,
+  every valid run writes `result.json` plus `events.jsonl`, and non-dry replay
+  always reads from an immutable source snapshot even if `--no-backup` is
+  supplied. Partial resume is explicitly unsupported (`resume_supported=false`)
+  until a real checkpointed replay is implemented. (#16)
+- **`mempalace repair-status` is now dependency-light too.** The HNSW capacity
+  probe reads SQLite plus `index_metadata.pickle` locally instead of importing
+  the Chroma backend package, so status still reports drawer/closet divergence
+  in a lean Python runtime that lacks `chromadb`.
+- **`mempalace status` no longer opens the crash-prone drawers HNSW segment just
+  to print counts.** The status path now reads collection and room totals
+  directly from `chroma.sqlite3` first, falling back to Chroma pagination only
+  when SQLite metadata is unavailable. This keeps local status/reporting usable
+  after a persisted HNSW segment is quarantined for a Chroma native crash; full
+  historical vector rebuild is tracked separately in #12.
+- **`mempalace status` no longer imports the mining/vector stack before the
+  SQLite-first fallback can run.** The CLI now routes status through a
+  dependency-light module, so lean local runtimes without `chromadb` can still
+  report SQLite drawer totals during a vector incident. The regression tests pin
+  both the lazy CLI import and the `METADATA`-segment ground-truth count. (#14)
+- **Pre-push tests no longer depend on Chroma's default ONNX model download.**
+  The miner tests that open raw Chroma collections now use the repo's
+  deterministic test embedding fixture, keeping the suite offline-safe when TLS
+  or model-cache state is unavailable.
+- **Local hook governance.** Reinstalled the git-toolkit secrets filter and
+  commit hooks, added the baseline `.git-secrets-ignore` deep-scan exclusions,
+  and verified the governance audit is clean. (#10)
 - **Repo baseline hygiene.** Added tracked `.gitattributes` secrets-filter
   rules and local `.git-secrets.json` ignore coverage so downstream repos and
   operator audits stop flagging the MemPalace checkout as governance-drifted.
 - **`mempalace_diary_read` silently dropped entries on agent-name case mismatch.** `tool_diary_write` stored the `agent` metadata verbatim after `sanitize_name`, which preserves case, while `tool_diary_read` filtered by exact match. Writing as `"Claude"` and reading as `"claude"` (or vice-versa) returned zero rows. Both endpoints now lowercase `agent_name` immediately after sanitization, so reads are case-insensitive and the default per-agent wing slug is stable across casings. **Behavior change:** entries written prior to this fix under mixed-case agent names will not match the new lowercase filter; run `mempalace repair` if you need to migrate legacy diary metadata. (#1243)
+
+### Documentation
+
+- **HNSW incident tracking now reflects the final Codex provider-chat drain and
+  fresh replay dry-run.** Current `repair-status` evidence reports drawers
+  SQLite `856,510`, HNSW `38,471`, divergence `818,039`, and closets still
+  within tolerance at SQLite `12,107`, HNSW `11,826`, divergence `281`.
+  The fresh SQLite replay dry-run planned `856,510` rows in `857` batches,
+  replayed `0`, and left the live collection unchanged. A post-drain palace
+  backup is now verified tar-readable at
+  `C:\Users\Milky\.mempalace\backups\palace-2026-07-03-1526-pre-hnsw-sqlite-replay-final-drain.tar.gz`
+  (`14,636.8 MB` compressed in `986.5s`; total `1,062.6s`; upload disabled),
+  satisfying the fresh-backup gate before any supervised non-dry replay.
+- **HNSW incident tracking now reflects the post-provider-chat SQLite growth.**
+  The local task index and GitHub issue readbacks were refreshed after the
+  latest bounded Codex provider-chat drain window: drawers now show SQLite
+  `851,964`, HNSW `33,982`, divergence `817,982`, and bridge fallback still
+  `vector_disabled=true`.
+  Filed #18 for a machine-readable `repair-status --json` proof path so future
+  incident bundles do not have to scrape human text or run replay dry-runs just
+  to capture parity counts.
+- **Website SEO/GEO baseline.** Added VitePress sitemap configuration,
+  per-page canonical and `og:url` metadata, absolute Open Graph image URLs,
+  basic JSON-LD, and a public `robots.txt` pointing at the sitemap. Build-output
+  validation is tracked in #11 because local website dependencies were absent
+  during the automation dry run.
+- **Repair CLI reference caught up with the SQLite replay workflow.** The CLI
+  docs now show `repair-status`, `repair --mode sqlite-replay --dry-run`,
+  `--batch-size`, `--max-rows`, `--max-batches`, `--artifact-dir`, `--json`,
+  and `--confirm-large-reembed`, with the caveat that `--batch-size` is not a
+  total replay limit. (#16)
 
 ---
 

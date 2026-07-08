@@ -269,3 +269,61 @@ def test_dedup_palace_no_groups(mock_backend_cls, mock_groups, mock_dedup_group,
     mock_groups.return_value = {}
     dedup.dedup_palace(palace_path=str(tmp_path), dry_run=True)
     mock_dedup_group.assert_not_called()
+
+
+def test_cli_bare_invocation_defaults_to_dry_run():
+    """Safety regression (iMelki/mempalace#19): bare `python -m mempalace.dedup`
+    must be a dry-run preview; live deletion requires an explicit --apply."""
+    import subprocess
+    import sys
+
+    # --apply and --dry-run together must be rejected (argparse error, exit 2)
+    res = subprocess.run(
+        [sys.executable, "-m", "mempalace.dedup", "--apply", "--dry-run"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert res.returncode == 2
+    assert "mutually exclusive" in res.stderr
+
+    # bare invocation against a nonexistent palace should never reach a live
+    # delete path; we only assert the parser wiring here (dry_run=not apply)
+    src = open("mempalace/dedup.py", encoding="utf-8").read()
+    assert "dry_run=not args.apply" in src
+
+
+def test_live_dedup_prewarns_palace_after_deletions(monkeypatch, capsys):
+    """iMelki/mempalace#19: after live deletions, dedup must pre-warm the
+    palace so the one-time post-mutation open cost is paid at mutation time."""
+    calls = []
+
+    import mempalace.searcher as searcher
+
+    monkeypatch.setattr(
+        searcher,
+        "search_memories",
+        lambda *a, **k: calls.append((a, k)) or {"results": []},
+    )
+    monkeypatch.setattr(dedup, "get_source_groups", lambda *a, **k: {"src.md": ["d1", "d2"]})
+    monkeypatch.setattr(dedup, "dedup_source_group", lambda *a, **k: (["d1"], ["d2"]))
+
+    class _FakeCol:
+        def count(self):
+            return 2
+
+    class _FakeBackend:
+        def get_collection(self, *a, **k):
+            return _FakeCol()
+
+    monkeypatch.setattr(dedup, "ChromaBackend", lambda: _FakeBackend())
+
+    dedup.dedup_palace(palace_path="X:/fake-palace", dry_run=False)
+    out = capsys.readouterr().out
+    assert "Pre-warming palace" in out
+    assert calls, "post-deletion warm did not invoke search_memories"
+
+    # dry runs must NOT warm
+    calls.clear()
+    dedup.dedup_palace(palace_path="X:/fake-palace", dry_run=True)
+    assert not calls

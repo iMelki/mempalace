@@ -1,6 +1,7 @@
 """Tests for mempalace.repair — scan, prune, and rebuild HNSW index."""
 
 import os
+import json
 import sqlite3
 from unittest.mock import MagicMock, patch
 
@@ -26,6 +27,11 @@ def test_get_palace_path_fallback():
         mock_get.return_value = os.path.join(os.path.expanduser("~"), ".mempalace", "palace")
         result = mock_get()
         assert ".mempalace" in result
+
+
+def test_hnsw_capacity_status_probe_is_local_dependency_light():
+    repair.hnsw_capacity_status = None
+    assert repair._get_hnsw_capacity_status() is repair._hnsw_capacity_status_local
 
 
 # ── _paginate_ids ─────────────────────────────────────────────────────
@@ -376,6 +382,330 @@ def test_rebuild_index_proceeds_with_override(mock_backend_cls, mock_shutil, tmp
     mock_backend.delete_collection.assert_called_once()
     mock_backend.create_collection.assert_called_once()
     mock_new_col.upsert.assert_called()
+
+
+# ── SQLite replay repair ──────────────────────────────────────────────
+
+
+def _seed_sqlite_replay_palace(palace_path: str) -> str:
+    """Create a minimal Chroma SQLite shape for direct replay tests."""
+    os.makedirs(palace_path, exist_ok=True)
+    db_path = os.path.join(palace_path, "chroma.sqlite3")
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE collections(id TEXT PRIMARY KEY, name TEXT);
+        CREATE TABLE segments(id TEXT PRIMARY KEY, type TEXT, scope TEXT, collection TEXT);
+        CREATE TABLE embeddings(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            segment_id TEXT,
+            embedding_id TEXT,
+            seq_id INTEGER
+        );
+        CREATE TABLE embedding_metadata(
+            id INTEGER,
+            key TEXT,
+            string_value TEXT,
+            int_value INTEGER,
+            float_value REAL,
+            bool_value INTEGER
+        );
+        """
+    )
+    conn.executemany(
+        "INSERT INTO collections(id, name) VALUES (?, ?)",
+        [("coll-drawers", "mempalace_drawers"), ("coll-closets", "mempalace_closets")],
+    )
+    conn.executemany(
+        "INSERT INTO segments(id, type, scope, collection) VALUES (?, ?, ?, ?)",
+        [
+            ("seg-drawers-meta", "urn:chroma:segment/metadata/sqlite", "METADATA", "coll-drawers"),
+            ("seg-closets-meta", "urn:chroma:segment/metadata/sqlite", "METADATA", "coll-closets"),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO embeddings(segment_id, embedding_id, seq_id) VALUES (?, ?, ?)",
+        [
+            ("seg-drawers-meta", "drawer-1", 1),
+            ("seg-drawers-meta", "drawer-2", 2),
+            ("seg-drawers-meta", "drawer-missing-doc", 3),
+            ("seg-closets-meta", "closet-1", 4),
+        ],
+    )
+    conn.executemany(
+        """
+        INSERT INTO embedding_metadata(
+            id, key, string_value, int_value, float_value, bool_value
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (1, "chroma:document", "alpha document", None, None, None),
+            (1, "wing", "agents", None, None, None),
+            (1, "rank", None, 7, None, None),
+            (1, "score", None, None, 0.75, None),
+            (1, "safe", None, None, None, 1),
+            (1, "chroma:ignored", "internal", None, None, None),
+            (2, "chroma:document", "beta document", None, None, None),
+            (2, "room", "runtime", None, None, None),
+            (3, "wing", "missing", None, None, None),
+            (4, "chroma:document", "closet document", None, None, None),
+        ],
+    )
+    conn.commit()
+    conn.close()
+    return db_path
+
+
+def test_iter_drawers_from_sqlite_rebuilds_typed_records(tmp_path):
+    palace = str(tmp_path / "palace")
+    db_path = _seed_sqlite_replay_palace(palace)
+
+    assert repair._sqlite_collection_count(db_path, "mempalace_drawers") == 3
+    assert repair._sqlite_document_count(db_path, "mempalace_drawers") == 2
+
+    batches = list(repair.iter_drawers_from_sqlite(db_path, batch_size=1))
+    records = [record for batch in batches for record in batch]
+
+    assert [record["id"] for record in records] == ["drawer-1", "drawer-2"]
+    assert records[0]["document"] == "alpha document"
+    assert records[0]["metadata"] == {
+        "rank": 7,
+        "safe": True,
+        "score": 0.75,
+        "wing": "agents",
+    }
+    assert records[1]["metadata"] == {"room": "runtime"}
+
+
+def test_repair_sqlite_replay_dry_run_never_opens_chroma(tmp_path):
+    palace = str(tmp_path / "palace")
+    _seed_sqlite_replay_palace(palace)
+
+    with patch("mempalace.repair.ChromaBackend") as mock_backend_cls:
+        result = repair.repair_sqlite_replay(palace, dry_run=True, batch_size=1)
+
+    assert result["status"] == "dry-run"
+    assert result["source_count"] == 3
+    assert result["document_count"] == 2
+    assert result["planned_reembed_count"] == 2
+    assert result["planned_batches"] == 2
+    assert result["replayed"] == 0
+    mock_backend_cls.assert_not_called()
+
+
+@patch("mempalace.repair.ChromaBackend")
+def test_repair_sqlite_replay_large_reembed_requires_extra_confirm(
+    mock_backend_cls, tmp_path, monkeypatch
+):
+    palace = str(tmp_path / "palace")
+    _seed_sqlite_replay_palace(palace)
+    monkeypatch.setattr(repair, "SQLITE_REPLAY_LARGE_REEMBED_LIMIT", 1)
+
+    result = repair.repair_sqlite_replay(palace, assume_yes=True, batch_size=1)
+
+    assert result["aborted"] is True
+    assert result["reason"] == "large-reembed-not-confirmed"
+    mock_backend_cls.assert_not_called()
+
+
+@patch("mempalace.repair.ChromaBackend")
+def test_repair_sqlite_replay_max_rows_aborts_before_mutation(mock_backend_cls, tmp_path):
+    palace = str(tmp_path / "palace")
+    artifact_dir = tmp_path / "artifacts"
+    _seed_sqlite_replay_palace(palace)
+
+    result = repair.repair_sqlite_replay(
+        palace,
+        assume_yes=True,
+        batch_size=1,
+        max_rows=1,
+        artifact_dir=str(artifact_dir),
+    )
+
+    assert result["status"] == "aborted"
+    assert result["reason"] == "max-rows-exceeded"
+    assert result["source_snapshot"] is None
+    assert os.path.isfile(result["result_json"])
+    with open(result["result_json"], encoding="utf-8") as f:
+        payload = json.load(f)
+    assert payload["reason"] == "max-rows-exceeded"
+    mock_backend_cls.assert_not_called()
+
+
+@patch("mempalace.repair.ChromaBackend")
+def test_repair_sqlite_replay_max_batches_aborts_before_mutation(mock_backend_cls, tmp_path):
+    palace = str(tmp_path / "palace")
+    _seed_sqlite_replay_palace(palace)
+
+    result = repair.repair_sqlite_replay(
+        palace,
+        assume_yes=True,
+        batch_size=1,
+        max_batches=1,
+    )
+
+    assert result["status"] == "aborted"
+    assert result["reason"] == "max-batches-exceeded"
+    assert result["source_snapshot"] is None
+    mock_backend_cls.assert_not_called()
+
+
+@patch("mempalace.repair._close_chroma_handles")
+@patch("mempalace.repair.ChromaBackend")
+def test_repair_sqlite_replay_equal_bounds_allow_full_replay(
+    mock_backend_cls, mock_close_handles, tmp_path
+):
+    palace = str(tmp_path / "palace")
+    _seed_sqlite_replay_palace(palace)
+
+    mock_new_col = MagicMock()
+    mock_new_col.count.return_value = 2
+    mock_backend = MagicMock()
+    mock_backend.create_collection.return_value = mock_new_col
+    mock_backend_cls.return_value = mock_backend
+
+    result = repair.repair_sqlite_replay(
+        palace,
+        assume_yes=True,
+        batch_size=1,
+        max_rows=2,
+        max_batches=2,
+    )
+
+    assert result["status"] == "completed"
+    assert result["replayed"] == 2
+    assert result["verified_count"] == 2
+    assert result["planned_batches"] == 2
+    mock_close_handles.assert_called_once_with(os.path.abspath(palace))
+    mock_backend.delete_collection.assert_called_once()
+    mock_backend.create_collection.assert_called_once()
+
+
+@patch("mempalace.repair.ChromaBackend")
+def test_repair_sqlite_replay_invalid_bounds_fail_before_mutation(mock_backend_cls, tmp_path):
+    palace = str(tmp_path / "palace")
+    _seed_sqlite_replay_palace(palace)
+
+    with pytest.raises(ValueError, match="max_rows must be positive"):
+        repair.repair_sqlite_replay(palace, assume_yes=True, max_rows=0)
+
+    mock_backend_cls.assert_not_called()
+
+
+@patch("mempalace.repair._close_chroma_handles")
+@patch("mempalace.repair.ChromaBackend")
+def test_repair_sqlite_replay_rebuilds_from_snapshot(
+    mock_backend_cls, mock_close_handles, tmp_path
+):
+    palace = str(tmp_path / "palace")
+    _seed_sqlite_replay_palace(palace)
+
+    mock_new_col = MagicMock()
+    mock_backend = MagicMock()
+    mock_backend.create_collection.return_value = mock_new_col
+    mock_backend_cls.return_value = mock_backend
+
+    result = repair.repair_sqlite_replay(palace, assume_yes=True, batch_size=1)
+
+    assert result["replayed"] == 2
+    assert result["backup"] is not None
+    assert os.path.isfile(result["backup"])
+    mock_close_handles.assert_called_once_with(os.path.abspath(palace))
+    mock_backend.delete_collection.assert_called_once_with(
+        os.path.abspath(palace), "mempalace_drawers"
+    )
+    mock_backend.create_collection.assert_called_once_with(
+        os.path.abspath(palace), "mempalace_drawers"
+    )
+    assert mock_new_col.upsert.call_count == 2
+    first_call = mock_new_col.upsert.call_args_list[0].kwargs
+    assert first_call["ids"] == ["drawer-1"]
+    assert first_call["documents"] == ["alpha document"]
+
+
+@patch("mempalace.repair._close_chroma_handles")
+@patch("mempalace.repair.ChromaBackend")
+def test_repair_sqlite_replay_no_backup_still_reads_from_snapshot(
+    mock_backend_cls, mock_close_handles, tmp_path
+):
+    palace = str(tmp_path / "palace")
+    _seed_sqlite_replay_palace(palace)
+
+    mock_new_col = MagicMock()
+    mock_backend = MagicMock()
+    mock_backend.create_collection.return_value = mock_new_col
+    mock_backend_cls.return_value = mock_backend
+
+    with patch(
+        "mempalace.repair.iter_drawers_from_sqlite",
+        wraps=repair.iter_drawers_from_sqlite,
+    ) as mock_iter:
+        result = repair.repair_sqlite_replay(
+            palace,
+            assume_yes=True,
+            batch_size=1,
+            backup=False,
+        )
+
+    assert result["backup_requested"] is False
+    assert result["source_snapshot"] == result["backup"]
+    assert os.path.isfile(result["source_snapshot"])
+    assert result["source_snapshot"] != os.path.join(os.path.abspath(palace), "chroma.sqlite3")
+    assert mock_iter.call_args.args[0] == result["source_snapshot"]
+    assert result["backup_note"]
+
+
+@patch("mempalace.repair._close_chroma_handles")
+@patch("mempalace.repair.ChromaBackend")
+def test_repair_sqlite_replay_create_failure_writes_artifact(
+    mock_backend_cls, mock_close_handles, tmp_path
+):
+    palace = str(tmp_path / "palace")
+    artifact_dir = tmp_path / "artifacts"
+    _seed_sqlite_replay_palace(palace)
+
+    mock_backend = MagicMock()
+    mock_backend.create_collection.side_effect = RuntimeError("create exploded")
+    mock_backend_cls.return_value = mock_backend
+
+    result = repair.repair_sqlite_replay(
+        palace,
+        assume_yes=True,
+        artifact_dir=str(artifact_dir),
+    )
+
+    assert result["status"] == "failed"
+    assert result["reason"] == "create-failed"
+    assert result["partial_live_collection"] is True
+    assert result["live_collection_state"] == "absent-or-partial"
+    assert os.path.isfile(result["result_json"])
+    with open(result["result_json"], encoding="utf-8") as f:
+        payload = json.load(f)
+    assert payload["reason"] == "create-failed"
+    assert os.path.isfile(result["events_log"])
+
+
+def test_repair_sqlite_replay_writes_dry_run_artifacts(tmp_path):
+    palace = str(tmp_path / "palace")
+    artifact_dir = tmp_path / "artifacts"
+    _seed_sqlite_replay_palace(palace)
+
+    result = repair.repair_sqlite_replay(
+        palace,
+        dry_run=True,
+        batch_size=1,
+        artifact_dir=str(artifact_dir),
+    )
+
+    assert result["status"] == "dry-run"
+    assert os.path.isfile(result["result_json"])
+    assert os.path.isfile(result["events_log"])
+    with open(result["result_json"], encoding="utf-8") as f:
+        payload = json.load(f)
+    assert payload["status"] == "dry-run"
+    with open(result["events_log"], encoding="utf-8") as f:
+        events = [json.loads(line) for line in f if line.strip()]
+    assert [event["event"] for event in events] == ["started", "planned", "dry-run"]
 
 
 # ── repair_max_seq_id ─────────────────────────────────────────────────

@@ -1228,30 +1228,79 @@ def _compute_topic_tunnels_for_wing(wing: str) -> int:
 # =============================================================================
 
 
+def _sqlite_status_counts(palace_path: str):
+    """Return ``(total, wing_rooms)`` from Chroma SQLite metadata when available.
+
+    This keeps ``mempalace status`` usable when the HNSW vector segment is
+    damaged or quarantined. Opening the collection just to count rooms can
+    segfault in native hnswlib before Python gets a recoverable exception.
+    """
+    sqlite_path = os.path.join(palace_path, "chroma.sqlite3")
+    if not os.path.exists(sqlite_path):
+        return None
+
+    try:
+        import sqlite3
+
+        conn = sqlite3.connect(f"file:{sqlite_path}?mode=ro", uri=True)
+        try:
+            rows = conn.execute(
+                """
+                SELECT
+                    COALESCE(w.string_value, '?') AS wing,
+                    COALESCE(r.string_value, '?') AS room,
+                    COUNT(*) AS drawer_count
+                FROM embeddings e
+                JOIN segments s ON e.segment_id = s.id
+                JOIN collections c ON s.collection = c.id
+                LEFT JOIN embedding_metadata w ON w.id = e.id AND w.key = 'wing'
+                LEFT JOIN embedding_metadata r ON r.id = e.id AND r.key = 'room'
+                WHERE c.name = 'mempalace_drawers'
+                GROUP BY COALESCE(w.string_value, '?'), COALESCE(r.string_value, '?')
+                """
+            ).fetchall()
+        finally:
+            conn.close()
+    except Exception:
+        return None
+
+    wing_rooms: dict = defaultdict(lambda: defaultdict(int))
+    total = 0
+    for wing, room, count in rows:
+        count = int(count or 0)
+        wing_rooms[wing or "?"][room or "?"] += count
+        total += count
+    return total, wing_rooms
+
+
 def status(palace_path: str):
     """Show what's been filed in the palace."""
-    try:
-        col = get_collection(palace_path, create=False)
-    except Exception:
-        print(f"\n  No palace found at {palace_path}")
-        print("  Run: mempalace init <dir> then mempalace mine <dir>")
-        return
+    sqlite_counts = _sqlite_status_counts(palace_path)
+    if sqlite_counts is not None:
+        total, wing_rooms = sqlite_counts
+    else:
+        try:
+            col = get_collection(palace_path, create=False)
+        except Exception:
+            print(f"\n  No palace found at {palace_path}")
+            print("  Run: mempalace init <dir> then mempalace mine <dir>")
+            return
 
-    # Count by wing and room — paginate to avoid SQLite "too many SQL
-    # variables" error on large palaces (see #802, #850).
-    total = col.count()
-    wing_rooms: dict = defaultdict(lambda: defaultdict(int))
-    batch_size = 5000
-    offset = 0
-    while offset < total:
-        r = col.get(limit=batch_size, offset=offset, include=["metadatas"])
-        batch = r["metadatas"]
-        if not batch:
-            break
-        for m in batch:
-            m = m or {}
-            wing_rooms[m.get("wing", "?")][m.get("room", "?")] += 1
-        offset += len(batch)
+        # Count by wing and room — paginate to avoid SQLite "too many SQL
+        # variables" error on large palaces (see #802, #850).
+        total = col.count()
+        wing_rooms = defaultdict(lambda: defaultdict(int))
+        batch_size = 5000
+        offset = 0
+        while offset < total:
+            r = col.get(limit=batch_size, offset=offset, include=["metadatas"])
+            batch = r["metadatas"]
+            if not batch:
+                break
+            for m in batch:
+                m = m or {}
+                wing_rooms[m.get("wing", "?")][m.get("room", "?")] += 1
+            offset += len(batch)
 
     print(f"\n{'=' * 55}")
     print(f"  MemPalace Status — {total} drawers")

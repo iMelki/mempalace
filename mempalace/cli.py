@@ -635,24 +635,68 @@ def cmd_migrate(args):
 
 
 def cmd_status(args):
-    from .miner import status
+    from .status import status
 
     palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
     status(palace_path=palace_path)
 
 
 def cmd_repair_status(args):
-    """Read-only HNSW capacity health check (#1222)."""
+    """Read-only HNSW capacity health check (#1222, #18)."""
     from .repair import status as repair_status
 
     palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
-    repair_status(palace_path=palace_path)
+    repair_status(
+        palace_path=palace_path,
+        as_json=getattr(args, "json", False),
+        artifact_dir=getattr(args, "artifact_dir", None),
+    )
+
+
+def cmd_warm(args):
+    """Pre-warm the vector search stack (embedding model + HNSW + any pending
+    post-mutation work), so the next reader pays seconds, not minutes.
+
+    Bulk mutations (dedup --apply, sqlite-replay) can leave the palace in a
+    state where the FIRST subsequent open does heavy one-time work — measured
+    at 1,004s after a 42,606-drawer dedup on 2026-07-06 (vs 4.6s once warm).
+    Running `mempalace warm` right after any bulk mutation moves that cost to
+    mutation time instead of ambushing the next bridge start or agent query.
+    See iMelki/mempalace#19 and iMelki/agent-settings#209.
+    """
+    import json as _json
+    import time as _time
+
+    from .searcher import search_memories
+
+    palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
+    as_json = getattr(args, "json", False)
+    if not as_json:
+        print(f"Warming palace at {palace_path} (model + HNSW + pending work)...")
+    t0 = _time.time()
+    out = search_memories("warmup", palace_path, n_results=1)
+    elapsed = round(_time.time() - t0, 1)
+    error = out.get("error") if isinstance(out, dict) else f"unexpected result type {type(out)}"
+    payload = {
+        "schema": "mempalace.warm.v1",
+        "palace_path": palace_path,
+        "warm_seconds": elapsed,
+        "ok": error is None,
+        "error": error,
+    }
+    if as_json:
+        print(_json.dumps(payload))
+    elif error:
+        print(f"Warm FAILED after {elapsed}s: {error}")
+    else:
+        print(f"Palace warm in {elapsed}s.")
+    if error:
+        sys.exit(1)
 
 
 def cmd_repair(args):
     """Rebuild palace vector index from SQLite metadata."""
     import shutil
-    from .backends.chroma import ChromaBackend
     from .migrate import confirm_destructive_action, contains_palace_database
     from .repair import TruncationDetected, check_extraction_safety
 
@@ -673,6 +717,34 @@ def cmd_repair(args):
         )
         return
 
+    if getattr(args, "mode", "legacy") == "sqlite-replay":
+        from .repair import repair_sqlite_replay
+
+        kwargs = {
+            "dry_run": getattr(args, "dry_run", False),
+            "assume_yes": getattr(args, "yes", False),
+            "backup": getattr(args, "backup", True),
+            "batch_size": getattr(args, "batch_size", 1000),
+            "confirm_large_reembed": getattr(args, "confirm_large_reembed", False),
+            "max_rows": getattr(args, "max_rows", None),
+            "max_batches": getattr(args, "max_batches", None),
+            "artifact_dir": getattr(args, "artifact_dir", None),
+        }
+        if getattr(args, "json", False):
+            import contextlib
+            import io
+            import json
+
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                result = repair_sqlite_replay(palace_path, **kwargs)
+            payload = dict(result)
+            payload["stdout"] = stdout.getvalue().splitlines()
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        else:
+            repair_sqlite_replay(palace_path, **kwargs)
+        return
+
     db_path = os.path.join(palace_path, "chroma.sqlite3")
 
     if not os.path.isdir(palace_path):
@@ -686,6 +758,8 @@ def cmd_repair(args):
     print("  MemPalace Repair")
     print(f"{'=' * 55}\n")
     print(f"  Palace: {palace_path}")
+
+    from .backends.chroma import ChromaBackend
 
     backend = ChromaBackend()
 
@@ -1175,10 +1249,7 @@ def main():
     # repair
     p_repair = sub.add_parser(
         "repair",
-        help=(
-            "Rebuild palace vector index (legacy mode) or un-poison max_seq_id rows "
-            "(--mode max-seq-id)"
-        ),
+        help=("Rebuild palace vector index, replay from SQLite, or un-poison max_seq_id rows"),
     )
     p_repair.add_argument(
         "--yes", action="store_true", help="Skip confirmation for destructive changes"
@@ -1195,10 +1266,11 @@ def main():
     )
     p_repair.add_argument(
         "--mode",
-        choices=["legacy", "max-seq-id"],
+        choices=["legacy", "sqlite-replay", "max-seq-id"],
         default="legacy",
         help=(
             "legacy: full-palace rebuild (default). "
+            "sqlite-replay: rebuild drawers from chroma.sqlite3 metadata when HNSW is diverged. "
             "max-seq-id: un-poison max_seq_id rows corrupted by the legacy 0.6.x shim."
         ),
     )
@@ -1222,15 +1294,86 @@ def main():
         help="Back up SQLite before mutation (default: on)",
     )
     p_repair.add_argument(
+        "--batch-size",
+        type=int,
+        default=1000,
+        help="Replay batch size for --mode sqlite-replay (default: 1000)",
+    )
+    p_repair.add_argument(
+        "--max-rows",
+        type=int,
+        default=None,
+        help=(
+            "Abort --mode sqlite-replay before mutation when planned replay rows exceed this bound"
+        ),
+    )
+    p_repair.add_argument(
+        "--max-batches",
+        type=int,
+        default=None,
+        help=(
+            "Abort --mode sqlite-replay before mutation when planned replay batches exceed this bound"
+        ),
+    )
+    p_repair.add_argument(
+        "--artifact-dir",
+        default=None,
+        help=(
+            "Directory for sqlite-replay result.json and events.jsonl "
+            "(default: <palace>/.mempalace/repair-runs/<run>)"
+        ),
+    )
+    p_repair.add_argument(
+        "--confirm-large-reembed",
+        action="store_true",
+        help=(
+            "Allow --mode sqlite-replay to re-embed more than 100,000 documents. "
+            "This can run for hours and consume substantial CPU/GPU."
+        ),
+    )
+    p_repair.add_argument(
         "--dry-run",
         action="store_true",
-        help="Print detected poisoned rows and exit without mutation (--mode max-seq-id only)",
+        help="Print plan and exit without mutation (--mode sqlite-replay or max-seq-id)",
+    )
+    p_repair.add_argument(
+        "--json",
+        action="store_true",
+        help="Print sqlite-replay result JSON (human output is captured under stdout)",
     )
 
     # repair-status — read-only HNSW capacity health check (#1222)
-    sub.add_parser(
+    p_repair_status = sub.add_parser(
         "repair-status",
         help="Compare sqlite vs HNSW element counts (read-only; never opens a chromadb client)",
+    )
+    p_repair_status.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit a single machine-readable status JSON object to stdout instead of the human summary",
+    )
+    p_repair_status.add_argument(
+        "--artifact-dir",
+        default=None,
+        help=(
+            "Also write the same status JSON to a timestamped repair-status-<UTC>.json "
+            "file in this directory (read-only probe; never creates a repair-run directory)"
+        ),
+    )
+
+    # warm — pre-pay the first-open cost after bulk mutations (#19)
+    p_warm = sub.add_parser(
+        "warm",
+        help=(
+            "Pre-warm vector search (model + HNSW + pending post-mutation work). "
+            "Run after dedup --apply or sqlite-replay so the next reader pays "
+            "seconds, not minutes."
+        ),
+    )
+    p_warm.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit a single machine-readable warm result JSON object to stdout",
     )
 
     # mcp
@@ -1290,6 +1433,7 @@ def main():
         "wake-up": cmd_wakeup,
         "repair": cmd_repair,
         "repair-status": cmd_repair_status,
+        "warm": cmd_warm,
         "migrate": cmd_migrate,
         "status": cmd_status,
     }
