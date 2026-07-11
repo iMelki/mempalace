@@ -1,10 +1,19 @@
 # MemPalace Open Tasks
 
-Last updated: 2026-07-07
+Last updated: 2026-07-11
 
 This file is the durable local index for active `mempalace` issues.
 
 ## Active Issues
+
+- [#21 - Implement native loopback Streamable HTTP MCP transport](https://github.com/iMelki/mempalace/issues/21)
+  - Status: open; durable architecture chosen under agent-settings #209.
+  - Goal: extract transport-neutral tool dispatch and serve MemPalace natively
+    on `127.0.0.1:8787`, with Origin/auth checks and bounded Chroma/SQLite
+    concurrency. Keep stdio support and a temporary supergateway rollback path.
+  - Proof required: initialize/list/call/auth/origin/cancellation tests plus the
+    existing four-worker and a longer bounded concurrent smoke with no bridge
+    exit and complete cleanup. Railway is outside scope.
 
 - [#13 - mempalace_mcp_wrapper unconditionally disables real vector search (permanent keyword-only fallback since 2026-04)](https://github.com/iMelki/mempalace/issues/13)
   - Retitled 2026-07-04. The original count-divergence this issue was filed

@@ -32,6 +32,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Operations
 
+- **2026-07-11: native loopback HTTP MCP path selected (#21).** The owning
+  implementation issue now specifies transport-neutral dispatch, native
+  Streamable HTTP on `127.0.0.1:8787`, Origin/auth enforcement, bounded
+  backend concurrency, and concurrent smoke. Current supergateway containment
+  remains a temporary rollback path under agent-settings #209; no runtime
+  transport was changed in this documentation slice.
+
 - **2026-07-07: duplicate-drawer go/no-go tracking clarified (#19).**
   `OPEN_TASKS.md` now lists #19 as an active supervised decision lane, records
   the read-only `dedup --stats` estimate (`~292,998` heuristic remaining
