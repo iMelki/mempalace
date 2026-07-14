@@ -183,11 +183,12 @@ real MemPalace dispatcher and disposable Chroma status path.
 
 ## Scope and validation
 
-This change does not restart or reconfigure a live bridge. Agent-settings
-launcher migration, live burn-in, and removal of the supergateway fallback
-remain separate integration work after review. Validation uses disposable tool
-registries and an ephemeral loopback test socket only; it does not access a
-live palace, service, hosted endpoint, or Railway resource.
+The repository validation used disposable tool registries and an ephemeral
+loopback test socket. The later attended integration cutover restarted only the
+exact managed MemPalace bridge process; Router, QMD, Meili, Hindsight, Honcho,
+and code search were recorded as `not-touched`. Live concurrency proof called
+only read-only `mempalace_status`. It did not mine, add, edit, or delete palace
+data and did not access a hosted endpoint or Railway resource.
 
 Focused validation updated 2026-07-14 after release-audit remediation:
 
@@ -216,7 +217,13 @@ tests with `7` skips, `106` intentional deselections, and `191` warnings in
 `136.68s` of pytest time (`139.526s` wall time). The run record is
 `%LOCALAPPDATA%\MemSys\eval-artifacts\mempalace-finish-line\full-suite-final-latest-run.json`.
 
-Independent transport review found no remaining implementation blocker. The
-committed launcher update and serialized four-client burn-in remain pending. No
-live launcher, palace, hosted service, Railway resource, or cutover was touched;
-this document is not yet a cutover-readiness declaration.
+Independent transport review found no remaining implementation blocker.
+MemPalace commit `04f5bf3` and the committed agent-settings launcher now run
+the native HTTP path with backend concurrency serialized at one. An exact
+attended bridge-only restart succeeded. The four-client live gate passed, then
+`mempalace-attended-native-sustained-burnin-20260714T060927Z.json` passed six
+four-client waves over `132.39s`: `24/24` authenticated read-only status calls,
+`24/24` cleanup, zero lingering workers, and one stable exact bridge identity.
+Fresh decision `mempalace-bridge-transport-readiness-20260714T061355Z` is `ok`
+with `decision=native-transport-ready`. Supergateway remains an explicit
+rollback path; hosted deployment and Railway remain outside scope.

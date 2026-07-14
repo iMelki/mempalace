@@ -27,9 +27,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   dispatcher. Focused disposable official-client, concurrency, lifecycle,
   cancellation, and malformed-header tests pass. The final repository-wide
   release gate passes 1,673 tests with 7 platform skips, 106 intentional
-  deselections, and 191 warnings. Independent transport review is green;
-  committed launcher approval and serialized live burn-in remain required, so
-  this is not yet a live-cutover-ready declaration.
+  deselections, and 191 warnings. Independent transport review is green. The
+  committed agent-settings launcher selected native HTTP with backend
+  concurrency still serialized at one. The four-client live gate passed, then
+  a six-wave `132.39s` sustained burn-in passed `24/24` authenticated read-only
+  calls and cleanup with zero lingering workers and one stable exact bridge
+  identity. Fresh transport decision
+  `mempalace-bridge-transport-readiness-20260714T061355Z` is
+  `native-transport-ready`; supergateway remains rollback-only.
 
 - **Managed source-write receipts and exact verification foundation (#22).**
   Managed project, conversation, and RFC 002 adapter outputs now emit local
@@ -46,11 +51,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
    delete. Before purge, managed rewrites now persist an immutable recovery
    snapshot; restart reconciliation either proves COMPLETE or exactly restores
    the predecessor representation and blocks new writes on corruption or
-   baseline drift. Recovery publication now uses fail-closed OS durability:
-   Windows `MoveFileExW` write-through plus reopened `FlushFileBuffers` and hash
-   proof, or POSIX file/directory `fsync` plus hash proof. Immediately before
-   purge, every managed collection must still expose exactly the snapshotted ID
-   set; additions, removals, and duplicate pagination identities stop before
+  baseline drift. Recovery publication now uses fail-closed OS durability:
+  Windows `MoveFileExW` write-through plus reopened `FlushFileBuffers` and hash
+  proof, or POSIX file/directory `fsync` plus hash proof. Immediately before
+  purge, every managed collection must still expose exactly the snapshotted ID
+  set. The promotion matrix also corrected a platform-biased failure-injection
+  test: a final parent-sync error is now isolated from directory setup and must
+  leave the session non-COMPLETE with `ReceiptDurabilityError`.
+  Additions, removals, and duplicate pagination identities stop before
    deletion, and only validated IDs are deleted. Managed adapters serialize all
    source refs at the palace's HNSW write boundary. Current lookup treats the
    atomic source index as the head, repairs only one connected explicit
@@ -86,6 +94,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   without `chromadb`). (#18)
 
 ### Operations
+
+- **2026-07-14: native loopback HTTP cutover and sustained burn-in completed
+  (#21).** An exact attended restart moved the managed listener to the native
+  MemPalace HTTP server without touching Router, QMD, Meili, Hindsight, Honcho,
+  or code search. The initial four-client gate passed. Six additional
+  four-client waves then ran for `132.39s`, producing `24/24` successful
+  authenticated `mempalace_status` calls, `24/24` cleanup receipts, zero
+  lingering workers, and no managed bridge identity change. Fresh readiness and
+  transport-decision artifacts are `ok`; supergateway is retained only as an
+  explicit rollback. No palace data, hosted service, or Railway resource was
+  mutated by the transport smokes.
 
 - **2026-07-12: historical write evidence bounded and recovery moved to #22.**
   A path-redacted read-only audit linked 25,448 of 29,449 retained source-ledger

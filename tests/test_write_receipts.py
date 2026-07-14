@@ -3830,7 +3830,7 @@ def test_complete_journal_failure_rolls_back_replacement(tmp_path, monkeypatch):
     assert store.invalidations_for(first["receipt_id"]) == []
 
 
-def test_complete_stays_authoritative_after_post_publication_sync_error(tmp_path, monkeypatch):
+def test_complete_fails_closed_after_post_publication_sync_error(tmp_path, monkeypatch):
     _, store, run = _store_and_run(tmp_path)
     source_hash = sha256_bytes(b"post-publication sync")
     session = store.begin_source(
@@ -3843,18 +3843,17 @@ def test_complete_stays_authoritative_after_post_publication_sync_error(tmp_path
         adapter_version="1",
     )
     session.set_expected(drawers=0)
+    previous_event_path = session.last_event_path
 
     def fail_directory_sync(_path):
         raise OSError("directory sync failed after link")
 
-    monkeypatch.setattr(write_receipts_module, "_fsync_directory", fail_directory_sync)
-    receipt = session.complete()
-    current = store.find_current(receipt["source"]["identity"])
+    monkeypatch.setattr(write_receipts_module, "_sync_published_parent", fail_directory_sync)
+    with pytest.raises(ReceiptDurabilityError, match="durable publication failed"):
+        session.complete()
 
-    assert receipt["state"] == "COMPLETE"
-    assert session.last_event_path.exists()
-    assert current is not None
-    assert current["receipt_id"] == receipt["receipt_id"]
+    assert session.state != "COMPLETE"
+    assert session.last_event_path == previous_event_path
 
 
 @pytest.mark.parametrize(

@@ -6,44 +6,12 @@ This file is the durable local index for active `mempalace` issues.
 
 ## Active Issues
 
-- [#21 - Implement native loopback Streamable HTTP MCP transport](https://github.com/iMelki/mempalace/issues/21)
-  - Status: focused remediation, the fresh full suite, and independent transport
-    review are green. Live launcher cutover remains NO-GO pending a committed
-    launcher update and a clean serialized burn-in.
-  - Implemented: transport-neutral dispatch shared by stdio and HTTP, native
-    Streamable HTTP on `127.0.0.1:8787/mcp`, bearer authentication sourced only
-    from environment variables, SDK Host validation, strict application-layer
-    Origin grammar, active-aware five-minute idle cleanup, a 64-session
-    per-process hard cap including pending creations, post-DELETE removal from
-    all SDK/local maps, bounded termination tombstones that continue consuming
-    capacity after failed cleanup, raw-byte header-safe bearer comparison, and
-    serial-by-default backend calls. SDK 1.28.1 is exact pinned/runtime-gated
-    and its active-blind idle deadline remains disabled.
-  - Local proof: the 32-case native HTTP file passes official-client
-    initialize/list/call, hostile and malformed/duplicate Origin rejection,
-    cancellation, active-call retention, abandoned-session expiry, hard-cap,
-    30 sequential initialize/call/DELETE sessions, and four concurrent real
-    status dispatches with one HNSW probe on an ephemeral socket and disposable
-    palace. The affected receipt/backend/HTTP/dispatch/server suite passes
-    `279` tests with one platform skip. The final repository-wide release gate
-    passes `1,673` tests with `7` skips, `106` intentional deselections, and
-    `191` warnings in `136.68s` of pytest time (`139.526s` wall time). A prior live
-    smoke incorrectly raised backend
-    concurrency from the reviewed default `1` to `4`; four status workers timed
-    out, the listener exited, and restore timed out. The exact stale PID was
-    stopped after identity verification. The next burn-in keeps four clients
-    but serializes backend calls. Failure evidence is retained under
-    `%LOCALAPPDATA%\MemSys\eval-artifacts\bridge-concurrent-mcp`.
-  - Remaining proof: commit the launcher approval with the existing rollback
-    retained, then run a bounded four-client burn-in while backend calls remain
-    serialized, with no bridge exit or retained abandoned sessions. Railway is
-    outside scope.
-
 - [#22 - Add durable source-to-drawer receipts and supervised historical cohort recovery](https://github.com/iMelki/mempalace/issues/22)
   - Status: the affected `279`-test receipt/transport/backend suite, final
     repository-wide `1,673`-test release gate, and independent receipt re-review
-    are green. The managed-write foundation is commit-ready. Historical recovery
-    remains NO-GO; no historical mining or recovery is authorized.
+    are green. The managed-write foundation is committed on `dev` in `04f5bf3`.
+    Historical recovery remains NO-GO; no historical mining or recovery is
+    authorized.
   - Fresh read-only audit reconciled 25,448 of 29,449 retained staged source
     paths exactly. The remaining 4,001 comprise 1,435 bootstrap-only records,
     2,548 format exclusions, and 18 intact current-rule candidates.
@@ -181,6 +149,22 @@ This file is the durable local index for active `mempalace` issues.
   - Status: Open (preserved branch `agent/codex/mempalace-search-mcp-wip`).
 
 ## Recently Completed
+
+- [#21 - Implement native loopback Streamable HTTP MCP transport](https://github.com/iMelki/mempalace/issues/21)
+  - 2026-07-14: completed native authenticated Streamable HTTP on
+    `127.0.0.1:8787/mcp`, shared stdio/HTTP dispatch, strict Host/Origin/auth
+    handling, active-aware bounded sessions, and serial-by-default backend
+    calls in commit `04f5bf3`. The full release gate passed `1,673` tests with
+    `7` skips and `106` intentional deselections. Agent-settings selected the
+    native path, retained supergateway only as rollback, and proved an exact
+    attended restart. The four-client live gate passed; sustained artifact
+    `mempalace-attended-native-sustained-burnin-20260714T060927Z.json` then
+    passed six four-client waves over `132.39s` with `24/24` real read-only
+    calls, `24/24` cleanup, zero lingering workers, and one stable bridge
+    identity. Fresh transport decision
+    `mempalace-bridge-transport-readiness-20260714T061355Z` is
+    `native-transport-ready`. Railway and hosted deployment stayed out of
+    scope.
 
 - [#18 - repair-status lacks machine-readable read-only parity artifacts](https://github.com/iMelki/mempalace/issues/18)
   - 2026-07-05: implemented `mempalace repair-status --json` (single JSON

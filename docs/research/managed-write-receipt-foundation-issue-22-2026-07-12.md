@@ -1,9 +1,10 @@
 # Managed-write receipt foundation for issue #22
 
 Date: 2026-07-12; review remediation updated 2026-07-14
-Status: local code/test remediation, the final full-suite release gate, and
-independent re-review are GO; disposable real-Chroma interruption/restart proof
-is pending; historical recovery remains NO-GO and was not performed
+Status: implementation is committed on `dev` in `04f5bf3`; the final full-suite
+release gate and independent re-review are GO; disposable real-Chroma
+interruption/restart proof is pending; historical recovery remains NO-GO and
+was not performed
 
 ## Decision
 
@@ -345,6 +346,17 @@ ordinary non-COMPLETE lifecycle events:
 - Any move, link, replace, file flush, directory sync, reopen, size, or hash
   failure raises `ReceiptDurabilityError`. The managed path cannot proceed to
   purge without a verified `DurablePublicationProof` for the expected path.
+- The 2026-07-14 promotion matrix exposed a cross-platform test defect at this
+  boundary. The test replaced every POSIX directory sync, so Linux and macOS
+  failed during the pre-publication directory proof instead of the claimed
+  post-publication sync. It also expected success despite the fail-closed
+  contract above. Publication now has an explicit test seam for the final
+  parent sync; the regression injects the error only there and requires
+  `ReceiptDurabilityError` while the session remains non-COMPLETE. This follows
+  the same temp-file/file-sync/rename/parent-sync sequence documented by
+  [python-atomicwrites](https://python-atomicwrites.readthedocs.io/en/latest/)
+  and the POSIX rationale for syncing affected directories after rename or
+  link operations.
 - Recovery removal uses POSIX directory `fsync`. On Windows, a fresh
   same-directory barrier is published with `MOVEFILE_WRITE_THROUGH` and exact
   file readback after unlink. That is the strongest implemented ordering

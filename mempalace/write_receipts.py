@@ -3566,8 +3566,7 @@ def _publish_durable_file(
             os.replace(str(temp_path), str(path))
 
         content_sha256 = _flush_and_verify_published_file(path, data)
-        if os.name != "nt":
-            _fsync_directory(path.parent)
+        _sync_published_parent(path.parent)
     except ReceiptConflictError:
         raise
     except (OSError, ValueError) as exc:
@@ -3579,6 +3578,12 @@ def _publish_durable_file(
         size_bytes=len(data),
         primitive=primitive,
     )
+
+
+def _sync_published_parent(path: Path) -> None:
+    """Durably publish a POSIX directory entry after the file is visible."""
+    if os.name != "nt":
+        _fsync_directory(path)
 
 
 def _ensure_private_dir_durable_chain(
