@@ -1,6 +1,6 @@
 {
   "schema": "mempalace-managed-write-boundary-disposition/v1",
-  "asOf": "2026-07-14",
+  "asOf": "2026-07-15",
   "ownerIssue": "https://github.com/iMelki/mempalace/issues/22",
   "status": "decisions-recorded-implementation-open",
   "policy": {
@@ -168,12 +168,15 @@
       "id": "mcp-drawer-mutations",
       "surface": "MCP drawer add, update, and delete tools",
       "disposition": "adapt-to-managed-receipts",
-      "currentState": "serialized-direct-write",
+      "currentState": "managed-receipt-service-on-dev",
       "managedRepresentation": "Require a logical source identity and publish create, supersession, or deletion receipts inside the existing palace lock.",
       "reason": "Serialization proves ordering, not provenance or the completeness of the resulting source representation.",
+      "acceptanceStatus": "met-on-dev",
       "evidence": [
-        {"path": "mempalace/mcp_server.py", "line": 1036},
-        {"path": "tests/test_mcp_server.py", "line": 694}
+        {"path": "mempalace/mcp_managed_writes.py", "line": 1},
+        {"path": "mempalace/mcp_server.py", "line": 1057},
+        {"path": "tests/test_mcp_server.py", "line": 694},
+        {"path": "docs/research/mcp-managed-write-contract-2026-07-15.md", "line": 1}
       ],
       "requiredAcceptance": ["logical source contract", "delete invalidation", "transport-neutral exact readback"]
     },
@@ -181,12 +184,15 @@
       "id": "mcp-diary-write",
       "surface": "MCP diary writer",
       "disposition": "adapt-to-managed-receipts",
-      "currentState": "direct-add-outside-common-mutation-decorator",
+      "currentState": "managed-receipt-service-on-dev",
       "managedRepresentation": "Route the tool through managed diary ingestion and the shared lock/recovery boundary.",
-      "reason": "The current diary path bypasses both source receipts and the drawer tools' common mutation wrapper.",
+      "reason": "The former diary path bypassed both source receipts and the drawer tools' common mutation wrapper.",
+      "acceptanceStatus": "met-on-dev",
       "evidence": [
-        {"path": "mempalace/mcp_server.py", "line": 1473},
-        {"path": "tests/test_mcp_server.py", "line": 1107}
+        {"path": "mempalace/mcp_managed_writes.py", "line": 1},
+        {"path": "mempalace/mcp_server.py", "line": 1493},
+        {"path": "tests/test_mcp_server.py", "line": 1200},
+        {"path": "docs/research/mcp-managed-write-contract-2026-07-15.md", "line": 1}
       ],
       "requiredAcceptance": ["common lock", "managed diary receipt", "MCP integration recovery test"]
     },
@@ -272,9 +278,10 @@
       "id": "mcp-direct-collection-cache",
       "surface": "MCP cache that directly gets or creates Chroma collections",
       "disposition": "retire-unmanaged-mutation-surface",
-      "currentState": "transport-layer-backend-access",
+      "currentState": "no-create-or-hnsw-pin-on-read-but-transport-handle-still-direct",
       "retirementTarget": "Make the transport consume a private read facade and explicit receipt-aware mutation service; never create durable collection state as a read-side cache effect.",
       "reason": "Transport caching should not own database creation or expose a second write path around the canonical backend boundary.",
+      "acceptanceStatus": "partial-no-create-on-read-proven-read-facade-open",
       "evidence": [
         {"path": "mempalace/mcp_server.py", "line": 477},
         {"path": "tests/test_mcp_server.py", "line": 694}

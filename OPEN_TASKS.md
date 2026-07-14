@@ -1,6 +1,6 @@
 # MemPalace Open Tasks
 
-Last updated: 2026-07-14
+Last updated: 2026-07-15
 
 This file is the durable local index for active `mempalace` issues.
 
@@ -31,6 +31,26 @@ This file is the durable local index for active `mempalace` issues.
     lookup with mandatory durable COMPLETE markers, dual HMAC/source-file
     ownership, bounded fail-closed HNSW probes, and a pseudonymized shared
     projection using per-palace HMAC identities plus bucketed source size.
+  - MCP writer tranche completed on `dev`: drawer add/update/delete and MCP
+    diary writes now delegate to one receipt-aware service. Drawer mutations
+    require a stable logical `source_id`; replacement publishes a superseding
+    receipt, deletion publishes a verified `ZERO_OUTPUT` successor plus
+    predecessor invalidation, and failed replacement restores the exact old
+    row and receipt. Document bytes and semantic metadata are attested together;
+    tampered wing/room/agent/topic state cannot be reused as unchanged. Diary
+    callers may supply an agent-and-wing-scoped `source_id` for retry
+    idempotency. Read/status cache misses no longer create a collection or pin
+    HNSW settings. Legacy rows without receipts remain readable but require an
+    explicit provenance migration before mutation. Contract and community
+    research are in
+    `docs/research/mcp-managed-write-contract-2026-07-15.md`.
+  - MCP writer focused proof: the receipt, HTTP, dispatch, source, and MCP
+    server suites pass `270` tests with one platform skip. The durable log is
+    under `.local-logs/pytest-mcp-managed-20260715-013828.out.log` and remains
+    an untracked local artifact.
+  - Final repository gate: `1,695` passed, `7` skipped, `106` intentionally
+    deselected in `136.93s`; durable output is under
+    `.local-logs/pytest-full-final-20260715-014112.out.log`.
   - Local proof: the affected receipt/backend/HTTP/dispatch/server run passes
     `279` tests with one platform skip. Real-Chroma write readback is exact and
     bounded; stale or temporarily missing rows are retried for at most two
@@ -52,12 +72,13 @@ This file is the durable local index for active `mempalace` issues.
     deletes exactly one large row, `tests/test_write_receipts.py` passes `110`
     tests, Ruff is clean, and no live palace was opened by this proof.
   - Explicit remaining scope: receipts are not automatic across the whole
-    product. Migration, repair, dedup, sweep, compression, diary/closet/KG/
-    tunnel writes, MCP drawer mutations, backend open-time repairs, direct
-    collection APIs, and adapters that bypass `managed_adapter_ingest()` remain
-    unmanaged. Legacy `mempalace migrate` now blocks if receipt state exists so
-    it cannot silently discard the journal; adapting or retiring the remaining
-    paths stays in #22.
+    product. Migration, repair, dedup, sweep, compression, diary-file
+    drawer/closet ingestion, closet regeneration, KG/tunnel writes, backend
+    open-time repairs, direct collection APIs, and adapters that bypass
+    `managed_adapter_ingest()` remain unmanaged. The MCP drawer and MCP diary
+    paths are no longer in this list. Legacy `mempalace migrate` now blocks if
+    receipt state exists so it cannot silently discard the journal; adapting
+    or retiring the remaining paths stays in #22.
   - Writer disposition is now explicit and machine-readable in
     `docs/research/managed-write-boundary-dispositions-2026-07-14.json`: 21
     mutation surfaces are accounted for. Ten source/derived-output paths must

@@ -127,9 +127,17 @@ def _managed_adapter_ingest_locked(  # noqa: C901 - transactional generator orch
                 drawers=active.counts["drawers_written"],
                 items=len(active.outputs),
             )
+            empty_disposition = None
+            if not active.outputs:
+                empty_disposition = adapter.empty_output_disposition
             if active_previous is not None:
-                active.record_invalidation(active_previous, reason="source-rewrite-purge")
-            active.complete()
+                invalidation_reason = (
+                    "source-zero-output-purge"
+                    if empty_disposition == "ZERO_OUTPUT"
+                    else "source-rewrite-purge"
+                )
+                active.record_invalidation(active_previous, reason=invalidation_reason)
+            active.complete(disposition=empty_disposition)
             _finalize_rewrite_recovery(
                 palace,
                 active.store,

@@ -36,6 +36,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   `mempalace-bridge-transport-readiness-20260714T061355Z` is
   `native-transport-ready`; supergateway remains rollback-only.
 
+- **Receipt-managed MCP drawer and diary writes (#22).** Added one private
+  `ManagedMcpMutationService` over the existing managed adapter transaction.
+  Drawer add, update, and delete now require a stable logical `source_id`,
+  publish exact create/supersession/zero-output receipts, invalidate deleted
+  predecessors, verify current collection state, and restore the prior row on
+  a failed replacement. Legacy unreceipted rows remain readable but cannot be
+  updated or deleted by assigning a new identity after the fact. MCP diary
+  writes now publish the same receipts; callers may supply `source_id` as an
+  idempotency key scoped by agent and wing, while omitted IDs preserve append
+  behavior. Receipts now attest meaning-bearing metadata as well as document
+  bytes, source locators are opaque, tombstone retries prove the target ID is
+  absent, and old positional add calls cannot silently bind the wrong identity.
+  Read/status cache misses no longer create collections or retrofit HNSW
+  settings. The transport still exposes a direct read-capable Chroma handle, so
+  full cache/facade retirement remains open. The focused receipt, HTTP,
+  dispatch, source, and MCP-server suite passes 270 tests with one platform
+  skip; the final repository gate passes 1,695 tests with 7 skips and 106
+  intentional deselections.
+
 - **Managed source-write receipts and exact verification foundation (#22).**
   Managed project, conversation, and RFC 002 adapter outputs now emit local
   append-only receipts with exact output manifests. Source locks cover read,

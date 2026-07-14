@@ -102,7 +102,7 @@ same integrity, receipt, retrieval, and reopen checks before service resumes.
 - [W3C PROV-DM](https://www.w3.org/TR/prov-dm/)
 - [OpenLineage run lifecycle](https://openlineage.io/docs/spec/run-cycle/)
 - [SQLite Online Backup API](https://www.sqlite.org/backup.html)
-- [Chroma low-volume HNSW durability issue #6975](https://github.com/chroma-core/chroma/issues/6975)
+- [Chroma #6975 reported below-threshold HNSW persistence loss; proposed #7047 fix is SegmentAPI-only](https://github.com/chroma-core/chroma/issues/6975)
 - [Chroma same-directory second-client issue #7040](https://github.com/chroma-core/chroma/issues/7040)
 
 No source replay, palace mutation, Railway access, or historical receipt

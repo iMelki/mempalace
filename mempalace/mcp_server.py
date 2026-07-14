@@ -82,6 +82,10 @@ from .write_receipts import (  # noqa: E402
     _collection_rows_for_ids,
     managed_write_scope,
 )
+from .mcp_managed_writes import (  # noqa: E402
+    ManagedMcpMutationService,
+    validate_source_id,
+)
 from .mcp_dispatch import (  # noqa: E402
     ToolDispatchError,
     dispatch_tool,
@@ -541,7 +545,6 @@ def _get_collection_locked(create=False, with_embedding=True):
                 ef = ChromaBackend._resolve_embedding_function()
                 ef_kwargs = {"embedding_function": ef} if ef is not None else {}
             raw = client.get_collection(_config.collection_name, **ef_kwargs)
-            _pin_hnsw_threads(raw)
             _collection_cache = ChromaCollection(raw)
             _record_palace_db_identity()
             _metadata_cache = None
@@ -669,9 +672,10 @@ def _tool_status_via_sqlite() -> dict:
         "rooms": rooms,
         "protocol": PALACE_PROTOCOL,
         "aaak_dialect": AAAK_SPEC,
-        "vector_disabled": True,
-        "vector_disabled_reason": _vector_disabled_reason,
+        "vector_disabled": _vector_disabled,
     }
+    if _vector_disabled_reason:
+        result["vector_disabled_reason"] = _vector_disabled_reason
     if _vector_capacity_status:
         result["hnsw_capacity"] = {
             "sqlite_count": _vector_capacity_status.get("sqlite_count"),
@@ -692,12 +696,13 @@ def tool_status():
     if _vector_disabled:
         return _tool_status_via_sqlite()
 
-    # Allow create=True only after ChromaDB has materialized the sqlite file.
-    # A plain configured directory is not yet a palace and should still report
-    # the historical "No palace found" error, while a cold-start DB with no
-    # mempalace_drawers collection should bootstrap cleanly (#830).
-    col = _get_collection(create=db_exists, with_embedding=False)
+    # Status is a read. A materialized SQLite file does not authorize creating
+    # a collection or modifying HNSW configuration (#22). A cold-start DB with
+    # no drawer collection is read through SQLite and still reports zero (#830).
+    col = _get_collection(create=False, with_embedding=False)
     if not col:
+        if db_exists:
+            return _tool_status_via_sqlite()
         return _no_palace()
     count = col.count()
     wings = {}
@@ -1050,125 +1055,133 @@ def _serialized_palace_mutation(handler):
     return guarded
 
 
+def _managed_mcp_mutations(col) -> ManagedMcpMutationService:
+    """Return the private receipt-aware writer used by every MCP row mutation."""
+    closet_collection = None
+    with _collection_cache_lock:
+        try:
+            raw_closets = _get_client().get_collection("mempalace_closets")
+            closet_collection = ChromaCollection(raw_closets)
+        except (_ChromaNotFoundError, _ChromaInvalidCollectionError):
+            pass
+    return ManagedMcpMutationService(
+        palace_path=_config.palace_path,
+        drawer_collection=col,
+        closet_collection=closet_collection,
+        knowledge_graph=_kg,
+        caller="mcp",
+    )
+
+
+def _source_name_hint(source_file: str = None) -> str:
+    """Retain a useful source label without persisting an absolute path."""
+    if not source_file:
+        return ""
+    value = str(source_file).strip()
+    if not value:
+        return ""
+    return (Path(value).name or value)[:512]
+
+
 @_serialized_palace_mutation
 def tool_add_drawer(
-    wing: str, room: str, content: str, source_file: str = None, added_by: str = "mcp"
+    wing: str,
+    room: str,
+    content: str,
+    source_file: str = None,
+    added_by: str = "mcp",
+    source_id: str = None,
 ):
-    """File verbatim content into a wing/room. Checks for duplicates first."""
+    """File one logical source into a receipt-owned drawer."""
     global _metadata_cache
     try:
         wing = sanitize_name(wing, "wing")
         room = sanitize_name(room, "room")
         content = sanitize_content(content)
+        source_id = validate_source_id(source_id)
+        added_by = sanitize_name(added_by, "added_by")
     except ValueError as e:
         return {"success": False, "error": str(e)}
 
     col = _get_collection(create=True)
     if not col:
         return _no_palace()
-
-    drawer_id = (
-        f"drawer_{wing}_{room}_{hashlib.sha256((wing + room + content).encode()).hexdigest()[:24]}"
-    )
-
-    _wal_log(
-        "add_drawer",
-        {
-            "drawer_id": drawer_id,
-            "wing": wing,
-            "room": room,
-            "added_by": added_by,
-            "content_length": len(content),
-            "content_preview": content[:200],
-        },
-    )
-
     try:
-        existing = _collection_rows_for_ids(
-            col,
-            [drawer_id],
-            require_all=False,
-            include_embeddings=True,
+        service = _managed_mcp_mutations(col)
+        drawer_id = service.drawer_id_for(source_id)
+        source_name = _source_name_hint(source_file)
+        filed_at = datetime.now().isoformat()
+        _wal_log(
+            "add_drawer",
+            {
+                "drawer_id": drawer_id,
+                "wing": wing,
+                "room": room,
+                "added_by": added_by,
+                "content_length": len(content),
+                "content_preview": content[:200],
+            },
         )
-        if drawer_id in existing:
-            existing_document, existing_metadata, _ = existing[drawer_id]
-            if (
-                existing_document == content
-                and existing_metadata.get("wing") == wing
-                and existing_metadata.get("room") == room
-                and existing_metadata.get("source_file", "") == (source_file or "")
-            ):
-                return {"success": True, "reason": "already_exists", "drawer_id": drawer_id}
-            return {
-                "success": False,
-                "error": f"Drawer ID already represents different content: {drawer_id}",
-            }
-
         metadata = {
             "wing": wing,
             "room": room,
-            "source_file": source_file or "",
             "chunk_index": 0,
             "added_by": added_by,
-            "filed_at": datetime.now().isoformat(),
+            "filed_at": filed_at,
         }
-        col.add(
-            ids=[drawer_id],
-            documents=[content],
-            metadatas=[metadata],
+        if source_name:
+            metadata["source_name"] = source_name
+        result = service.write_drawer(
+            source_id=source_id,
+            drawer_id=drawer_id,
+            content=content,
+            metadata=metadata,
         )
-        readback = _collection_rows_for_ids(col, [drawer_id])
-        if readback.get(drawer_id, (None, None, None))[:2] != (content, metadata):
-            raise RuntimeError("drawer add exact readback did not match")
         _metadata_cache = None
         logger.info(f"Filed drawer: {drawer_id} → {wing}/{room}")
-        return {"success": True, "drawer_id": drawer_id, "wing": wing, "room": room}
+        return {
+            "success": True,
+            "reason": "already_exists" if result.unchanged else "written",
+            "drawer_id": drawer_id,
+            "source_id": source_id,
+            "receipt_id": result.receipt_id,
+            "wing": wing,
+            "room": room,
+        }
     except Exception as e:
         return {"success": False, "error": str(e)}
 
 
 @_serialized_palace_mutation
-def tool_delete_drawer(drawer_id: str):
-    """Delete a single drawer by ID."""
+def tool_delete_drawer(drawer_id: str, source_id: str = None):
+    """Delete one receipt-owned drawer and publish a zero-output successor."""
     global _metadata_cache
+    try:
+        source_id = validate_source_id(source_id)
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
     col = _get_collection()
     if not col:
         return _no_palace()
-    existing = _collection_rows_for_ids(
-        col,
-        [drawer_id],
-        require_all=False,
-        include_embeddings=True,
-    )
-    if drawer_id not in existing:
-        return {"success": False, "error": f"Drawer not found: {drawer_id}"}
-
-    # Log the deletion with the content being removed for audit trail
-    deleted_content, deleted_meta, _ = existing[drawer_id]
-    _wal_log(
-        "delete_drawer",
-        {
-            "drawer_id": drawer_id,
-            "deleted_meta": deleted_meta,
-            "content_preview": deleted_content[:200],
-        },
-    )
 
     try:
-        final = _collection_rows_for_ids(
-            col,
-            [drawer_id],
-            require_all=False,
-            include_embeddings=True,
+        service = _managed_mcp_mutations(col)
+        _wal_log(
+            "delete_drawer",
+            {
+                "drawer_id": drawer_id,
+            },
         )
-        if final.get(drawer_id) != existing[drawer_id]:
-            raise RuntimeError("drawer identity changed before deletion; refusing delete")
-        col.delete(ids=[drawer_id])
-        if _collection_rows_for_ids(col, [drawer_id], require_all=False):
-            raise RuntimeError("drawer deletion did not remove the exact target")
+        result = service.delete_drawer(source_id=source_id, drawer_id=drawer_id)
         _metadata_cache = None
         logger.info(f"Deleted drawer: {drawer_id}")
-        return {"success": True, "drawer_id": drawer_id}
+        return {
+            "success": True,
+            "reason": "already_deleted" if result.unchanged else "deleted",
+            "drawer_id": drawer_id,
+            "source_id": source_id,
+            "receipt_id": result.receipt_id,
+        }
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -1256,27 +1269,33 @@ def tool_list_drawers(wing: str = None, room: str = None, limit: int = 20, offse
 
 
 @_serialized_palace_mutation
-def tool_update_drawer(drawer_id: str, content: str = None, wing: str = None, room: str = None):
-    """Update an existing drawer's content and/or metadata."""
+def tool_update_drawer(
+    drawer_id: str,
+    content: str = None,
+    wing: str = None,
+    room: str = None,
+    source_id: str = None,
+):
+    """Supersede one receipt-owned drawer's content and/or metadata."""
     global _metadata_cache
 
     if content is None and wing is None and room is None:
         return {"success": True, "drawer_id": drawer_id, "noop": True}
 
+    try:
+        source_id = validate_source_id(source_id)
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
+
     col = _get_collection()
     if not col:
         return _no_palace()
     try:
-        existing = _collection_rows_for_ids(
-            col,
-            [drawer_id],
-            require_all=False,
-            include_embeddings=True,
+        service = _managed_mcp_mutations(col)
+        old_doc, old_meta, old_embedding = service.require_owned_drawer(
+            source_id=source_id,
+            drawer_id=drawer_id,
         )
-        if drawer_id not in existing:
-            return {"success": False, "error": f"Drawer not found: {drawer_id}"}
-
-        old_doc, old_meta, old_embedding = existing[drawer_id]
 
         new_doc = old_doc
         if content is not None:
@@ -1285,7 +1304,11 @@ def tool_update_drawer(drawer_id: str, content: str = None, wing: str = None, ro
             except ValueError as e:
                 return {"success": False, "error": str(e)}
 
-        new_meta = dict(old_meta)
+        new_meta = {
+            key: value
+            for key, value in old_meta.items()
+            if not key.startswith("write_") and key != "source_file"
+        }
         if wing is not None:
             try:
                 new_meta["wing"] = sanitize_name(wing, "wing")
@@ -1310,30 +1333,14 @@ def tool_update_drawer(drawer_id: str, content: str = None, wing: str = None, ro
             },
         )
 
-        update_kwargs = {"ids": [drawer_id]}
-        if content is not None:
-            update_kwargs["documents"] = [new_doc]
-        update_kwargs["metadatas"] = [new_meta]
-        final = _collection_rows_for_ids(
-            col,
-            [drawer_id],
-            require_all=False,
-            include_embeddings=True,
+        new_meta["updated_at"] = datetime.now().isoformat()
+        result = service.write_drawer(
+            source_id=source_id,
+            drawer_id=drawer_id,
+            content=new_doc,
+            metadata=new_meta,
+            embedding=old_embedding if new_doc == old_doc else None,
         )
-        if final.get(drawer_id) != existing[drawer_id]:
-            raise RuntimeError("drawer identity changed before update; refusing overwrite")
-        col.update(**update_kwargs)
-
-        readback = _collection_rows_for_ids(
-            col,
-            [drawer_id],
-            include_embeddings=content is None,
-        )
-        actual_doc, actual_meta, actual_embedding = readback[drawer_id]
-        if actual_doc != new_doc or actual_meta != new_meta:
-            raise RuntimeError("drawer update exact readback did not match")
-        if content is None and actual_embedding != old_embedding:
-            raise RuntimeError("drawer metadata update changed its embedding identity")
 
         _metadata_cache = None
 
@@ -1341,6 +1348,9 @@ def tool_update_drawer(drawer_id: str, content: str = None, wing: str = None, ro
         return {
             "success": True,
             "drawer_id": drawer_id,
+            "source_id": source_id,
+            "receipt_id": result.receipt_id,
+            "reason": "unchanged" if result.unchanged else "updated",
             "wing": new_meta.get("wing", ""),
             "room": new_meta.get("room", ""),
         }
@@ -1470,7 +1480,13 @@ def tool_kg_stats():
 # ==================== AGENT DIARY ====================
 
 
-def tool_diary_write(agent_name: str, entry: str, topic: str = "general", wing: str = ""):
+def tool_diary_write(
+    agent_name: str,
+    entry: str,
+    topic: str = "general",
+    wing: str = "",
+    source_id: str = "",
+):
     """
     Write a diary entry for this agent. Entries are timestamped and
     accumulate over time in a diary room.
@@ -1498,50 +1514,64 @@ def tool_diary_write(agent_name: str, entry: str, topic: str = "general", wing: 
     if not col:
         return _no_palace()
 
-    now = datetime.now()
-    entry_id = (
-        f"diary_{wing}_{now.strftime('%Y%m%d_%H%M%S%f')}_"
-        f"{hashlib.sha256(entry.encode()).hexdigest()[:12]}"
-    )
-
-    _wal_log(
-        "diary_write",
-        {
-            "agent_name": agent_name,
-            "topic": topic,
-            "entry_id": entry_id,
-            "entry_preview": entry[:200],
-        },
-    )
-
     try:
+        now = datetime.now()
+        if source_id:
+            source_id = validate_source_id(source_id)
+        else:
+            source_id = (
+                f"auto:{now.strftime('%Y%m%d_%H%M%S%f')}:"
+                f"{hashlib.sha256(entry.encode()).hexdigest()[:12]}"
+            )
+        service = _managed_mcp_mutations(col)
+        entry_id = service.diary_entry_id_for(
+            source_id=source_id,
+            agent=agent_name,
+            wing=wing,
+        )
+        _wal_log(
+            "diary_write",
+            {
+                "agent_name": agent_name,
+                "topic": topic,
+                "entry_id": entry_id,
+                "entry_preview": entry[:200],
+            },
+        )
         # TODO: Future versions should expand AAAK before embedding to improve
         # semantic search quality. For now, store raw AAAK in metadata so it's
         # preserved, and keep the document as-is for embedding (even though
         # compressed AAAK degrades embedding quality).
-        col.add(
-            ids=[entry_id],
-            documents=[entry],
-            metadatas=[
-                {
-                    "wing": wing,
-                    "room": room,
-                    "hall": "hall_diary",
-                    "topic": topic,
-                    "type": "diary_entry",
-                    "agent": agent_name,
-                    "filed_at": now.isoformat(),
-                    "date": now.strftime("%Y-%m-%d"),
-                }
-            ],
+        metadata = {
+            "wing": wing,
+            "room": room,
+            "hall": "hall_diary",
+            "topic": topic,
+            "type": "diary_entry",
+            "agent": agent_name,
+            "filed_at": now.isoformat(),
+            "date": now.strftime("%Y-%m-%d"),
+        }
+        result = service.write_diary_entry(
+            source_id=source_id,
+            agent=agent_name,
+            wing=wing,
+            entry_id=entry_id,
+            entry=entry,
+            metadata=metadata,
         )
+        readback = _collection_rows_for_ids(col, [entry_id])
+        stored_timestamp = readback[entry_id][1].get("filed_at", now.isoformat())
         logger.info(f"Diary entry: {entry_id} → {wing}/diary/{topic}")
         return {
             "success": True,
+            "reason": "already_exists" if result.unchanged else "written",
             "entry_id": entry_id,
+            "source_id": source_id,
+            "receipt_id": result.receipt_id,
             "agent": agent_name,
             "topic": topic,
-            "timestamp": now.isoformat(),
+            "timestamp": stored_timestamp,
         }
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -2015,7 +2045,7 @@ TOOLS = {
         "handler": tool_check_duplicate,
     },
     "mempalace_add_drawer": {
-        "description": "File verbatim content into the palace. Checks for duplicates first.",
+        "description": "File verbatim content as one receipt-owned logical source. source_id is required at execution even while older generated clients transition.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -2028,7 +2058,14 @@ TOOLS = {
                     "type": "string",
                     "description": "Verbatim content to store — exact words, never summarized",
                 },
-                "source_file": {"type": "string", "description": "Where this came from (optional)"},
+                "source_id": {
+                    "type": "string",
+                    "description": "Required at execution: stable ID for the real note, message, or record. Reuse it for updates and deletion.",
+                },
+                "source_file": {
+                    "type": "string",
+                    "description": "Optional source label; only its basename is retained",
+                },
                 "added_by": {"type": "string", "description": "Who is filing this (default: mcp)"},
             },
             "required": ["wing", "room", "content"],
@@ -2036,11 +2073,15 @@ TOOLS = {
         "handler": tool_add_drawer,
     },
     "mempalace_delete_drawer": {
-        "description": "Delete a drawer by ID. Irreversible.",
+        "description": "Delete a receipt-owned drawer and publish an auditable zero-output successor. source_id is required at execution.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "drawer_id": {"type": "string", "description": "ID of the drawer to delete"},
+                "source_id": {
+                    "type": "string",
+                    "description": "Required at execution: stable logical source ID used when the drawer was filed",
+                },
             },
             "required": ["drawer_id"],
         },
@@ -2080,7 +2121,7 @@ TOOLS = {
         "handler": tool_list_drawers,
     },
     "mempalace_update_drawer": {
-        "description": "Update an existing drawer's content and/or metadata (wing, room). Fetches existing drawer first; returns error if not found.",
+        "description": "Supersede a receipt-owned drawer's content and/or metadata. source_id is required at execution.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -2096,6 +2137,10 @@ TOOLS = {
                 "room": {
                     "type": "string",
                     "description": "New room (optional — omit to keep existing)",
+                },
+                "source_id": {
+                    "type": "string",
+                    "description": "Required at execution: stable logical source ID used when the drawer was filed",
                 },
             },
             "required": ["drawer_id"],
@@ -2122,6 +2167,10 @@ TOOLS = {
                 "wing": {
                     "type": "string",
                     "description": "Target wing for this diary entry (optional). If omitted, uses wing_{agent_name}. Use this to write diary entries to a project wing instead of an agent-specific wing.",
+                },
+                "source_id": {
+                    "type": "string",
+                    "description": "Optional stable retry ID. Reusing it supersedes the same diary entry instead of creating a duplicate.",
                 },
             },
             "required": ["agent_name", "entry"],

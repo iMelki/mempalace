@@ -675,9 +675,12 @@ conditions, then fail closed. Closed-client, schema, and unrelated backend
 errors propagate immediately. They do not support attaching a second SQLite
 reader or constructing a second client against a live palace.
 
-Upstream [`#6975`](https://github.com/chroma-core/chroma/issues/6975) and
-[`#7047`](https://github.com/chroma-core/chroma/pull/7047) document the remaining
-durability gap: below-threshold in-memory HNSW state has no public flush API.
+Upstream [`#6975`](https://github.com/chroma-core/chroma/issues/6975) reports
+below-threshold HNSW persistence loss, but its analysis and open
+[`#7047`](https://github.com/chroma-core/chroma/pull/7047) fix target
+`PersistentLocalHnswSegment`/`SegmentAPI`. They establish the absence of a
+public flush surface and a contextual persistence risk, not direct proof of
+`RustBindingsAPI` data loss.
 MemPalace configures `hnsw:sync_threshold=50000`. The first disposable probe on
 2026-07-14 incorrectly used exact Python-float equality and produced a preserved
 false-negative artifact. The corrected probe used `1e-6` float32 tolerance:
@@ -737,9 +740,10 @@ power removal, broken drive write caches, firmware lying about flushes, network
 filesystem semantics, a concurrently open second `PersistentClient`, or an
 unmanaged writer. It also does not inspect, ingest, repair, or authorize any
 historical source. Those boundaries remain separate because upstream Chroma
-issue #7040 supports strict single-client sequencing, while issues #6975 and
-PR #7047 leave low-volume HNSW persistence dependent on the supported close
-boundary and underlying storage guarantees.
+issue #7040 supports strict single-client sequencing. Issue #6975 and PR #7047
+do not establish a `RustBindingsAPI` close guarantee; MemPalace's disposable
+Rust close/reopen and managed restart probes are the direct evidence for its
+observed behavior, within the underlying storage boundaries stated above.
 
 ### Chroma large document delete correction (2026-07-14)
 

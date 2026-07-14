@@ -446,6 +446,10 @@ class TestReadTools:
         result = tool_status()
         assert "error" not in result, f"cold-start should not error: {result}"
         assert result["total_drawers"] == 0
+        check_client = chromadb.PersistentClient(path=palace_path)
+        assert "mempalace_drawers" not in {
+            collection.name for collection in check_client.list_collections()
+        }
 
     def test_status_empty_palace(self, monkeypatch, config, palace_path, kg):
         _patch_mcp_server(monkeypatch, config, kg)
@@ -729,11 +733,45 @@ class TestWriteTools:
             wing="test_wing",
             room="test_room",
             content="This is a test memory about Python decorators and metaclasses.",
+            source_id="test-note-1",
         )
-        assert result["success"] is True
+        assert result["success"] is True, result
         assert result["wing"] == "test_wing"
         assert result["room"] == "test_room"
-        assert result["drawer_id"].startswith("drawer_test_wing_test_room_")
+        assert result["drawer_id"].startswith("drawer_mcp_")
+        assert result["receipt_id"]
+
+        _client, collection = _get_collection(palace_path)
+        stored = collection.get(ids=[result["drawer_id"]], include=["metadatas"])
+        assert "test-note-1" not in stored["metadatas"][0]["source_file"]
+        assert stored["metadatas"][0]["mcp_semantic_metadata_hash"]
+        del _client
+
+    def test_add_drawer_preserves_old_positional_argument_order(
+        self, monkeypatch, config, palace_path, kg
+    ):
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace.mcp_server import tool_add_drawer
+
+        four_args = tool_add_drawer("wing", "room", "content", "legacy.txt")
+        five_args = tool_add_drawer("wing", "room", "content", "legacy.txt", "legacy-agent")
+
+        assert four_args["success"] is False
+        assert five_args["success"] is False
+        assert "source_id is required" in four_args["error"]
+        assert "source_id is required" in five_args["error"]
+
+    def test_mutation_schemas_keep_source_id_transitionally_optional(self):
+        from mempalace.mcp_server import TOOLS
+
+        for name in (
+            "mempalace_add_drawer",
+            "mempalace_update_drawer",
+            "mempalace_delete_drawer",
+        ):
+            schema = TOOLS[name]["input_schema"]
+            assert "source_id" in schema["properties"]
+            assert "source_id" not in schema.get("required", [])
 
     def test_add_drawer_duplicate_detection(self, monkeypatch, config, palace_path, kg):
         _patch_mcp_server(monkeypatch, config, kg)
@@ -742,12 +780,14 @@ class TestWriteTools:
         from mempalace.mcp_server import tool_add_drawer
 
         content = "This is a unique test memory about Rust ownership and borrowing."
-        result1 = tool_add_drawer(wing="w", room="r", content=content)
+        result1 = tool_add_drawer(wing="w", room="r", content=content, source_id="rust-note")
         assert result1["success"] is True
 
-        result2 = tool_add_drawer(wing="w", room="r", content=content)
+        result2 = tool_add_drawer(wing="w", room="r", content=content, source_id="rust-note")
         assert result2["success"] is True
         assert result2["reason"] == "already_exists"
+        assert result2["drawer_id"] == result1["drawer_id"]
+        assert result2["receipt_id"] != result1["receipt_id"]
 
     def test_add_drawer_shared_header_no_collision(self, monkeypatch, config, palace_path, kg):
         """Documents sharing a >100-char header must get distinct IDs (full-content hash)."""
@@ -763,8 +803,12 @@ class TestWriteTools:
         )
         doc2 = header + "Decision: Use Redis for session caching. Rationale: sub-ms latency needed."
 
-        result1 = tool_add_drawer(wing="work", room="decisions", content=doc1)
-        result2 = tool_add_drawer(wing="work", room="decisions", content=doc2)
+        result1 = tool_add_drawer(
+            wing="work", room="decisions", content=doc1, source_id="decision-postgres"
+        )
+        result2 = tool_add_drawer(
+            wing="work", room="decisions", content=doc2, source_id="decision-redis"
+        )
 
         assert result1["success"] is True
         assert result2["success"] is True
@@ -774,18 +818,101 @@ class TestWriteTools:
 
     def test_delete_drawer(self, monkeypatch, config, palace_path, seeded_collection, kg):
         _patch_mcp_server(monkeypatch, config, kg)
-        from mempalace.mcp_server import tool_delete_drawer
+        from mempalace.mcp_server import tool_add_drawer, tool_delete_drawer
+        from mempalace.write_receipts import ReceiptStore
 
-        result = tool_delete_drawer("drawer_proj_backend_aaa")
+        created = tool_add_drawer(
+            wing="work",
+            room="decisions",
+            content="Delete this managed note.",
+            source_id="delete-me",
+        )
+        assert created["success"] is True
+        before = seeded_collection.get(
+            ids=[created["drawer_id"]], include=["documents", "metadatas"]
+        )
+        source_identity = before["metadatas"][0]["write_source_identity"]
+        store = ReceiptStore(palace_path)
+        prior = store.find_current(source_identity)
+        assert prior["receipt_id"] == created["receipt_id"]
+
+        result = tool_delete_drawer(created["drawer_id"], source_id="delete-me")
         assert result["success"] is True
-        assert seeded_collection.count() == 3
+        assert result["reason"] == "deleted"
+        assert seeded_collection.get(ids=[created["drawer_id"]])["ids"] == []
+        current = store.find_current(source_identity)
+        assert current["receipt_id"] == result["receipt_id"]
+        assert current["disposition"] == "ZERO_OUTPUT"
+        assert store.invalidations_for(prior["receipt_id"])
+
+        repeated = tool_delete_drawer(created["drawer_id"], source_id="delete-me")
+        assert repeated["success"] is True
+        assert repeated["reason"] == "already_deleted"
+        assert repeated["receipt_id"] == result["receipt_id"]
+
+    def test_repeated_delete_rejects_foreign_row_at_tombstoned_id(
+        self, monkeypatch, config, palace_path, seeded_collection, kg
+    ):
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace.mcp_server import tool_add_drawer, tool_delete_drawer
+
+        created = tool_add_drawer(
+            wing="work",
+            room="deletion",
+            content="Delete this then detect target reuse.",
+            source_id="delete-foreign-reuse",
+        )
+        assert created["success"] is True
+        deleted = tool_delete_drawer(
+            created["drawer_id"],
+            source_id="delete-foreign-reuse",
+        )
+        assert deleted["success"] is True
+        seeded_collection.add(
+            ids=[created["drawer_id"]],
+            documents=["foreign unreceipted replacement"],
+            metadatas=[{"wing": "foreign", "room": "foreign"}],
+        )
+
+        repeated = tool_delete_drawer(
+            created["drawer_id"],
+            source_id="delete-foreign-reuse",
+        )
+
+        assert repeated["success"] is False
+        assert "present" in repeated["error"]
+        assert seeded_collection.get(ids=[created["drawer_id"]])["ids"] == [created["drawer_id"]]
 
     def test_delete_drawer_not_found(self, monkeypatch, config, palace_path, seeded_collection, kg):
         _patch_mcp_server(monkeypatch, config, kg)
         from mempalace.mcp_server import tool_delete_drawer
 
-        result = tool_delete_drawer("nonexistent_drawer")
+        result = tool_delete_drawer("nonexistent_drawer", source_id="missing-note")
         assert result["success"] is False
+
+    def test_legacy_drawer_mutations_require_provenance_migration(
+        self, monkeypatch, config, palace_path, seeded_collection, kg
+    ):
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace.mcp_server import tool_delete_drawer, tool_update_drawer
+
+        updated = tool_update_drawer(
+            "drawer_proj_backend_aaa",
+            content="must not overwrite legacy data",
+            source_id="invented-after-the-fact",
+        )
+        deleted = tool_delete_drawer(
+            "drawer_proj_backend_aaa",
+            source_id="invented-after-the-fact",
+        )
+
+        assert updated["success"] is False
+        assert deleted["success"] is False
+        assert "provenance migration" in updated["error"]
+        assert "provenance migration" in deleted["error"]
+        assert seeded_collection.get(ids=["drawer_proj_backend_aaa"])["ids"] == [
+            "drawer_proj_backend_aaa"
+        ]
 
     def test_check_duplicate(self, monkeypatch, config, palace_path, seeded_collection, kg):
         _patch_mcp_server(monkeypatch, config, kg)
@@ -929,33 +1056,195 @@ class TestWriteTools:
 
     def test_update_drawer_content(self, monkeypatch, config, palace_path, seeded_collection, kg):
         _patch_mcp_server(monkeypatch, config, kg)
-        from mempalace.mcp_server import tool_update_drawer, tool_get_drawer
+        from mempalace.mcp_server import tool_add_drawer, tool_get_drawer, tool_update_drawer
 
+        created = tool_add_drawer(
+            wing="project",
+            room="backend",
+            content="Original content about auth.",
+            source_id="auth-note",
+        )
+        assert created["success"] is True
         result = tool_update_drawer(
-            "drawer_proj_backend_aaa", content="Updated content about auth."
+            created["drawer_id"],
+            content="Updated content about auth.",
+            source_id="auth-note",
         )
         assert result["success"] is True
+        assert result["receipt_id"] != created["receipt_id"]
 
-        fetched = tool_get_drawer("drawer_proj_backend_aaa")
+        fetched = tool_get_drawer(created["drawer_id"])
         assert fetched["content"] == "Updated content about auth."
+
+        repeated = tool_update_drawer(
+            created["drawer_id"],
+            content="Updated content about auth.",
+            source_id="auth-note",
+        )
+        assert repeated["success"] is True
+        assert repeated["reason"] == "unchanged"
 
     def test_update_drawer_wing_and_room(
         self, monkeypatch, config, palace_path, seeded_collection, kg
     ):
         _patch_mcp_server(monkeypatch, config, kg)
-        from mempalace.mcp_server import tool_update_drawer
+        from mempalace.mcp_server import tool_add_drawer, tool_update_drawer
 
-        result = tool_update_drawer("drawer_proj_backend_aaa", wing="new_wing", room="new_room")
-        assert result["success"] is True
+        created = tool_add_drawer(
+            wing="old_wing",
+            room="old_room",
+            content="Move this managed drawer.",
+            source_id="move-note",
+        )
+        before_embedding = seeded_collection.get(
+            ids=[created["drawer_id"]], include=["embeddings"]
+        )["embeddings"][0]
+        result = tool_update_drawer(
+            created["drawer_id"],
+            wing="new_wing",
+            room="new_room",
+            source_id="move-note",
+        )
+        assert result["success"] is True, result
         assert result["wing"] == "new_wing"
         assert result["room"] == "new_room"
+        after_embedding = seeded_collection.get(ids=[created["drawer_id"]], include=["embeddings"])[
+            "embeddings"
+        ][0]
+        assert list(after_embedding) == pytest.approx(list(before_embedding))
+
+    def test_add_retry_repairs_tampered_semantic_metadata(
+        self, monkeypatch, config, palace_path, seeded_collection, kg
+    ):
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace.mcp_server import tool_add_drawer
+
+        created = tool_add_drawer(
+            wing="original_wing",
+            room="original_room",
+            content="Semantic metadata is part of source identity.",
+            source_id="semantic-repair",
+        )
+        assert created["success"] is True
+        row = seeded_collection.get(
+            ids=[created["drawer_id"]],
+            include=["metadatas"],
+        )
+        tampered = dict(row["metadatas"][0])
+        tampered["wing"] = "tampered_wing"
+        seeded_collection.update(ids=[created["drawer_id"]], metadatas=[tampered])
+
+        repaired = tool_add_drawer(
+            wing="original_wing",
+            room="original_room",
+            content="Semantic metadata is part of source identity.",
+            source_id="semantic-repair",
+        )
+
+        assert repaired["success"] is True
+        assert repaired["reason"] == "written"
+        current = seeded_collection.get(
+            ids=[created["drawer_id"]],
+            include=["metadatas"],
+        )["metadatas"][0]
+        assert current["wing"] == "original_wing"
+
+    def test_update_fails_when_managed_semantic_metadata_was_tampered(
+        self, monkeypatch, config, palace_path, seeded_collection, kg
+    ):
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace.mcp_server import tool_add_drawer, tool_update_drawer
+
+        created = tool_add_drawer(
+            wing="work",
+            room="integrity",
+            content="Original managed content.",
+            source_id="semantic-conflict",
+        )
+        row = seeded_collection.get(
+            ids=[created["drawer_id"]],
+            include=["metadatas"],
+        )
+        tampered = dict(row["metadatas"][0])
+        tampered["room"] = "tampered"
+        seeded_collection.update(ids=[created["drawer_id"]], metadatas=[tampered])
+
+        result = tool_update_drawer(
+            created["drawer_id"],
+            content="Must not overwrite before provenance is repaired.",
+            source_id="semantic-conflict",
+        )
+
+        assert result["success"] is False
+        assert "attest" in result["error"] or "semantic" in result["error"]
 
     def test_update_drawer_not_found(self, monkeypatch, config, palace_path, seeded_collection, kg):
         _patch_mcp_server(monkeypatch, config, kg)
         from mempalace.mcp_server import tool_update_drawer
 
-        result = tool_update_drawer("nonexistent_drawer", content="hello")
+        result = tool_update_drawer("nonexistent_drawer", content="hello", source_id="missing-note")
         assert result["success"] is False
+
+    def test_mutating_drawer_tools_require_source_id(
+        self, monkeypatch, config, palace_path, seeded_collection, kg
+    ):
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace.mcp_server import tool_add_drawer, tool_delete_drawer, tool_update_drawer
+
+        assert not tool_add_drawer(wing="w", room="r", content="hello")["success"]
+        assert not tool_update_drawer("drawer_proj_backend_aaa", content="hello")["success"]
+        assert not tool_delete_drawer("drawer_proj_backend_aaa")["success"]
+
+        created = tool_add_drawer(wing="w", room="r", content="owned content", source_id="owner-a")
+        mismatched = tool_update_drawer(
+            created["drawer_id"], content="must not write", source_id="owner-b"
+        )
+        assert mismatched["success"] is False
+        assert "does not match" in mismatched["error"]
+
+    def test_managed_update_failure_restores_prior_row_and_receipt(
+        self, monkeypatch, config, palace_path, seeded_collection, kg
+    ):
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace import mcp_server
+        from mempalace.write_receipts import ReceiptStore
+
+        created = mcp_server.tool_add_drawer(
+            wing="work",
+            room="recovery",
+            content="before failure",
+            source_id="rollback-note",
+        )
+        assert created["success"] is True
+        row = seeded_collection.get(ids=[created["drawer_id"]], include=["documents", "metadatas"])
+        source_identity = row["metadatas"][0]["write_source_identity"]
+        store = ReceiptStore(palace_path)
+        prior = store.find_current(source_identity)
+        collection_cls = type(mcp_server._collection_cache)
+        real_add = collection_cls.add
+        armed = {"value": True}
+
+        def fail_once(self, **kwargs):
+            if armed["value"] and kwargs.get("documents") == ["after failure"]:
+                armed["value"] = False
+                raise RuntimeError("simulated MCP write failure")
+            return real_add(self, **kwargs)
+
+        monkeypatch.setattr(collection_cls, "add", fail_once)
+        failed = mcp_server.tool_update_drawer(
+            created["drawer_id"],
+            content="after failure",
+            source_id="rollback-note",
+        )
+
+        assert failed["success"] is False
+        assert "simulated MCP write failure" in failed["error"]
+        restored = seeded_collection.get(
+            ids=[created["drawer_id"]], include=["documents", "metadatas"]
+        )
+        assert restored["documents"] == ["before failure"]
+        assert store.find_current(source_identity)["receipt_id"] == prior["receipt_id"]
+        assert store.invalidations_for(prior["receipt_id"]) == []
 
     def test_update_drawer_noop(self, monkeypatch, config, palace_path, seeded_collection, kg):
         _patch_mcp_server(monkeypatch, config, kg)
@@ -1174,6 +1463,90 @@ class TestDiaryTools:
         assert read_result["total"] == 2
         assert entry1 in contents
         assert entry2 in contents
+
+    def test_diary_write_source_id_is_retry_idempotent(self, monkeypatch, config, palace_path, kg):
+        _patch_mcp_server(monkeypatch, config, kg)
+        _client, _col = _get_collection(palace_path, create=True)
+        del _client
+        from mempalace.mcp_server import tool_diary_read, tool_diary_write
+
+        first = tool_diary_write(
+            agent_name="TestAgent",
+            entry="Stable diary retry content.",
+            topic="status",
+            source_id="session-42-summary",
+        )
+        second = tool_diary_write(
+            agent_name="TestAgent",
+            entry="Stable diary retry content.",
+            topic="status",
+            source_id="session-42-summary",
+        )
+
+        assert first["success"] and second["success"]
+        assert first["entry_id"] == second["entry_id"]
+        assert second["reason"] == "already_exists"
+        assert first["receipt_id"] != second["receipt_id"]
+        assert tool_diary_read(agent_name="TestAgent")["total"] == 1
+
+    def test_diary_retry_repairs_tampered_topic(self, monkeypatch, config, palace_path, kg):
+        _patch_mcp_server(monkeypatch, config, kg)
+        _client, collection = _get_collection(palace_path, create=True)
+        del _client
+        from mempalace.mcp_server import tool_diary_write
+
+        first = tool_diary_write(
+            agent_name="TestAgent",
+            entry="The topic is receipt-attested.",
+            topic="original",
+            source_id="topic-repair",
+        )
+        row = collection.get(ids=[first["entry_id"]], include=["metadatas"])
+        tampered = dict(row["metadatas"][0])
+        tampered["topic"] = "tampered"
+        collection.update(ids=[first["entry_id"]], metadatas=[tampered])
+
+        repaired = tool_diary_write(
+            agent_name="TestAgent",
+            entry="The topic is receipt-attested.",
+            topic="original",
+            source_id="topic-repair",
+        )
+
+        assert repaired["success"] is True
+        assert repaired["reason"] == "written"
+        current = collection.get(ids=[first["entry_id"]], include=["metadatas"])
+        assert current["metadatas"][0]["topic"] == "original"
+
+    def test_diary_source_id_is_scoped_by_agent_and_wing(
+        self, monkeypatch, config, palace_path, kg
+    ):
+        _patch_mcp_server(monkeypatch, config, kg)
+        _client, _col = _get_collection(palace_path, create=True)
+        del _client
+        from mempalace.mcp_server import tool_diary_write
+
+        first = tool_diary_write(
+            agent_name="AgentA",
+            entry="Agent A entry.",
+            wing="wing_shared",
+            source_id="same-retry-id",
+        )
+        other_agent = tool_diary_write(
+            agent_name="AgentB",
+            entry="Agent B entry.",
+            wing="wing_shared",
+            source_id="same-retry-id",
+        )
+        other_wing = tool_diary_write(
+            agent_name="AgentA",
+            entry="Agent A in another wing.",
+            wing="wing_other",
+            source_id="same-retry-id",
+        )
+
+        assert first["success"] and other_agent["success"] and other_wing["success"]
+        assert len({first["entry_id"], other_agent["entry_id"], other_wing["entry_id"]}) == 3
 
     def test_diary_read_empty_wing_spans_all_wings(self, monkeypatch, config, palace_path, kg):
         """diary_read(wing='') must return entries from every wing this agent
@@ -1402,6 +1775,39 @@ class TestCacheInvalidation:
         col2 = mcp_server._get_collection(create=True)
         assert col2 is not None
         assert calls == [], f"get_or_create_collection was called: {calls}"
+
+    def test_read_collection_cache_miss_does_not_pin_or_create(
+        self, monkeypatch, config, palace_path, kg
+    ):
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace import mcp_server
+
+        created = mcp_server._get_collection(create=True)
+        assert created is not None
+        client_cls = type(mcp_server._client_cache)
+        real_get = client_cls.get_collection
+        create_calls = []
+
+        def get_existing(self, name, **kwargs):
+            return real_get(self, name, **kwargs)
+
+        def fail_create(self, *args, **kwargs):
+            create_calls.append((args, kwargs))
+            raise AssertionError("read-only collection access must not create")
+
+        monkeypatch.setattr(client_cls, "get_collection", get_existing)
+        monkeypatch.setattr(client_cls, "create_collection", fail_create)
+        monkeypatch.setattr(
+            mcp_server,
+            "_pin_hnsw_threads",
+            lambda *_args, **_kwargs: pytest.fail("read-only collection access must not modify"),
+        )
+        mcp_server._collection_cache = None
+
+        reopened = mcp_server._get_collection(create=False)
+
+        assert reopened is not None
+        assert create_calls == []
 
     def test_get_collection_passes_embedding_function(self, monkeypatch, config, palace_path, kg):
         """Regression for #1299.

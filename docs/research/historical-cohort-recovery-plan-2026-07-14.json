@@ -110,6 +110,11 @@
     "https://openlineage.io/docs/spec/run-cycle/",
     "https://www.sqlite.org/backup.html",
     "https://github.com/chroma-core/chroma/issues/6975",
+    "https://github.com/chroma-core/chroma/pull/7047/files",
+    "https://github.com/chroma-core/chroma/blob/1.5.5/chromadb/config.py#L119-L120",
+    "https://github.com/chroma-core/chroma/blob/1.5.9/rust/segment/src/local_hnsw.rs#L405-L406",
+    "https://github.com/chroma-core/chroma/blob/1.5.9/rust/segment/src/local_hnsw.rs#L819-L833",
     "https://github.com/chroma-core/chroma/issues/7040"
-  ]
+  ],
+  "researchQualification": "Chroma #6975 and open PR #7047 target PersistentLocalHnswSegment/SegmentAPI and establish contextual persistence risk plus the absence of a public flush surface; they are not direct proof of RustBindingsAPI data loss. MemPalace's disposable Rust close/reopen and managed restart probes are the direct local evidence."
 }
