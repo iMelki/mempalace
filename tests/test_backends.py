@@ -7,6 +7,7 @@ import chromadb
 import pytest
 
 from mempalace.backends import (
+    EmbeddingVisibilityError,
     GetResult,
     PalaceRef,
     QueryResult,
@@ -66,6 +67,14 @@ class _FakeCollection:
         return self._count_value
 
 
+class _ClosableClient:
+    def __init__(self):
+        self.close_calls = 0
+
+    def close(self):
+        self.close_calls += 1
+
+
 def test_chroma_collection_returns_typed_query_result():
     fake = _FakeCollection()
     collection = ChromaCollection(fake)
@@ -90,6 +99,51 @@ def test_chroma_collection_returns_typed_get_result():
     assert result.ids == ["a"]
     assert result.documents == ["da"]
     assert result.metadatas == [{"wing": "w1"}]
+
+
+def test_exact_embedding_read_uses_supported_collection_api():
+    fake = _FakeCollection(
+        get_response={
+            "ids": ["row-1"],
+            "embeddings": [[0.75, 1.0]],
+        }
+    )
+    collection = ChromaCollection(fake)
+
+    assert collection.get_exact_embeddings(["row-1"]) == {"row-1": (0.75, 1.0)}
+    assert fake.calls == [("get", {"include": ["embeddings"], "ids": ["row-1"]})]
+
+
+def test_exact_embedding_read_fails_closed_on_incomplete_api_result():
+    fake = _FakeCollection(
+        get_response={
+            "ids": ["row-1"],
+            "embeddings": None,
+        }
+    )
+    collection = ChromaCollection(fake)
+
+    with pytest.raises(EmbeddingVisibilityError, match="did not return"):
+        collection.get_exact_embeddings(["row-1"])
+
+
+@pytest.mark.parametrize("message", ["Nothing found on disk", "Error finding id row-1"])
+def test_exact_embedding_read_classifies_known_chroma_visibility_errors(message):
+    class RaisingCollection(_FakeCollection):
+        def get(self, **kwargs):
+            raise RuntimeError(message)
+
+    with pytest.raises(EmbeddingVisibilityError, match="not yet visible"):
+        ChromaCollection(RaisingCollection()).get_exact_embeddings(["row-1"])
+
+
+def test_exact_embedding_read_propagates_unrelated_chroma_errors():
+    class RaisingCollection(_FakeCollection):
+        def get(self, **kwargs):
+            raise RuntimeError("client is closed")
+
+    with pytest.raises(RuntimeError, match="client is closed"):
+        ChromaCollection(RaisingCollection()).get_exact_embeddings(["row-1"])
 
 
 def test_query_result_empty_preserves_outer_dimension():
@@ -267,6 +321,63 @@ def test_chroma_cache_picks_up_db_created_after_first_open(tmp_path):
     refreshed = backend._client(str(palace_path))
     assert refreshed is not sentinel
     assert backend._freshness[str(palace_path)] != (0, 0.0)
+
+
+def test_close_palace_calls_supported_client_close(tmp_path):
+    backend = ChromaBackend()
+    palace_path = str(tmp_path / "palace")
+    client = _ClosableClient()
+    backend._clients[palace_path] = client
+    backend._freshness[palace_path] = (1, 2.0)
+
+    backend.close_palace(palace_path)
+
+    assert client.close_calls == 1
+    assert palace_path not in backend._clients
+    assert palace_path not in backend._freshness
+
+
+def test_close_releases_each_distinct_cached_client_once():
+    backend = ChromaBackend()
+    first = _ClosableClient()
+    second = _ClosableClient()
+    backend._clients.update({"a": first, "alias-a": first, "b": second})
+
+    backend.close()
+
+    assert first.close_calls == 1
+    assert second.close_calls == 1
+    assert backend.health().ok is False
+
+
+def test_below_sync_threshold_exact_embeddings_survive_backend_close_reopen(tmp_path):
+    palace = PalaceRef(id="below-threshold", local_path=str(tmp_path / "palace"))
+    ids = ["row-1", "row-2", "row-3"]
+    embeddings = [[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]]
+    backend = ChromaBackend()
+    collection = backend.get_collection(
+        palace=palace,
+        collection_name="below-threshold",
+        create=True,
+    )
+    collection.add(ids=ids, embeddings=embeddings, documents=["one", "two", "three"])
+    assert collection.get_exact_embeddings(ids) == {
+        item_id: pytest.approx(vector, abs=1e-6) for item_id, vector in zip(ids, embeddings)
+    }
+    backend.close()
+
+    reopened_backend = ChromaBackend()
+    try:
+        reopened = reopened_backend.get_collection(
+            palace=palace,
+            collection_name="below-threshold",
+            create=False,
+        )
+        assert reopened.get_exact_embeddings(ids) == {
+            item_id: pytest.approx(vector, abs=1e-6) for item_id, vector in zip(ids, embeddings)
+        }
+    finally:
+        reopened_backend.close()
 
 
 def test_base_collection_update_default_rejects_mismatched_lengths():

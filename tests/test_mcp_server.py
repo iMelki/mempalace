@@ -8,9 +8,34 @@ via monkeypatch to avoid touching real data.
 
 from datetime import datetime
 import json
+from pathlib import Path
 import sys
+import threading
+import time
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _healthy_disposable_hnsw_probe(monkeypatch):
+    """Keep handler tests focused unless they explicitly replace the probe."""
+    from mempalace import mcp_server
+
+    monkeypatch.setattr(
+        mcp_server,
+        "hnsw_capacity_status",
+        lambda *_args, **_kwargs: {
+            "diverged": False,
+            "status": "ok",
+            "message": "disposable capacity ok",
+            "sqlite_count": 0,
+            "hnsw_count": 0,
+            "divergence": 0,
+        },
+    )
+    mcp_server._invalidate_hnsw_capacity_probe_cache()
+    yield
+    mcp_server._invalidate_hnsw_capacity_probe_cache()
 
 
 def _patch_mcp_server(monkeypatch, config, kg):
@@ -212,6 +237,197 @@ class TestHandleRequest:
 
 
 class TestReadTools:
+    def test_concurrent_status_single_flights_hnsw_capacity_probe(self, monkeypatch, config, kg):
+        from mempalace import mcp_server
+
+        _patch_mcp_server(monkeypatch, config, kg)
+        mcp_server._invalidate_hnsw_capacity_probe_cache()
+        monkeypatch.setattr(mcp_server, "_vector_disabled", False)
+        monkeypatch.setattr(mcp_server, "_vector_disabled_reason", "")
+        calls = 0
+        calls_lock = threading.Lock()
+        probe_started = threading.Event()
+        release_probe = threading.Event()
+
+        def slow_probe(*_args, **_kwargs):
+            nonlocal calls
+            with calls_lock:
+                calls += 1
+            probe_started.set()
+            assert release_probe.wait(timeout=3)
+            return {
+                "diverged": False,
+                "status": "ok",
+                "message": "capacity ok",
+                "sqlite_count": 0,
+                "hnsw_count": 0,
+                "divergence": 0,
+            }
+
+        class EmptyCollection:
+            def count(self):
+                return 0
+
+        monkeypatch.setattr(mcp_server, "hnsw_capacity_status", slow_probe)
+        monkeypatch.setattr(
+            mcp_server,
+            "_get_collection",
+            lambda create=False, with_embedding=True: EmptyCollection(),
+        )
+        start = threading.Barrier(5)
+        results = []
+        errors = []
+
+        def status_worker():
+            try:
+                start.wait(timeout=3)
+                results.append(mcp_server.tool_status())
+            except BaseException as exc:
+                errors.append(exc)
+
+        workers = [threading.Thread(target=status_worker) for _ in range(4)]
+        for worker in workers:
+            worker.start()
+        start.wait(timeout=3)
+        assert probe_started.wait(timeout=3)
+        time.sleep(0.1)
+        assert calls == 1
+        release_probe.set()
+        for worker in workers:
+            worker.join(timeout=3)
+
+        assert errors == []
+        assert all(not worker.is_alive() for worker in workers)
+        assert calls == 1
+        assert len(results) == 4
+        assert all(result["total_drawers"] == 0 for result in results)
+
+        mcp_server.tool_status()
+        assert calls == 1
+
+    def test_hnsw_stuck_probe_has_bounded_flight_and_late_result_is_ignored(
+        self, monkeypatch, config, kg
+    ):
+        from mempalace import mcp_server
+
+        _patch_mcp_server(monkeypatch, config, kg)
+        mcp_server._invalidate_hnsw_capacity_probe_cache()
+        monkeypatch.setattr(mcp_server, "_vector_disabled", False)
+        monkeypatch.setattr(mcp_server, "_vector_disabled_reason", "")
+        monkeypatch.setattr(mcp_server, "_HNSW_CAPACITY_PROBE_TIMEOUT_SECONDS", 0.05)
+        probe_started = threading.Event()
+        release_probe = threading.Event()
+        calls = 0
+
+        def blocked_probe(*_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            probe_started.set()
+            assert release_probe.wait(timeout=3)
+            return {"diverged": False, "status": "ok", "message": "capacity ok"}
+
+        monkeypatch.setattr(mcp_server, "hnsw_capacity_status", blocked_probe)
+        started_at = time.monotonic()
+        mcp_server._refresh_vector_disabled_flag(wait_timeout=None)
+        elapsed = time.monotonic() - started_at
+
+        assert probe_started.is_set()
+        assert calls == 1
+        assert mcp_server._vector_disabled is True
+        assert "bounded lifetime" in mcp_server._vector_disabled_reason
+        assert elapsed < 1
+        with mcp_server._hnsw_capacity_condition:
+            assert not mcp_server._hnsw_capacity_inflight
+
+        release_probe.set()
+        time.sleep(0.05)
+        mcp_server._refresh_vector_disabled_flag()
+        assert calls == 2
+        assert mcp_server._vector_disabled is False
+
+    def test_hnsw_cached_probe_exception_fails_vector_disabled(self, monkeypatch, config, kg):
+        from mempalace import mcp_server
+
+        _patch_mcp_server(monkeypatch, config, kg)
+        mcp_server._invalidate_hnsw_capacity_probe_cache()
+        monkeypatch.setattr(mcp_server, "_vector_disabled", False)
+        monkeypatch.setattr(mcp_server, "_vector_disabled_reason", "")
+
+        def failed_probe(*_args, **_kwargs):
+            raise RuntimeError("probe failed")
+
+        monkeypatch.setattr(mcp_server, "hnsw_capacity_status", failed_probe)
+        mcp_server._refresh_vector_disabled_flag()
+
+        assert mcp_server._vector_disabled is True
+        assert "probe failed" in mcp_server._vector_disabled_reason
+
+    def test_hnsw_unknown_status_fails_closed_without_opening_chroma(
+        self, monkeypatch, config, palace_path, kg
+    ):
+        import chromadb
+
+        from mempalace import mcp_server
+
+        _patch_mcp_server(monkeypatch, config, kg)
+        client = chromadb.PersistentClient(path=palace_path)
+        del client
+        mcp_server._invalidate_hnsw_capacity_probe_cache()
+        monkeypatch.setattr(mcp_server, "_vector_disabled", False)
+        monkeypatch.setattr(
+            mcp_server,
+            "hnsw_capacity_status",
+            lambda *_args, **_kwargs: {
+                "diverged": False,
+                "status": "unknown",
+                "message": "HNSW metadata unreadable",
+                "sqlite_count": 0,
+                "hnsw_count": None,
+                "divergence": None,
+            },
+        )
+
+        result = mcp_server.tool_status()
+
+        assert result["vector_disabled"] is True
+        assert "unreadable" in result["vector_disabled_reason"]
+        assert mcp_server._vector_disabled is True
+
+        monkeypatch.setattr(
+            mcp_server.ChromaBackend,
+            "make_client",
+            staticmethod(lambda *_args, **_kwargs: pytest.fail("Chroma must stay closed")),
+        )
+        assert mcp_server._get_collection() is None
+
+    def test_hnsw_probe_cache_key_tracks_db_file_and_segment_metadata_identity(
+        self, monkeypatch, palace_path
+    ):
+        from mempalace import mcp_server
+
+        segment_id = "00000000-0000-4000-8000-000000000123"
+        db_path = str(Path(palace_path) / "chroma.sqlite3")
+        metadata_path = str(Path(palace_path) / segment_id / "index_metadata.pickle")
+        identities = {
+            db_path: (7, 11, 101, 4096),
+            metadata_path: (7, 12, 202, 512),
+        }
+        monkeypatch.setattr(mcp_server, "_vector_segment_id", lambda *_args: segment_id)
+        monkeypatch.setattr(
+            mcp_server,
+            "_file_cache_identity",
+            lambda path: identities.get(path, (None, None, None, None)),
+        )
+
+        initial = mcp_server._hnsw_capacity_probe_key(palace_path, "mempalace_drawers")
+        identities[db_path] = (7, 99, 101, 4096)
+        replaced_db = mcp_server._hnsw_capacity_probe_key(palace_path, "mempalace_drawers")
+        identities[metadata_path] = (7, 12, 303, 512)
+        changed_hnsw = mcp_server._hnsw_capacity_probe_key(palace_path, "mempalace_drawers")
+
+        assert replaced_db != initial
+        assert changed_hnsw != replaced_db
+
     def test_status_cold_start_no_collection(self, monkeypatch, config, palace_path, kg):
         """Status on a valid palace with no ChromaDB collection yet (#830).
 
@@ -475,6 +691,34 @@ class TestSearchTool:
 
 
 class TestWriteTools:
+    def test_mcp_mutations_use_managed_palace_lock(self, monkeypatch, config, kg):
+        from mempalace import mcp_server
+
+        _patch_mcp_server(monkeypatch, config, kg)
+        captured = {}
+
+        class Scope:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        def fake_scope(palace_path, *, lock_factory):
+            captured["palace_path"] = palace_path
+            captured["lock_factory"] = lock_factory
+            return Scope()
+
+        monkeypatch.setattr(mcp_server, "managed_write_scope", fake_scope)
+
+        result = mcp_server.tool_update_drawer("noop", content=None, wing=None, room=None)
+
+        assert result == {"success": True, "drawer_id": "noop", "noop": True}
+        assert captured == {
+            "palace_path": config.palace_path,
+            "lock_factory": mcp_server.mine_palace_lock,
+        }
+
     def test_add_drawer(self, monkeypatch, config, palace_path, kg):
         _patch_mcp_server(monkeypatch, config, kg)
         _client, _col = _get_collection(palace_path, create=True)

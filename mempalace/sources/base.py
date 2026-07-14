@@ -97,12 +97,20 @@ class SourceItemMetadata:
     Core inspects ``version`` via :meth:`BaseSourceAdapter.is_current` to
     decide whether to skip extraction; an adapter that responds positively
     stops yielding drawers for this item and moves to the next.
+
+    Managed receipt ingestion additionally requires ``content_hash`` as a
+    tagged SHA-256 digest. It remains optional here for import compatibility
+    with existing unmanaged adapters; the managed driver fails closed when it
+    is absent.
     """
 
     source_file: str
     version: str
     size_hint: Optional[int] = None
     route_hint: Optional[RouteHint] = None
+    # Required by the managed receipt driver. Kept optional on the base value
+    # object so existing unmanaged third-party adapters remain import-compatible.
+    content_hash: Optional[str] = None
 
 
 @dataclass(frozen=True)

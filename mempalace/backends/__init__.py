@@ -8,7 +8,7 @@ Public surface:
 * :class:`QueryResult` / :class:`GetResult` — typed read returns.
 * Error classes: :class:`PalaceNotFoundError`, :class:`BackendClosedError`,
   :class:`UnsupportedFilterError`, :class:`DimensionMismatchError`,
-  :class:`EmbedderIdentityMismatchError`.
+  :class:`EmbedderIdentityMismatchError`, :class:`EmbeddingVisibilityError`.
 * Registry: :func:`get_backend`, :func:`register`, :func:`available_backends`,
   :func:`resolve_backend_for_palace`.
 * In-tree Chroma default: :class:`ChromaBackend`, :class:`ChromaCollection`.
@@ -20,6 +20,7 @@ from .base import (
     BaseBackend,
     BaseCollection,
     DimensionMismatchError,
+    EmbeddingVisibilityError,
     EmbedderIdentityMismatchError,
     GetResult,
     HealthStatus,
@@ -47,6 +48,7 @@ __all__ = [
     "ChromaBackend",
     "ChromaCollection",
     "DimensionMismatchError",
+    "EmbeddingVisibilityError",
     "EmbedderIdentityMismatchError",
     "GetResult",
     "HealthStatus",

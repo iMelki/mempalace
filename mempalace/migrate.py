@@ -190,6 +190,13 @@ def migrate(palace_path: str, dry_run: bool = False, confirm: bool = False):
         print(f"\n  Palace is NOT readable by chromadb {target_version}.")
         print("  Extracting from SQLite directly...")
 
+    receipt_root = os.path.join(palace_path, ".mempalace", "write-receipts", "v1")
+    if not dry_run and os.path.isdir(receipt_root):
+        print("\n  Migration blocked: this palace contains managed write receipts.")
+        print("  The legacy migration path cannot preserve receipt provenance yet.")
+        print("  Use --dry-run for inspection and track the receipt-aware migration in issue #22.")
+        return False
+
     # Extract all drawers via raw SQL
     drawers = extract_drawers_from_sqlite(db_path)
     print(f"  Extracted {len(drawers)} drawers from SQLite")

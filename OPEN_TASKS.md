@@ -1,19 +1,101 @@
 # MemPalace Open Tasks
 
-Last updated: 2026-07-11
+Last updated: 2026-07-14
 
 This file is the durable local index for active `mempalace` issues.
 
 ## Active Issues
 
 - [#21 - Implement native loopback Streamable HTTP MCP transport](https://github.com/iMelki/mempalace/issues/21)
-  - Status: open; durable architecture chosen under agent-settings #209.
-  - Goal: extract transport-neutral tool dispatch and serve MemPalace natively
-    on `127.0.0.1:8787`, with Origin/auth checks and bounded Chroma/SQLite
-    concurrency. Keep stdio support and a temporary supergateway rollback path.
-  - Proof required: initialize/list/call/auth/origin/cancellation tests plus the
-    existing four-worker and a longer bounded concurrent smoke with no bridge
-    exit and complete cleanup. Railway is outside scope.
+  - Status: focused remediation, the fresh full suite, and independent transport
+    review are green. Live launcher cutover remains NO-GO pending a committed
+    launcher update and a clean serialized burn-in.
+  - Implemented: transport-neutral dispatch shared by stdio and HTTP, native
+    Streamable HTTP on `127.0.0.1:8787/mcp`, bearer authentication sourced only
+    from environment variables, SDK Host validation, strict application-layer
+    Origin grammar, active-aware five-minute idle cleanup, a 64-session
+    per-process hard cap including pending creations, post-DELETE removal from
+    all SDK/local maps, bounded termination tombstones that continue consuming
+    capacity after failed cleanup, raw-byte header-safe bearer comparison, and
+    serial-by-default backend calls. SDK 1.28.1 is exact pinned/runtime-gated
+    and its active-blind idle deadline remains disabled.
+  - Local proof: the 32-case native HTTP file passes official-client
+    initialize/list/call, hostile and malformed/duplicate Origin rejection,
+    cancellation, active-call retention, abandoned-session expiry, hard-cap,
+    30 sequential initialize/call/DELETE sessions, and four concurrent real
+    status dispatches with one HNSW probe on an ephemeral socket and disposable
+    palace. The affected receipt/backend/HTTP/dispatch/server suite passes
+    `279` tests with one platform skip. The final repository-wide release gate
+    passes `1,673` tests with `7` skips, `106` intentional deselections, and
+    `191` warnings in `136.68s` of pytest time (`139.526s` wall time). A prior live
+    smoke incorrectly raised backend
+    concurrency from the reviewed default `1` to `4`; four status workers timed
+    out, the listener exited, and restore timed out. The exact stale PID was
+    stopped after identity verification. The next burn-in keeps four clients
+    but serializes backend calls. Failure evidence is retained under
+    `%LOCALAPPDATA%\MemSys\eval-artifacts\bridge-concurrent-mcp`.
+  - Remaining proof: commit the launcher approval with the existing rollback
+    retained, then run a bounded four-client burn-in while backend calls remain
+    serialized, with no bridge exit or retained abandoned sessions. Railway is
+    outside scope.
+
+- [#22 - Add durable source-to-drawer receipts and supervised historical cohort recovery](https://github.com/iMelki/mempalace/issues/22)
+  - Status: the affected `279`-test receipt/transport/backend suite, final
+    repository-wide `1,673`-test release gate, and independent receipt re-review
+    are green. The managed-write foundation is commit-ready. Historical recovery
+    remains NO-GO; no historical mining or recovery is authorized.
+  - Fresh read-only audit reconciled 25,448 of 29,449 retained staged source
+    paths exactly. The remaining 4,001 comprise 1,435 bootstrap-only records,
+    2,548 format exclusions, and 18 intact current-rule candidates.
+  - The 18 sources project to 22,220 drawer rows, but none of those projected
+    IDs appears in the current store or retained July snapshots. All 18 exceed
+    the former 10 MiB scan cap, making `probable-never-receipted-current-rule-output`
+    the supported classification. They are not proven deleted or corrupted.
+  - Implemented locally: versioned terminal source-write receipts, exact
+    read-only verification, lock-before-read canonical source handling,
+    non-destructive normalization failure, create-only journal publication,
+    key-continuity checks, index-authoritative predecessor reconciliation,
+    fail-closed OS-durable pre-purge recovery with exact restart restoration,
+    post-publication row-set equality and exact-ID purge,
+    embedding-preserving rollback snapshots, palace-wide managed-adapter
+    and MCP mutation serialization, exact existing-row rechecks including
+    embeddings, managed drawer/closet receipt writes, a non-mutating verifier
+    lookup with mandatory durable COMPLETE markers, dual HMAC/source-file
+    ownership, bounded fail-closed HNSW probes, and a pseudonymized shared
+    projection using per-palace HMAC identities plus bucketed source size.
+  - Local proof: the affected receipt/backend/HTTP/dispatch/server run passes
+    `279` tests with one platform skip. Real-Chroma write readback is exact and
+    bounded; stale or temporarily missing rows are retried for at most two
+    seconds, and file mtimes are normalized to Chroma's six fractional digits
+    before comparison. Exact vectors are read only through Chroma's supported
+    collection API. If the Rust metadata/vector view does not converge inside
+    that window, the managed write fails closed and restores its durable
+    predecessor snapshot; MemPalace no longer opens Chroma's live SQLite/WAL as
+    an in-process fallback.
+  - Explicit remaining scope: receipts are not automatic across the whole
+    product. Migration, repair, dedup, sweep, compression, diary/closet/KG/
+    tunnel writes, MCP drawer mutations, backend open-time repairs, direct
+    collection APIs, and adapters that bypass `managed_adapter_ingest()` remain
+    unmanaged. Legacy `mempalace migrate` now blocks if receipt state exists so
+    it cannot silently discard the journal; adapting or retiring the remaining
+    paths stays in #22.
+  - Next: disposable real-Chroma interruption/restart proof. The separate
+    small-collection durability check is green: three explicit vectors below
+    MemPalace's `50,000` Chroma sync
+    threshold survived final-client close/reopen and matched within `1e-6`
+    float32 tolerance; the corrected disposable run completed in `1.68s` and is
+    now a normal real-Chroma regression. Historical recovery still stays NO-GO
+    until an interrupted managed rewrite is restored and reverified after a
+    true client/process restart. Explicit backend shutdown now calls Chroma's
+    public `close()`. Automatic cache replacement cannot do that safely until
+    collection-handle lifetimes are tracked; closing a replaced client while a
+    caller still held its collection reproduced `RustBindingsAPI` without
+    `bindings` in the full suite, so handle-aware retirement remains in #22.
+    Windows DACL enforcement/readback remains explicitly unproven follow-up;
+    POSIX mode requests are not evidence of an NTFS access-control boundary.
+    Any historical recovery still needs fresh backup/restore proof, a bounded
+    reviewed plan, an exact expected-output manifest, and separate operator
+    approval.
 
 - [#13 - mempalace_mcp_wrapper unconditionally disables real vector search (permanent keyword-only fallback since 2026-04)](https://github.com/iMelki/mempalace/issues/13)
   - Retitled 2026-07-04. The original count-divergence this issue was filed

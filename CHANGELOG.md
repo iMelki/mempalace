@@ -10,6 +10,61 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Native authenticated Streamable HTTP MCP transport (#21).** Added
+  `mempalace-mcp-http`, built on the stable Python MCP SDK 1.x low-level
+  server/session manager. It binds to loopback by default, requires the
+  existing bearer token from process environment, validates Host, and strictly
+  parses at most one supplied Origin before SDK routing. MemPalace leaves MCP
+  SDK 1.28.1's active-blind idle deadline disabled and instead applies
+   active-aware five-minute idle cleanup, a 64-session per-process hard cap,
+   pending-creation reservations without lifecycle-lock head-of-line blocking,
+   bounded retry tombstones that retain failed terminations in cap accounting,
+   header-safe raw-byte bearer comparison that returns 401 for malformed or
+   non-ASCII values, and leak-free manager removal after successful MCP DELETE. The dependency and
+  runtime are exact-gated to SDK 1.28.1 because this policy coordinates private
+  manager maps. Synchronous palace calls remain
+  bounded off the event loop, and stdio/HTTP share one transport-neutral tool
+  dispatcher. Focused disposable official-client, concurrency, lifecycle,
+  cancellation, and malformed-header tests pass. The final repository-wide
+  release gate passes 1,673 tests with 7 platform skips, 106 intentional
+  deselections, and 191 warnings. Independent transport review is green;
+  committed launcher approval and serialized live burn-in remain required, so
+  this is not yet a live-cutover-ready declaration.
+
+- **Managed source-write receipts and exact verification foundation (#22).**
+  Managed project, conversation, and RFC 002 adapter outputs now emit local
+  append-only receipts with exact output manifests. Source locks cover read,
+  identity, normalization, and write; conversation runs also take the
+  per-palace lock. Normalization errors end in `FAIL` without purging prior
+  rows, successful semantic zero-output remains distinct, source metadata uses
+  one canonical locator, and cleanup selects canonical paths, validated raw
+  aliases, and receipt-stamped source identity. Drawers and closets written by
+  the managed project/conversation paths or `managed_adapter_ingest()` are
+  receipt-aware; adapter graph operations and writes before a source identity
+   fail closed. Handled rewrite failures restore exact pre-purge documents,
+   metadata, and embeddings, including bounded retry after a partial rollback
+   delete. Before purge, managed rewrites now persist an immutable recovery
+   snapshot; restart reconciliation either proves COMPLETE or exactly restores
+   the predecessor representation and blocks new writes on corruption or
+   baseline drift. Recovery publication now uses fail-closed OS durability:
+   Windows `MoveFileExW` write-through plus reopened `FlushFileBuffers` and hash
+   proof, or POSIX file/directory `fsync` plus hash proof. Immediately before
+   purge, every managed collection must still expose exactly the snapshotted ID
+   set; additions, removals, and duplicate pagination identities stop before
+   deletion, and only validated IDs are deleted. Managed adapters serialize all
+   source refs at the palace's HNSW write boundary. Current lookup treats the
+   atomic source index as the head, repairs only one connected explicit
+   successor lineage, ignores wall-clock ordering, and fails closed on malformed,
+   contradictory, disconnected, or ambiguous index/journal state.
+  Shared exports are explicitly pseudonymized: per-palace
+  HMAC content/version/error identities and bucketed source size replace global
+  hashes and exact bytes. Legacy `mempalace migrate` now refuses a non-dry run
+  when managed receipt state exists because that rebuild path cannot preserve
+  the journal yet. Other unmanaged mutation paths remain explicitly tracked in
+  #22. Independent receipt re-review found no remaining implementation blocker.
+  No live historical recovery or cutover was performed; recovery remains gated
+  on disposable interruption/restart proof and separate operator approval.
+
 - **`mempalace warm [--json]` — pre-pay the post-mutation first-open cost.**
   Bulk mutations (dedup `--apply`, sqlite-replay) can leave heavy one-time
   work for the next palace open (measured `1,004.3s` after the 2026-07-06
@@ -31,6 +86,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   without `chromadb`). (#18)
 
 ### Operations
+
+- **2026-07-12: historical write evidence bounded and recovery moved to #22.**
+  A path-redacted read-only audit linked 25,448 of 29,449 retained source-ledger
+  paths to current drawer metadata and separated 1,435 bootstrap-only rows,
+  2,548 format exclusions, and 18 intact current-rule candidates. Those 18
+  project to 22,220 rows and are classified as probable never-receipted output,
+  not proven deletion or corruption. #22 now owns terminal source-write
+  receipts, exact source-to-drawer verification, and any separately approved
+  supervised recovery. No historical source was mined or written in this
+  slice.
 
 - **2026-07-11: native loopback HTTP MCP path selected (#21).** The owning
   implementation issue now specifies transport-neutral dispatch, native
@@ -58,6 +123,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Bug Fixes
 
+- **Independent receipt/status review remediation (#21, #22).** Unknown or
+  unreadable HNSW evidence now keeps vectors disabled; probe flights and
+  callers have bounded lifetimes, stale late results are ignored, and cache
+  identity includes DB file identity plus HNSW metadata evidence. Chroma client
+  and collection opening/pinning are process-serialized and refresh their own
+  post-open DB identity, preventing concurrent status deadlocks and
+  self-triggered reconnects. Four concurrent status calls now pass through the
+  real HTTP dispatcher on an ephemeral socket with one probe, and the low-level
+  SDK path completes 30 sequential initialize/call/DELETE sessions.
+- **Managed receipt boundaries now fail closed under reviewed races (#22).**
+  Receipt verification uses a strictly non-mutating current-head lookup and
+  rejects COMPLETE events without the durable publication marker. Adapter core
+  orchestration keeps raw collection/graph objects in closure-owned weak
+  registries and exports only narrow receipt-aware operations; there is no
+  importable authority token, raw registry, or raw-handle-returning function.
+  Identity-selected rows must match both source HMAC and source-file ownership. Managed and MCP
+  mutations share the palace lock, existing-row and delete rechecks include
+  embeddings, and exact document/metadata readback is separated from optional
+  embedding readback. Real-Chroma visibility receives a bounded two-second
+  exact retry window. File mtimes are canonicalized to Chroma's six fractional
+  digits before exact readback, so permanent representation differences do not
+  consume that window. Exact vectors now come only from Chroma's supported
+  collection API. If its metadata/vector views remain divergent, the managed
+  operation fails closed and restores its predecessor instead of opening the
+  live Chroma SQLite/WAL from a second library connection. The full disposable
+  suite remains a required release gate.
+- **Chroma client shutdown is now explicit and testable (#22).**
+  `close_palace()` and backend `close()` call the public Chroma client
+  lifecycle instead of merely dropping Python references; duplicate aliases
+  close one client once. A disposable and now automated real-Chroma regression
+  proves three explicit vectors below the configured `50,000` sync threshold
+  survive final-client close/reopen within `1e-6` float32 tolerance. Automatic
+  cache refresh deliberately does not close the replaced client yet because
+  callers may still hold collection handles backed by it; handle-aware refresh
+  retirement remains tracked in #22.
 - **`mempalace repair --mode sqlite-replay` now gives large diverged palaces a
   safe recovery path.** Dry-run reads the Chroma SQLite metadata segment without
   importing Chroma, reconstructs typed drawer documents/metadata, and reports
