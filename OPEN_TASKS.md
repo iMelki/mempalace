@@ -7,11 +7,12 @@ This file is the durable local index for active `mempalace` issues.
 ## Active Issues
 
 - [#22 - Add durable source-to-drawer receipts and supervised historical cohort recovery](https://github.com/iMelki/mempalace/issues/22)
-  - Status: the affected `279`-test receipt/transport/backend suite, final
-    repository-wide `1,673`-test release gate, and independent receipt re-review
-    are green. The managed-write foundation is committed on `dev` in `04f5bf3`.
-    Historical recovery remains NO-GO; no historical mining or recovery is
-    authorized.
+  - Status: the managed MCP writer proof passes `270` tests with one platform
+    skip, the MCP-server proof passes `91` tests with one skip, and the protected
+    repository gate passes `1,695` tests with `7` skipped and `106` intentionally
+    deselected. The current managed-write tranche is committed and pushed on
+    `dev` in `3cd8d10`; GitHub #22 remains open and `In progress`. Historical
+    recovery remains NO-GO; no historical mining or recovery is authorized.
   - Fresh read-only audit reconciled 25,448 of 29,449 retained staged source
     paths exactly. The remaining 4,001 comprise 1,435 bootstrap-only records,
     2,548 format exclusions, and 18 intact current-rule candidates.
