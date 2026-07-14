@@ -79,9 +79,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   receipt-stamped row; the full receipt module passes `110` tests. Chroma
   `1.5.9` still reproduces the oversized-regex failure, so this is a managed
   compatibility boundary rather than an asserted upstream fix. Independent
-  receipt re-review found no remaining implementation blocker.
-  No live historical recovery or cutover was performed; recovery remains gated
-  on disposable interruption/restart proof and separate operator approval.
+  receipt re-review found no remaining implementation blocker. A new
+  `python -m mempalace.receipt_restart_probe --json` operator probe now creates
+  a synthetic Chroma database and uses four strictly sequential processes to
+  prove the real hard-exit boundary: the rewrite child exits with code `73`
+  after durable recovery publication and a partial replacement, a fresh child
+  restores the exact document, metadata, and embedding, and another fresh child
+  proves vector retrieval, zero residual recovery state, and SQLite integrity.
+  The final guarded operator artifact completed in `7.3s` on Chroma `1.5.9`; it never
+  opened a configured palace and removed its disposable database. No live
+  historical recovery or cutover was performed. The proof does not claim
+  power-loss durability, authorize the 18-source cohort, or make unmanaged
+  writers receipt-aware.
+  The remaining write boundary is now a tested machine-readable decision
+  manifest: 21 surfaces resolve to 10 managed-receipt adaptations, six
+  retirements of unmanaged mutation entry points, and five explicit separate
+  contracts for non-drawer state. A second tested plan freezes the privacy-safe
+  18-source historical cohort and its 22,220 projected rows. It remains `NO-GO`
+  with eight pending gates, one-source attended checkpoints, no automatic
+  advance, and no claim that a future replay can recreate old write-time
+  provenance.
 
 - **`mempalace warm [--json]` — pre-pay the post-mutation first-open cost.**
   Bulk mutations (dedup `--apply`, sqlite-replay) can leave heavy one-time

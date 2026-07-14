@@ -1,0 +1,115 @@
+{
+  "schema": "mempalace-historical-cohort-recovery-plan/v1",
+  "asOf": "2026-07-14",
+  "status": "no-go-awaiting-gates-and-explicit-operator-approval",
+  "ownerIssue": "https://github.com/iMelki/mempalace/issues/22",
+  "sourceAudit": {
+    "schema": "memsys-mempalace-historical-provenance/v1",
+    "runId": "mempalace-historical-provenance-20260712T035203003988Z",
+    "receiptId": "audit-result-8530c7e5f405c7a3d68da1735433543a2ef05f392dcdfae63fc14c74be894d4c",
+    "artifactSha256": "8e1abb45a63945045279ed73ff191052d16eb2077a8be7a4d0ce8be2e9802a75",
+    "privacyRedactedArtifact": "%LOCALAPPDATA%\\MemSys\\eval-artifacts\\mempalace-historical-provenance\\mempalace-historical-provenance-20260712T035203003988Z.json",
+    "workspaceRelativeCommittedSummary": "tools/Memory/memsys/docs/evals/runs/mempalace-historical-provenance-audit-summary-20260712.json"
+  },
+  "interpretation": {
+    "candidateMeaning": "Each candidate is one intact historical source-ledger file/version with no exact current or selected-snapshot representation under the audited rules.",
+    "candidateDoesNotMean": ["confirmed historical write", "confirmed deletion", "confirmed corruption", "drawer", "vector"],
+    "classification": "probable-never-receipted-current-rule-output",
+    "commonCauseHypothesis": "All 18 exceeded the former 10 MiB scan cap, but the historical runtime version was not retained, so silent skip remains plausible rather than proven.",
+    "receiptRule": "A recovery run may emit a new historical-recovery receipt. It must not claim to be the missing original write-time receipt."
+  },
+  "scope": {
+    "candidateCount": 18,
+    "projectedRows": 22220,
+    "sourceBytes": 816920494,
+    "chatGptCandidateCount": 3,
+    "chatGptProjectedRows": 15057,
+    "oneSourcePerRun": true,
+    "automaticAdvanceAllowed": false,
+    "railwayAllowed": false
+  },
+  "candidates": [
+    {"sequence": 1, "id": "H02-61d6f2a4", "provider": "Codex", "format": "JSONL", "sourceMiB": 15.04, "projectedRows": 102, "lane": "live-canary"},
+    {"sequence": 2, "id": "H12-aa19398c", "provider": "Codex", "format": "JSONL", "sourceMiB": 87.90, "projectedRows": 33, "lane": "attended-standard"},
+    {"sequence": 3, "id": "H05-0ec08720", "provider": "Codex", "format": "JSONL", "sourceMiB": 45.68, "projectedRows": 39, "lane": "attended-standard"},
+    {"sequence": 4, "id": "H03-bda2192a", "provider": "Gemini CLI", "format": "JSONL", "sourceMiB": 25.59, "projectedRows": 99, "lane": "attended-standard"},
+    {"sequence": 5, "id": "H13-5a3c2999", "provider": "Codex", "format": "JSONL", "sourceMiB": 157.39, "projectedRows": 105, "lane": "attended-standard"},
+    {"sequence": 6, "id": "H04-c7d18db2", "provider": "Codex", "format": "JSONL", "sourceMiB": 103.73, "projectedRows": 125, "lane": "attended-standard"},
+    {"sequence": 7, "id": "H01-e5b90085", "provider": "Codex", "format": "JSONL", "sourceMiB": 12.66, "projectedRows": 205, "lane": "attended-standard"},
+    {"sequence": 8, "id": "H08-e44c9165", "provider": "Codex", "format": "JSONL", "sourceMiB": 18.51, "projectedRows": 283, "lane": "attended-standard"},
+    {"sequence": 9, "id": "H09-bdfbf31f", "provider": "Codex", "format": "JSONL", "sourceMiB": 18.09, "projectedRows": 288, "lane": "attended-standard"},
+    {"sequence": 10, "id": "H06-6dfdaa77", "provider": "Codex", "format": "JSONL", "sourceMiB": 20.43, "projectedRows": 410, "lane": "attended-standard"},
+    {"sequence": 11, "id": "H15-e3b1723c", "provider": "Copilot", "format": "JSONL", "sourceMiB": 10.04, "projectedRows": 635, "lane": "attended-standard"},
+    {"sequence": 12, "id": "H18-ee62efb8", "provider": "Codex", "format": "JSONL", "sourceMiB": 60.09, "projectedRows": 803, "lane": "attended-standard"},
+    {"sequence": 13, "id": "H17-9c28e553", "provider": "Copilot", "format": "JSONL", "sourceMiB": 16.38, "projectedRows": 905, "lane": "attended-standard"},
+    {"sequence": 14, "id": "H14-ee9d16f4", "provider": "Copilot", "format": "JSONL", "sourceMiB": 17.31, "projectedRows": 1097, "lane": "attended-standard"},
+    {"sequence": 15, "id": "H11-137735c6", "provider": "Codex", "format": "JSONL", "sourceMiB": 135.81, "projectedRows": 2034, "lane": "attended-standard"},
+    {"sequence": 16, "id": "H10-11c63a5d", "provider": "ChatGPT", "format": "JSON", "sourceMiB": 13.40, "projectedRows": 3823, "lane": "high-output-last"},
+    {"sequence": 17, "id": "H07-79400433", "provider": "ChatGPT", "format": "JSON", "sourceMiB": 10.39, "projectedRows": 5406, "lane": "high-output-last"},
+    {"sequence": 18, "id": "H16-a12962bb", "provider": "ChatGPT", "format": "JSON", "sourceMiB": 10.64, "projectedRows": 5828, "lane": "high-output-last"}
+  ],
+  "gates": [
+    {
+      "id": "refresh-source-evidence",
+      "status": "pending",
+      "require": ["same 18 source-version hashes", "all sources present and non-symlink", "no new exact representation", "same projection implementation identity"]
+    },
+    {
+      "id": "equivalent-content-dedup-review",
+      "status": "pending",
+      "require": ["privacy-safe normalized content fingerprints", "review equivalent content under unrelated historical IDs", "approved duplicate disposition"]
+    },
+    {
+      "id": "exclusive-full-directory-backup",
+      "status": "pending",
+      "require": ["all palace clients cleanly stopped", "no second PersistentClient", "entire palace directory archived", "per-file and archive hashes", "backup run receipt"]
+    },
+    {
+      "id": "native-restore-proof",
+      "status": "pending",
+      "require": ["restore into disposable directory", "SQLite integrity ok", "exact collections and counts", "receipt journal present", "baseline vector retrieval", "clean close and reopen"]
+    },
+    {
+      "id": "clone-canary-rehearsal",
+      "status": "pending",
+      "require": ["one candidate through managed receipt path", "exact expected IDs", "no missing excess or conflict", "idempotent rerun", "restart persistence", "rollback to baseline clone"]
+    },
+    {
+      "id": "explicit-live-approval",
+      "status": "pending",
+      "require": ["named candidate scope", "approved downtime window", "H02-61d6f2a4 canary named", "rollback pre-authorized", "approval does not implicitly expand to all 18"]
+    },
+    {
+      "id": "per-source-attended-checkpoint",
+      "status": "pending",
+      "require": ["one source per run", "exact receipt verification", "retrieval smoke", "restart proof", "unrelated-row drift zero", "explicit continue decision"]
+    },
+    {
+      "id": "bounded-cohort-closeout",
+      "status": "pending",
+      "require": ["all 18 exact source versions represented", "22,220 expected outputs reconciled", "final backup and restore evidence", "claim remains bounded to these source versions"]
+    }
+  ],
+  "stopConditions": [
+    "source hash or candidate set drift",
+    "equivalent historical content without reviewed disposition",
+    "host pressure outside admitted policy",
+    "missing, excess, conflict, or stale receipt result",
+    "unexpected collection or unrelated-row drift",
+    "retrieval or restart persistence failure",
+    "backup or rollback proof no longer fresh"
+  ],
+  "currentBackupEvidence": {
+    "nonZeroArchivesObserved": 10,
+    "newestObservedDate": "2026-07-12",
+    "satisfiesRestoreGate": false,
+    "reason": "Current archives have structural listing evidence, while the earlier drill checked extraction and a SQLite header only; neither proves complete Chroma multi-file restoration and retrieval."
+  },
+  "researchBasis": [
+    "https://www.w3.org/TR/prov-dm/",
+    "https://openlineage.io/docs/spec/run-cycle/",
+    "https://www.sqlite.org/backup.html",
+    "https://github.com/chroma-core/chroma/issues/6975",
+    "https://github.com/chroma-core/chroma/issues/7040"
+  ]
+}

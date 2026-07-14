@@ -58,23 +58,37 @@ This file is the durable local index for active `mempalace` issues.
     unmanaged. Legacy `mempalace migrate` now blocks if receipt state exists so
     it cannot silently discard the journal; adapting or retiring the remaining
     paths stays in #22.
-  - Next: disposable real-Chroma interruption/restart proof. The separate
-    small-collection durability check is green: three explicit vectors below
-    MemPalace's `50,000` Chroma sync
-    threshold survived final-client close/reopen and matched within `1e-6`
-    float32 tolerance; the corrected disposable run completed in `1.68s` and is
-    now a normal real-Chroma regression. Historical recovery still stays NO-GO
-    until an interrupted managed rewrite is restored and reverified after a
-    true client/process restart. Explicit backend shutdown now calls Chroma's
-    public `close()`. Automatic cache replacement cannot do that safely until
-    collection-handle lifetimes are tracked; closing a replaced client while a
-    caller still held its collection reproduced `RustBindingsAPI` without
-    `bindings` in the full suite, so handle-aware retirement remains in #22.
-    Windows DACL enforcement/readback remains explicitly unproven follow-up;
-    POSIX mode requests are not evidence of an NTFS access-control boundary.
-    Any historical recovery still needs fresh backup/restore proof, a bounded
-    reviewed plan, an exact expected-output manifest, and separate operator
-    approval.
+  - Writer disposition is now explicit and machine-readable in
+    `docs/research/managed-write-boundary-dispositions-2026-07-14.json`: 21
+    mutation surfaces are accounted for. Ten source/derived-output paths must
+    adapt to managed receipts, six unmanaged mutation surfaces must retire in
+    favor of receipt-aware or read-only replacements, and five physical,
+    topology, graph, configuration, or operational stores are excluded from
+    source-drawer completeness only under named separate contracts. These are
+    completed decisions, not completed implementations.
+  - Process-restart gate: green on a disposable synthetic Chroma `1.5.9`
+    database. Four strictly sequential child processes seeded one exact
+    receipt, published recovery and hard-exited with the expected code `73`
+    after a partial rewrite, restored the predecessor in a fresh process, and
+    reopened it in a second fresh process. The final vector query returned the
+    baseline ID, SQLite integrity was `ok`, no recovery manifest or partial row
+    remained, and disposable cleanup succeeded. The operator run completed in
+    `7.3s`; evidence is under
+    `%LOCALAPPDATA%\MemSys\eval-artifacts\mempalace-write-receipt-restart\20260714T143903Z-2b73fba1`.
+    This proves the managed process-death recovery path, not arbitrary power-
+    loss or faulty-storage durability.
+  - Remaining: implement the decided writer manifest. The separately
+    reviewed 18-source plan is also published in
+    `docs/research/historical-cohort-recovery-plan-2026-07-14.{md,json}` and is
+    intentionally `NO-GO`: all eight gates remain pending, including equivalent-
+    content review, a clean full-directory backup, native disposable restore,
+    clone canary, and explicit named live approval. The plan permits one source
+    per attended run and never automatic advance. The bounded live provider-
+    chat canary also waits for genuine MemSys host-pressure admission. Explicit
+    backend shutdown calls Chroma's public `close()`, but automatic cache
+    replacement still needs handle-aware retirement because eager close
+    invalidated live collection handles in the full suite. Windows DACL
+    enforcement/readback remains unproven.
 
 - [#19 - Audit likely duplicate drawers surfaced by #13 probe](https://github.com/iMelki/mempalace/issues/19)
   - Status: open go/no-go decision. This is a duplicate-drawer audit and

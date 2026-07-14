@@ -2,9 +2,8 @@
 
 Date: 2026-07-12; review remediation updated 2026-07-14
 Status: implementation is committed on `dev` in `04f5bf3`; the final full-suite
-release gate and independent re-review are GO; disposable real-Chroma
-interruption/restart proof is pending; historical recovery remains NO-GO and
-was not performed
+release gate, independent re-review, and disposable real-Chroma process-restart
+proof are GO; historical recovery remains NO-GO and was not performed
 
 ## Decision
 
@@ -528,9 +527,10 @@ not open the live Chroma SQLite/WAL through Python's separate `sqlite3` driver
 or return a receipt based on an unverified operation-log row. The predecessor
 snapshot remains the rollback authority.
 Independent receipt re-review found no remaining implementation blocker.
-Disposable crash/restart proof, NTFS DACL proof, and live cutover remain
-pending. Historical recovery remains NO-GO until that restart proof and a
-separate operator approval are complete.
+Disposable crash/restart proof is green. NTFS DACL proof, unmanaged-writer
+disposition, a reviewed 18-source plan, and live cutover remain pending.
+Historical recovery remains NO-GO until its separate backup/restore, expected-
+output manifest, and operator-approval gates are complete.
 
 The focused receipt tests cover:
 
@@ -613,7 +613,10 @@ The focused receipt tests cover:
    rechecks; this is serialization, not provenance or a Chroma transaction.
    `mempalace migrate` now blocks non-dry rebuilding when a receipt root exists,
    but receipt-aware migration and invalidation from the other mutation paths
-   remain open work in #22.
+   remain open work in #22. Their reviewed dispositions are frozen in
+   `managed-write-boundary-dispositions-2026-07-14.json`: 10 adapt to managed
+   receipts, six retire only their unmanaged mutation surface, and five use a
+   named separate contract because they are not source-derived drawer state.
 4. Source adapters must use `managed_adapter_ingest()`. During that driver,
    both public PalaceContext collections are receipt-aware; mutation without an
    active source receipt fails closed, and graph operations are rejected until
@@ -630,8 +633,9 @@ The focused receipt tests cover:
    surface was added in this scope.
 6. Chroma and the receipt filesystem are not one transaction. Hard-process
    interruption is covered by durable pre-purge snapshots and automatic
-   fail-closed reconciliation, but disposable real-Chroma restart proof and an
-   operator-facing inspection/repair command remain before live cutover.
+   fail-closed reconciliation, and the disposable real-Chroma restart proof is
+   green. An operator-facing inspection/repair command and the separately
+   reviewed historical-recovery gates remain before any live cohort mutation.
    Host-restart and power-loss protection is as strong as the documented OS
    primitive and the underlying filesystem/storage stack actually honor. Drive
    write-back caches without power-loss protection, network filesystems, VM
@@ -689,6 +693,53 @@ tracked separately rather than hidden behind unsafe eager shutdown. Historical
 recovery is still not authorized: a durable interrupted managed rewrite must be
 restored and reverified after a true client/process restart before the recovery
 cohort can run.
+
+### Disposable hard-exit and process-restart proof (2026-07-14)
+
+The process-restart gate is now green. The reusable command is:
+
+```powershell
+python -m mempalace.receipt_restart_probe --json
+```
+
+The normal probe command accepts no palace path. It creates one synthetic
+Chroma database in a unique temporary directory; internal child phases require
+the orchestrator's per-run marker and nonce, and the seed phase refuses a
+pre-existing palace directory. It then runs four non-overlapping child
+processes:
+
+1. `seed` writes one managed source receipt, exact document, metadata, and an
+   explicit unit vector, verifies representation, and cleanly closes Chroma.
+2. `interrupt` reopens the database, verifies the baseline, durably publishes
+   the exact pre-purge recovery snapshot, purges it, writes one partial
+   replacement, reads that state back, and calls `os._exit(73)` without closing
+   Chroma or publishing a terminal receipt.
+3. `recover` opens a fresh client, requires the old receipt to remain the
+   authoritative source head, removes only the validated interrupted row,
+   restores the snapshotted document, metadata, and embedding, and removes the
+   recovery record only after exact readback.
+4. `verify` opens another fresh client, verifies the authoritative receipt,
+   exact vector, top-1 vector query, absence of the partial row and recovery
+   manifests, and `PRAGMA integrity_check = ok` before clean close.
+
+The 2026-07-14 operator run used Python `3.13.2` and Chroma `1.5.9`. All four
+expected exit boundaries matched (`0`, `73`, `0`, `0`), no phase timed out,
+the disposable marker was validated, the total duration was `7.3s`, and
+temporary cleanup succeeded. Canonical
+local evidence:
+
+`%LOCALAPPDATA%\MemSys\eval-artifacts\mempalace-write-receipt-restart\20260714T143903Z-2b73fba1\probe-result.json`
+
+This closes the specific software-process question: after an abrupt managed
+rewrite process death, a later process can use the durable snapshot to restore
+the exact predecessor representation and retrieve it. It does not simulate
+power removal, broken drive write caches, firmware lying about flushes, network
+filesystem semantics, a concurrently open second `PersistentClient`, or an
+unmanaged writer. It also does not inspect, ingest, repair, or authorize any
+historical source. Those boundaries remain separate because upstream Chroma
+issue #7040 supports strict single-client sequencing, while issues #6975 and
+PR #7047 leave low-volume HNSW persistence dependent on the supported close
+boundary and underlying storage guarantees.
 
 ### Chroma large document delete correction (2026-07-14)
 
