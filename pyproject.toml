@@ -1,7 +1,7 @@
 [project]
 name = "mempalace"
 version = "3.3.4"
-description = "Give your AI a memory ΓÇö mine projects and conversations into a searchable palace. No API key required."
+description = "Give your AI a memory - mine projects and conversations into a searchable palace. No API key required."
 readme = "README.md"
 requires-python = ">=3.9"
 license = "MIT"
@@ -40,6 +40,7 @@ Repository = "https://github.com/MemPalace/mempalace"
 [project.scripts]
 mempalace = "mempalace.cli:main"
 mempalace-mcp = "mempalace.mcp_server:main"
+mempalace-mcp-http = "mempalace.mcp_http:main"
 
 [project.entry-points."mempalace.backends"]
 chroma = "mempalace.backends.chroma:ChromaBackend"
@@ -47,23 +48,36 @@ chroma = "mempalace.backends.chroma:ChromaBackend"
 # RFC 002 source-adapter entry-point group. Core publishes no first-party
 # adapters under this group yet; ``miner.py`` and ``convo_miner.py`` migrate
 # onto ``BaseSourceAdapter`` in a follow-up PR. Third-party adapter packages
-# (``mempalace-source-cursor``, ``mempalace-source-git``, ΓÇª) register here.
+# (``mempalace-source-cursor``, ``mempalace-source-git``, and others) register here.
 [project.entry-points."mempalace.sources"]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0", "pytest-cov>=4.0", "ruff>=0.4.0", "psutil>=5.9"]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "ruff>=0.4.0",
+    "psutil>=5.9",
+    "mcp==1.28.1; python_version >= '3.10'",
+]
+mcp-http = ["mcp==1.28.1; python_version >= '3.10'"]
 spellcheck = ["autocorrect>=2.0"]
 # Hardware acceleration for the ONNX embedding model. Install exactly one:
-#   pip install mempalace[gpu]       ΓÇö NVIDIA CUDA
-#   pip install mempalace[dml]       ΓÇö DirectML (Windows AMD/Intel/NVIDIA)
-#   pip install mempalace[coreml]    ΓÇö macOS Neural Engine
+#   pip install mempalace[gpu]       - NVIDIA CUDA
+#   pip install mempalace[dml]       - DirectML (Windows AMD/Intel/NVIDIA)
+#   pip install mempalace[coreml]    - macOS Neural Engine
 # After install, set MEMPALACE_EMBEDDING_DEVICE=cuda|dml|coreml (or "auto").
 gpu = ["onnxruntime-gpu>=1.16"]
 dml = ["onnxruntime-directml>=1.16"]
 coreml = ["onnxruntime>=1.16"]
 
 [dependency-groups]
-dev = ["pytest>=7.0", "pytest-cov>=4.0", "ruff>=0.4.0", "psutil>=5.9"]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "ruff>=0.4.0",
+    "psutil>=5.9",
+    "mcp==1.28.1; python_version >= '3.10'",
+]
 
 [build-system]
 requires = ["hatchling"]

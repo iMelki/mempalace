@@ -110,22 +110,32 @@ def strip_noise(text: str) -> str:
     return text.strip()
 
 
-def normalize(filepath: str) -> str:
+def normalize(filepath: str, *, source_bytes: Optional[bytes] = None) -> str:
     """
     Load a file and normalize to transcript format if it's a chat export.
     Plain text files pass through unchanged.
+
+    ``source_bytes`` lets managed mining bind a receipt hash to the exact
+    bytes normalized, avoiding a second-read race between hashing and parsing.
     """
-    try:
-        file_size = os.path.getsize(filepath)
-    except OSError as e:
-        raise IOError(f"Could not read {filepath}: {e}")
+    if source_bytes is None:
+        try:
+            file_size = os.path.getsize(filepath)
+        except OSError as e:
+            raise IOError(f"Could not read {filepath}: {e}")
+    else:
+        file_size = len(source_bytes)
     if file_size > 500 * 1024 * 1024:  # 500 MB safety limit
         raise IOError(f"File too large ({file_size // (1024 * 1024)} MB): {filepath}")
-    try:
-        with open(filepath, "r", encoding="utf-8", errors="replace") as f:
-            content = f.read()
-    except OSError as e:
-        raise IOError(f"Could not read {filepath}: {e}")
+    if source_bytes is None:
+        try:
+            with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read()
+        except OSError as e:
+            raise IOError(f"Could not read {filepath}: {e}")
+    else:
+        content = source_bytes.decode("utf-8", errors="replace")
+        content = content.replace("\r\n", "\n").replace("\r", "\n")
 
     if not content.strip():
         return content

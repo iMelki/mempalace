@@ -12,6 +12,7 @@ import sys
 import shlex
 import hashlib
 import fnmatch
+from contextlib import nullcontext
 from pathlib import Path
 from datetime import datetime
 from collections import defaultdict
@@ -29,6 +30,22 @@ from .palace import (
     mine_palace_lock,
     purge_file_closets,
     upsert_closet_lines,
+)
+from .receipt_verifier import ReceiptVerificationError, verify_receipt
+from .write_receipts import (
+    ManagedRunIdentity,
+    ReceiptError,
+    ReceiptIdentityError,
+    ReceiptStore,
+    SourceWriteReceiptSession,
+    canonical_source_locator,
+    complete_reused_receipt,
+    managed_write_scope,
+    purge_managed_source_snapshot,
+    rollback_managed_source_rows,
+    sha256_bytes,
+    snapshot_managed_source_rows,
+    write_receipted_collection_batch,
 )
 
 READABLE_EXTENSIONS = {
@@ -755,7 +772,9 @@ def _build_drawer_metadata(
         "normalize_version": NORMALIZE_VERSION,
     }
     if source_mtime is not None:
-        metadata["source_mtime"] = source_mtime
+        # Chroma persists numeric metadata at six fractional digits. Normalize
+        # before write so exact receipt readback compares the stored value.
+        metadata["source_mtime"] = round(float(source_mtime), 6)
     metadata["hall"] = detect_hall(content)
     entities = _extract_entities_for_metadata(content)
     if entities:
@@ -802,111 +821,643 @@ def process_file(
     agent: str,
     dry_run: bool,
     closets_col=None,
+    receipt_store: Optional[ReceiptStore] = None,
+    receipt_run: Optional[ManagedRunIdentity] = None,
+) -> tuple:
+    """Lock before reading so a waiting invocation cannot retain stale bytes."""
+    raw_source_alias = os.fspath(filepath)
+    source_file = canonical_source_locator(filepath, local_path=True)
+    managed = not dry_run and receipt_store is not None and receipt_run is not None
+    write_scope = (
+        managed_write_scope(receipt_store.palace_path, lock_factory=mine_palace_lock)
+        if managed
+        else nullcontext()
+    )
+    with write_scope:
+        with mine_lock(os.path.normcase(source_file)):
+            return _process_file_locked(
+                filepath=Path(source_file),
+                project_path=Path(canonical_source_locator(project_path, local_path=True)),
+                collection=collection,
+                wing=wing,
+                rooms=rooms,
+                agent=agent,
+                dry_run=dry_run,
+                closets_col=closets_col,
+                receipt_store=receipt_store,
+                receipt_run=receipt_run,
+                source_aliases=(raw_source_alias,),
+            )
+
+
+def _process_file_locked(
+    filepath: Path,
+    project_path: Path,
+    collection,
+    wing: str,
+    rooms: list,
+    agent: str,
+    dry_run: bool,
+    closets_col=None,
+    receipt_store: Optional[ReceiptStore] = None,
+    receipt_run: Optional[ManagedRunIdentity] = None,
+    source_aliases: tuple[str, ...] = (),
 ) -> tuple:
     """Read, chunk, route, and file one file. Returns (drawer_count, room_name)."""
 
-    # Skip if already filed
     source_file = str(filepath)
-    if not dry_run and file_already_mined(collection, source_file, check_mtime=True):
+    managed = not dry_run and receipt_store is not None and receipt_run is not None
+    if (
+        not managed
+        and not dry_run
+        and file_already_mined(collection, source_file, check_mtime=True)
+    ):
         return 0, "general"
 
     try:
-        content = filepath.read_text(encoding="utf-8", errors="replace")
+        raw_content = filepath.read_bytes()
     except OSError:
         return 0, "general"
 
+    # Match Path.read_text's universal-newline behavior while binding the
+    # receipt to the exact retained source bytes, before any transformation.
+    content = raw_content.decode("utf-8", errors="replace")
+    content = content.replace("\r\n", "\n").replace("\r", "\n")
     content = content.strip()
-    if len(content) < MIN_CHUNK_SIZE:
-        return 0, "general"
+    receipt: Optional[SourceWriteReceiptSession] = None
+    if managed:
+        source_digest = sha256_bytes(raw_content)
+        recovery_collections = {"drawers": collection}
+        if closets_col is not None:
+            recovery_collections["closets"] = closets_col
+        receipt_store.reconcile_pending_rewrites(
+            recovery_collections,
+            source_identity=receipt_store.source_identity(source_file, local_path=True),
+        )
+        receipt = receipt_store.begin_source(
+            run=receipt_run,
+            source_locator=source_file,
+            source_content_hash=source_digest,
+            source_version_hash=source_digest,
+            source_size_bytes=len(raw_content),
+            adapter_name="filesystem",
+            adapter_version=str(NORMALIZE_VERSION),
+            local_path=True,
+        )
+        if _reuse_verified_receipt(
+            receipt,
+            collection,
+            closets_col,
+            source_file=source_file,
+            source_aliases=source_aliases,
+        ):
+            return 0, "general"
 
-    room = detect_room(filepath, content, rooms, project_path)
-    chunks = chunk_text(content, source_file)
+    try:
+        if len(content) < MIN_CHUNK_SIZE:
+            if receipt is not None:
+                _complete_zero_output(
+                    receipt=receipt,
+                    collection=collection,
+                    closets_col=closets_col,
+                    source_file=source_file,
+                    lock_held=True,
+                    source_aliases=source_aliases,
+                )
+            return 0, "general"
 
-    if dry_run:
-        print(f"    [DRY RUN] {filepath.name} -> room:{room} ({len(chunks)} drawers)")
-        return len(chunks), room
+        room = detect_room(filepath, content, rooms, project_path)
+        chunks = chunk_text(content, source_file)
 
-    # Lock this file so concurrent agents don't interleave delete+insert.
-    # Without the lock, two agents can both pass file_already_mined(),
-    # both delete, and both insert — creating duplicates or losing data.
-    with mine_lock(source_file):
-        # Re-check after acquiring lock — another agent may have just finished
-        if file_already_mined(collection, source_file, check_mtime=True):
+        if dry_run:
+            print(f"    [DRY RUN] {filepath.name} -> room:{room} ({len(chunks)} drawers)")
+            return len(chunks), room
+
+        if receipt is not None:
+            receipt.set_expected(drawers=len(chunks))
+
+        drawers_added, skipped = _persist_file_chunks(
+            collection=collection,
+            closets_col=closets_col,
+            source_file=source_file,
+            content=content,
+            chunks=chunks,
+            wing=wing,
+            room=room,
+            agent=agent,
+            receipt=receipt,
+            lock_held=True,
+            source_aliases=source_aliases,
+        )
+        if skipped:
             return 0, room
+        return drawers_added, room
+    except KeyboardInterrupt as exc:
+        if receipt is not None and receipt.state not in {"COMPLETE", "ABORT", "FAIL"}:
+            receipt.abort(exc, stage="filesystem-interrupted")
+        raise
+    except Exception as exc:
+        if receipt is not None and receipt.state not in {"COMPLETE", "ABORT", "FAIL"}:
+            receipt.fail(exc, stage="filesystem-write")
+        raise
 
-        # Purge stale drawers for this file before re-inserting the fresh chunks.
-        # Converts modified-file re-mines from upsert-over-existing-IDs (which hits
-        # hnswlib's thread-unsafe updatePoint path and can segfault on macOS ARM
-        # with chromadb 0.6.3) into a clean delete+insert, bypassing the update
-        # path entirely.
+
+class _ReceiptedCollectionWriter:
+    """Narrow adapter for helpers that only need collection.upsert()."""
+
+    def __init__(
+        self,
+        collection,
+        receipt: SourceWriteReceiptSession,
+        source_file: str,
+        *,
+        collection_name: str,
+        kind: str,
+    ):
+        self._collection = collection
+        self._receipt = receipt
+        self._source_file = source_file
+        self._collection_name = collection_name
+        self._kind = kind
+
+    def upsert(self, **kwargs):
+        return write_receipted_collection_batch(
+            self._collection,
+            "upsert",
+            kwargs,
+            session=self._receipt,
+            source_file=self._source_file,
+            collection_name=self._collection_name,
+            kind=self._kind,
+            local_path=True,
+        )
+
+
+def _rollback_file_mutations(
+    receipt: SourceWriteReceiptSession,
+    mutated: list[tuple[str, object, object]],
+    *,
+    recovery_path: Path,
+    collections: dict[str, object],
+    incomplete_purge: Optional[tuple[str, object, object]] = None,
+) -> None:
+    failures = []
+    rollback_targets = list(reversed(mutated))
+    if incomplete_purge is not None:
+        rollback_targets.insert(0, incomplete_purge)
+    for collection_name, collection, snapshot in rollback_targets:
         try:
-            collection.delete(where={"source_file": source_file})
-        except Exception:
-            pass
-
-        # Batch chunks into bounded upserts so the embedding model sees many
-        # chunks per forward pass without building one huge Chroma/SQLite
-        # request for pathological files. A bad chunk can fail its sub-batch;
-        # that is the deliberate trade-off for amortizing embedding overhead.
+            rollback_managed_source_rows(
+                collection,
+                snapshot,
+                recovery_path=recovery_path,
+                collection_name=collection_name,
+                source_identity=receipt.source["identity"],
+                receipt_id=receipt.receipt_id,
+            )
+        except Exception as exc:
+            failures.append(exc)
+    receipt.discard_pending_invalidations()
+    if not failures:
         try:
-            source_mtime = os.path.getmtime(source_file)
-        except OSError:
-            source_mtime = None
+            receipt.store.discard_rewrite_recovery(
+                receipt.source["identity"],
+                receipt.receipt_id,
+                collections=collections,
+            )
+        except Exception as exc:
+            failures.append(exc)
+    if failures:
+        raise ReceiptError("managed source rollback failed") from failures[0]
 
-        drawers_added = 0
-        for batch_start in range(0, len(chunks), DRAWER_UPSERT_BATCH_SIZE):
-            batch_docs: list = []
-            batch_ids: list = []
-            batch_metas: list = []
-            for chunk in chunks[batch_start : batch_start + DRAWER_UPSERT_BATCH_SIZE]:
-                drawer_id = f"drawer_{wing}_{room}_{hashlib.sha256((source_file + str(chunk['chunk_index'])).encode()).hexdigest()[:24]}"
-                batch_docs.append(chunk["content"])
-                batch_ids.append(drawer_id)
-                batch_metas.append(
-                    _build_drawer_metadata(
+
+def _persist_file_chunks(
+    *,
+    collection,
+    closets_col,
+    source_file: str,
+    content: str,
+    chunks: list,
+    wing: str,
+    room: str,
+    agent: str,
+    receipt: Optional[SourceWriteReceiptSession],
+    lock_held: bool = False,
+    source_aliases: tuple[str, ...] = (),
+) -> tuple[int, bool]:
+    """Serialize the purge, drawer batches, and derived closet rebuild."""
+    lock_context = nullcontext() if lock_held else mine_lock(os.path.normcase(source_file))
+    with lock_context:
+        if receipt is None:
+            if file_already_mined(collection, source_file, check_mtime=True):
+                return 0, True
+        elif _reuse_verified_receipt(
+            receipt,
+            collection,
+            closets_col,
+            source_file=source_file,
+            source_aliases=source_aliases,
+        ):
+            return 0, True
+
+        prior = _current_prior_receipt(receipt) if receipt is not None else None
+        if receipt is not None and prior is not None:
+            _supersede_prior_receipt(receipt, prior)
+
+        mutated: list[tuple[str, object, object]] = []
+        incomplete_purge: Optional[tuple[str, object, object]] = None
+        recovery_path = None
+        stage = "snapshot-existing"
+        try:
+            snapshots: list[tuple[str, object, object]] = []
+            recovery_snapshots = {}
+            if receipt is not None:
+                receipt.running("snapshotting-existing")
+                drawer_snapshot = snapshot_managed_source_rows(
+                    collection,
+                    source_file=source_file,
+                    source_identity=receipt.source["identity"],
+                    local_path=True,
+                    source_aliases=source_aliases,
+                )
+                snapshots.append(("drawers", collection, drawer_snapshot))
+                recovery_snapshots["drawers"] = drawer_snapshot
+                if closets_col is not None:
+                    closet_snapshot = snapshot_managed_source_rows(
+                        closets_col,
+                        source_file=source_file,
+                        source_identity=receipt.source["identity"],
+                        local_path=True,
+                        source_aliases=source_aliases,
+                    )
+                    snapshots.append(("closets", closets_col, closet_snapshot))
+                    recovery_snapshots["closets"] = closet_snapshot
+                recovery_path = receipt.store.prepare_rewrite_recovery(
+                    session=receipt,
+                    snapshots=recovery_snapshots,
+                    source_file=source_file,
+                    local_path=True,
+                    source_aliases=source_aliases,
+                    previous_receipt=prior,
+                )
+                receipt.running("recovery-prepared")
+                receipt.running("purging-existing")
+
+            stage = "purge-existing-drawers"
+            if receipt is None:
+                try:
+                    collection.delete(where={"source_file": source_file})
+                except Exception:
+                    pass
+            else:
+                drawer_snapshot = snapshots[0][2]
+                incomplete_purge = ("drawers", collection, drawer_snapshot)
+                purge_managed_source_snapshot(
+                    collection,
+                    drawer_snapshot,
+                    recovery_path=recovery_path,
+                    collection_name="drawers",
+                    source_file=source_file,
+                    source_identity=receipt.source["identity"],
+                    local_path=True,
+                    source_aliases=source_aliases,
+                )
+                incomplete_purge = None
+                mutated.append(("drawers", collection, drawer_snapshot))
+
+            if receipt is not None and closets_col is not None:
+                stage = "purge-existing-closets"
+                closet_snapshot = snapshots[1][2]
+                incomplete_purge = ("closets", closets_col, closet_snapshot)
+                purge_managed_source_snapshot(
+                    closets_col,
+                    closet_snapshot,
+                    recovery_path=recovery_path,
+                    collection_name="closets",
+                    source_file=source_file,
+                    source_identity=receipt.source["identity"],
+                    local_path=True,
+                    source_aliases=source_aliases,
+                )
+                incomplete_purge = None
+                mutated.append(("closets", closets_col, closet_snapshot))
+
+            try:
+                source_mtime = os.path.getmtime(source_file)
+            except OSError:
+                source_mtime = None
+
+            stage = "write-drawers"
+            if receipt is not None:
+                receipt.running("writing-drawers")
+            drawers_added = 0
+            for batch_start in range(0, len(chunks), DRAWER_UPSERT_BATCH_SIZE):
+                batch_docs: list = []
+                batch_ids: list = []
+                batch_metas: list = []
+                for chunk in chunks[batch_start : batch_start + DRAWER_UPSERT_BATCH_SIZE]:
+                    drawer_id = f"drawer_{wing}_{room}_{hashlib.sha256((source_file + str(chunk['chunk_index'])).encode()).hexdigest()[:24]}"
+                    chunk_content = chunk["content"]
+                    metadata = _build_drawer_metadata(
                         wing,
                         room,
                         source_file,
                         chunk["chunk_index"],
                         agent,
-                        chunk["content"],
+                        chunk_content,
                         source_mtime,
                     )
+                    batch_docs.append(chunk_content)
+                    batch_ids.append(drawer_id)
+                    batch_metas.append(metadata)
+                batch = {
+                    "documents": batch_docs,
+                    "ids": batch_ids,
+                    "metadatas": batch_metas,
+                }
+                if receipt is None:
+                    collection.upsert(**batch)
+                else:
+                    write_receipted_collection_batch(
+                        collection,
+                        "upsert",
+                        batch,
+                        session=receipt,
+                        source_file=source_file,
+                        local_path=True,
+                    )
+                drawers_added += len(batch_docs)
+
+            if closets_col is not None and drawers_added > 0:
+                drawer_ids = [
+                    f"drawer_{wing}_{room}_{hashlib.sha256((source_file + str(c['chunk_index'])).encode()).hexdigest()[:24]}"
+                    for c in chunks
+                ]
+                closet_lines = build_closet_lines(source_file, drawer_ids, content, wing, room)
+                closet_id_base = (
+                    f"closet_{wing}_{room}_{hashlib.sha256(source_file.encode()).hexdigest()[:24]}"
                 )
-            collection.upsert(
-                documents=batch_docs,
-                ids=batch_ids,
-                metadatas=batch_metas,
-            )
-            drawers_added += len(batch_docs)
+                entities = _extract_entities_for_metadata(content)
+                closet_meta = {
+                    "wing": wing,
+                    "room": room,
+                    "source_file": source_file,
+                    "drawer_count": drawers_added,
+                    "filed_at": datetime.now().isoformat(),
+                    "normalize_version": NORMALIZE_VERSION,
+                }
+                if entities:
+                    closet_meta["entities"] = entities
+                if receipt is None:
+                    purge_file_closets(closets_col, source_file)
+                    closet_writer = closets_col
+                else:
+                    stage = "write-closets"
+                    receipt.running("writing-closets")
+                    closet_writer = _ReceiptedCollectionWriter(
+                        closets_col,
+                        receipt,
+                        source_file,
+                        collection_name="closets",
+                        kind="closet",
+                    )
+                upsert_closet_lines(closet_writer, closet_id_base, closet_lines, closet_meta)
 
-        # Build closet — the searchable index pointing to these drawers.
-        # Purge first: a re-mine (mtime change or normalize_version bump) must
-        # fully replace the prior closets, not append to them.
-        if closets_col and drawers_added > 0:
-            drawer_ids = [
-                f"drawer_{wing}_{room}_{hashlib.sha256((source_file + str(c['chunk_index'])).encode()).hexdigest()[:24]}"
-                for c in chunks
-            ]
-            closet_lines = build_closet_lines(source_file, drawer_ids, content, wing, room)
-            closet_id_base = (
-                f"closet_{wing}_{room}_{hashlib.sha256(source_file.encode()).hexdigest()[:24]}"
-            )
-            entities = _extract_entities_for_metadata(content)
-            closet_meta = {
-                "wing": wing,
-                "room": room,
-                "source_file": source_file,
-                "drawer_count": drawers_added,
-                "filed_at": datetime.now().isoformat(),
-                "normalize_version": NORMALIZE_VERSION,
-            }
-            if entities:
-                closet_meta["entities"] = entities
-            purge_file_closets(closets_col, source_file)
-            upsert_closet_lines(closets_col, closet_id_base, closet_lines, closet_meta)
+            if receipt is not None:
+                receipt.set_expected(drawers=len(chunks), items=len(receipt.outputs))
+                if prior is not None:
+                    receipt.record_invalidation(prior, reason="source-rewrite-purge")
+                stage = "complete"
+                receipt.complete()
+                receipt.store.finalize_rewrite_recovery(
+                    receipt.source["identity"],
+                    receipt.receipt_id,
+                    collections={
+                        "drawers": collection,
+                        **({"closets": closets_col} if closets_col is not None else {}),
+                    },
+                )
+        except BaseException as exc:
+            if receipt is not None and receipt.state not in {"COMPLETE", "ABORT", "FAIL"}:
+                if mutated or incomplete_purge is not None:
+                    try:
+                        _rollback_file_mutations(
+                            receipt,
+                            mutated,
+                            recovery_path=recovery_path,
+                            collections={
+                                "drawers": collection,
+                                **({"closets": closets_col} if closets_col is not None else {}),
+                            },
+                            incomplete_purge=incomplete_purge,
+                        )
+                    except ReceiptError as rollback_exc:
+                        receipt.fail(rollback_exc, stage="rollback-existing")
+                        raise rollback_exc from exc
+                if isinstance(exc, Exception):
+                    receipt.fail(exc, stage=stage)
+            raise
+    return drawers_added, False
 
-    return drawers_added, room
+
+def _complete_zero_output(
+    *,
+    receipt: SourceWriteReceiptSession,
+    collection,
+    closets_col,
+    source_file: str,
+    lock_held: bool = False,
+    source_aliases: tuple[str, ...] = (),
+) -> None:
+    """Purge every prior representation before asserting managed zero output."""
+    receipt.set_expected(drawers=0)
+    lock_context = nullcontext() if lock_held else mine_lock(os.path.normcase(source_file))
+    with lock_context:
+        if _reuse_verified_receipt(
+            receipt,
+            collection,
+            closets_col,
+            source_file=source_file,
+            source_aliases=source_aliases,
+        ):
+            return
+
+        prior = _current_prior_receipt(receipt)
+        if prior is not None:
+            _supersede_prior_receipt(receipt, prior)
+
+        mutated: list[tuple[str, object, object]] = []
+        incomplete_purge: Optional[tuple[str, object, object]] = None
+        recovery_path = None
+        stage = "snapshot-existing"
+        try:
+            receipt.running("snapshotting-existing")
+            drawer_snapshot = snapshot_managed_source_rows(
+                collection,
+                source_file=source_file,
+                source_identity=receipt.source["identity"],
+                local_path=True,
+                source_aliases=source_aliases,
+            )
+            closet_snapshot = None
+            if closets_col is not None:
+                closet_snapshot = snapshot_managed_source_rows(
+                    closets_col,
+                    source_file=source_file,
+                    source_identity=receipt.source["identity"],
+                    local_path=True,
+                    source_aliases=source_aliases,
+                )
+
+            recovery_snapshots = {"drawers": drawer_snapshot}
+            if closet_snapshot is not None:
+                recovery_snapshots["closets"] = closet_snapshot
+            recovery_path = receipt.store.prepare_rewrite_recovery(
+                session=receipt,
+                snapshots=recovery_snapshots,
+                source_file=source_file,
+                local_path=True,
+                source_aliases=source_aliases,
+                previous_receipt=prior,
+            )
+            receipt.running("recovery-prepared")
+
+            receipt.running("purging-existing")
+            stage = "purge-existing-drawers"
+            incomplete_purge = ("drawers", collection, drawer_snapshot)
+            purge_managed_source_snapshot(
+                collection,
+                drawer_snapshot,
+                recovery_path=recovery_path,
+                collection_name="drawers",
+                source_file=source_file,
+                source_identity=receipt.source["identity"],
+                local_path=True,
+                source_aliases=source_aliases,
+            )
+            incomplete_purge = None
+            mutated.append(("drawers", collection, drawer_snapshot))
+            if closets_col is not None:
+                stage = "purge-existing-closets"
+                incomplete_purge = ("closets", closets_col, closet_snapshot)
+                purge_managed_source_snapshot(
+                    closets_col,
+                    closet_snapshot,
+                    recovery_path=recovery_path,
+                    collection_name="closets",
+                    source_file=source_file,
+                    source_identity=receipt.source["identity"],
+                    local_path=True,
+                    source_aliases=source_aliases,
+                )
+                incomplete_purge = None
+                mutated.append(("closets", closets_col, closet_snapshot))
+
+            if prior is not None:
+                receipt.record_invalidation(prior, reason="source-zero-output-purge")
+            stage = "complete"
+            receipt.complete(disposition="ZERO_OUTPUT")
+            receipt.store.finalize_rewrite_recovery(
+                receipt.source["identity"],
+                receipt.receipt_id,
+                collections={
+                    "drawers": collection,
+                    **({"closets": closets_col} if closets_col is not None else {}),
+                },
+            )
+        except BaseException as exc:
+            if receipt.state not in {"COMPLETE", "ABORT", "FAIL"}:
+                if mutated or incomplete_purge is not None:
+                    try:
+                        _rollback_file_mutations(
+                            receipt,
+                            mutated,
+                            recovery_path=recovery_path,
+                            collections={
+                                "drawers": collection,
+                                **({"closets": closets_col} if closets_col is not None else {}),
+                            },
+                            incomplete_purge=incomplete_purge,
+                        )
+                    except ReceiptError as rollback_exc:
+                        receipt.fail(rollback_exc, stage="rollback-existing")
+                        raise rollback_exc from exc
+                if isinstance(exc, Exception):
+                    receipt.fail(exc, stage=stage)
+            raise
+
+
+def _current_prior_receipt(receipt: SourceWriteReceiptSession) -> Optional[dict]:
+    """Resolve the latest predecessor after acquiring the per-source lock."""
+    return receipt.store.find_current(receipt.source["identity"]) or receipt.previous_complete
+
+
+def _supersede_prior_receipt(
+    receipt: SourceWriteReceiptSession,
+    prior: dict,
+) -> None:
+    reason = (
+        "source-version-changed"
+        if prior.get("source", {}).get("version_hash") != receipt.source["version_hash"]
+        else "representation-or-config-changed"
+    )
+    receipt.supersede(prior, reason=reason)
+
+
+def _reuse_verified_receipt(
+    receipt: SourceWriteReceiptSession,
+    collection,
+    closets_col=None,
+    *,
+    source_file: str,
+    source_aliases: tuple[str, ...] = (),
+) -> bool:
+    """Reuse content only after rebinding every row to the new receipt."""
+    prior = receipt.store.find_current(
+        receipt.source["identity"],
+        content_hash=receipt.source["content_hash"],
+        version_digest=receipt.source["version_hash"],
+        config_digest=receipt.run.config_digest,
+    )
+    if prior is None:
+        return False
+    output_collections = {
+        item.get("collection") for item in prior.get("outputs", {}).get("identities", [])
+    }
+    if "closets" in output_collections and closets_col is None:
+        raise ReceiptIdentityError(
+            "managed project receipt includes closets but no closet collection was supplied"
+        )
+    if (
+        closets_col is not None
+        and prior.get("disposition") != "ZERO_OUTPUT"
+        and "drawers" in output_collections
+        and "closets" not in output_collections
+    ):
+        return False
+    try:
+        collections = {"drawers": collection}
+        if closets_col is not None:
+            collections["closets"] = closets_col
+        result = verify_receipt(
+            prior,
+            collections=collections,
+            current_source_content_hash=receipt.source["content_hash"],
+            store=receipt.store,
+        )
+    except (ReceiptVerificationError, ValueError):
+        return False
+    if result.status != "represented":
+        return False
+    complete_reused_receipt(
+        receipt,
+        prior,
+        collections=collections,
+        source_file=source_file,
+        local_path=True,
+        source_aliases=source_aliases,
+    )
+    return True
 
 
 # =============================================================================
@@ -1017,7 +1568,7 @@ def mine(
         )
 
     try:
-        with mine_palace_lock(palace_path):
+        with managed_write_scope(palace_path, lock_factory=mine_palace_lock):
             return _mine_impl(
                 project_dir,
                 palace_path,
@@ -1085,9 +1636,29 @@ def _mine_impl(
     if not dry_run:
         collection = get_collection(palace_path)
         closets_col = get_closets_collection(palace_path)
+        receipt_store = ReceiptStore(palace_path)
+        receipt_store.reconcile_pending_rewrites({"drawers": collection, "closets": closets_col})
+        receipt_run = receipt_store.create_run(
+            caller=agent,
+            mode="project",
+            config={
+                "pipeline": "filesystem",
+                "wing": wing,
+                "rooms": rooms,
+                "normalize_version": NORMALIZE_VERSION,
+                "chunk_size": CHUNK_SIZE,
+                "chunk_overlap": CHUNK_OVERLAP,
+                "managed_output_collections": ["closets", "drawers"],
+                "respect_gitignore": respect_gitignore,
+                "include_ignored": sorted(normalize_include_paths(include_ignored)),
+                "limit": limit,
+            },
+        )
     else:
         collection = None
         closets_col = None
+        receipt_store = None
+        receipt_run = None
 
     total_drawers = 0
     files_skipped = 0
@@ -1107,6 +1678,8 @@ def _mine_impl(
                     agent=agent,
                     dry_run=dry_run,
                     closets_col=closets_col,
+                    receipt_store=receipt_store,
+                    receipt_run=receipt_run,
                 )
             except KeyboardInterrupt:
                 # Re-raise so the outer handler prints the summary; we

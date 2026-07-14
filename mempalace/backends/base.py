@@ -54,6 +54,10 @@ class EmbedderIdentityMismatchError(BackendError):
     """Raised when the stored embedder model name differs from the current one."""
 
 
+class EmbeddingVisibilityError(BackendError):
+    """Raised when exact vectors are temporarily absent from a backend read view."""
+
+
 # ---------------------------------------------------------------------------
 # Value objects
 # ---------------------------------------------------------------------------

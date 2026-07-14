@@ -137,6 +137,25 @@ cross-wing navigation, drawer management, and agent diaries. Installation
 and the full tool list:
 [mempalaceofficial.com/reference/mcp-tools](https://mempalaceofficial.com/reference/mcp-tools.html).
 
+The `mempalace-mcp` command remains the direct stdio transport. A native,
+authenticated loopback Streamable HTTP transport is available on Python 3.10+:
+
+```bash
+pip install "mempalace[mcp-http]"
+mempalace-mcp-http
+```
+
+Set `MEMPALACE_MCP_TOKEN` (or the existing `MEMSYS_MEMPALACE_TOKEN`) in the
+process environment first. The server binds to `127.0.0.1:8787/mcp` by
+default and does not accept a token on the command line. Authenticated
+`GET /healthz` preserves the MemSys operator-process probe; functional
+readiness still requires MCP initialize, tool listing, and a read-only call.
+The HTTP extra is compatibility-pinned to MCP Python SDK 1.28.1; session caps
+are process-local, the shipped command starts one Uvicorn process, and backend
+tool calls are serialized by default (`--max-concurrency 1`) even when several
+MCP clients hold sessions concurrently. Raising backend concurrency requires a
+separate Chroma safety proof; it is not needed to test concurrent sessions.
+
 ## Agents
 
 Each specialist agent gets its own wing and diary in the palace.

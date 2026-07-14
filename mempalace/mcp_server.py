@@ -46,8 +46,10 @@ import argparse  # noqa: E402  (deferred until after stdio protection above)
 import json  # noqa: E402
 import logging  # noqa: E402
 import hashlib  # noqa: E402
+import threading  # noqa: E402
 import time  # noqa: E402
 from datetime import date, datetime  # noqa: E402
+from functools import wraps  # noqa: E402
 from pathlib import Path  # noqa: E402
 from typing import Optional  # noqa: E402
 
@@ -70,10 +72,21 @@ from .backends.chroma import (  # noqa: E402
     ChromaCollection,
     _HNSW_BLOAT_GUARD,
     _pin_hnsw_threads,
+    _vector_segment_id,
     hnsw_capacity_status,
 )
 from .query_sanitizer import sanitize_query  # noqa: E402
 from .searcher import search_memories  # noqa: E402
+from .palace import MineAlreadyRunning, mine_palace_lock  # noqa: E402
+from .write_receipts import (  # noqa: E402
+    _collection_rows_for_ids,
+    managed_write_scope,
+)
+from .mcp_dispatch import (  # noqa: E402
+    ToolDispatchError,
+    dispatch_tool,
+    list_tool_specs,
+)
 from .palace_graph import (  # noqa: E402
     traverse,
     find_tunnels,
@@ -119,6 +132,7 @@ else:
 
 _client_cache = None
 _collection_cache = None
+_collection_cache_lock = threading.RLock()
 _palace_db_inode = 0  # inode of chroma.sqlite3 at cache time
 _palace_db_mtime = 0.0  # mtime of chroma.sqlite3 at cache time
 
@@ -135,41 +149,202 @@ _vector_disabled_reason = ""
 # parsing happy — PEP 604 unions in annotations only became unconditional
 # at module-eval time in 3.10.
 _vector_capacity_status: Optional[dict] = None
+_HNSW_CAPACITY_CACHE_TTL_SECONDS = 5.0
+_HNSW_CAPACITY_WAITER_TIMEOUT_SECONDS = 5.0
+_HNSW_CAPACITY_PROBE_TIMEOUT_SECONDS = 5.0
+_hnsw_capacity_condition = threading.Condition()
+_hnsw_capacity_cache: dict = {}
+_hnsw_capacity_inflight: dict = {}
+_hnsw_capacity_generation = 0
 
 
-def _refresh_vector_disabled_flag() -> None:
+def _file_cache_identity(path: str) -> tuple:
+    try:
+        stat = os.stat(path)
+        return (stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        return (None, None, None, None)
+
+
+def _hnsw_capacity_probe_key(palace_path: str, collection_name: str) -> tuple:
+    db_path = os.path.join(palace_path, "chroma.sqlite3")
+    try:
+        segment_id = _vector_segment_id(palace_path, collection_name)
+    except Exception:
+        segment_id = None
+    metadata_path = (
+        os.path.join(palace_path, segment_id, "index_metadata.pickle")
+        if segment_id is not None
+        else ""
+    )
+    return (
+        os.path.normcase(os.path.realpath(palace_path)),
+        collection_name,
+        *_file_cache_identity(db_path),
+        segment_id,
+        *_file_cache_identity(metadata_path),
+        _hnsw_capacity_generation,
+    )
+
+
+def _probe_unavailable_status(message: str) -> dict:
+    return {
+        "segment_id": None,
+        "sqlite_count": None,
+        "hnsw_count": None,
+        "divergence": None,
+        "diverged": True,
+        "status": "probe-unavailable",
+        "message": message,
+    }
+
+
+def _run_hnsw_capacity_probe(
+    key: tuple,
+    flight_key: tuple,
+    token: object,
+    palace_path: str,
+    collection_name: str,
+) -> None:
+    try:
+        info = hnsw_capacity_status(palace_path, collection_name)
+        if not isinstance(info, dict):
+            raise TypeError("HNSW capacity probe returned a non-object result")
+        resolved = dict(info)
+    except Exception as exc:
+        logger.debug("HNSW capacity probe raised", exc_info=True)
+        resolved = _probe_unavailable_status(
+            f"HNSW capacity probe failed ({type(exc).__name__}); vector search is disabled"
+        )
+    with _hnsw_capacity_condition:
+        flight = _hnsw_capacity_inflight.get(flight_key)
+        if flight is None or flight["token"] is not token or flight["key"] != key:
+            return
+        _hnsw_capacity_cache[key] = (time.monotonic(), dict(resolved))
+        if len(_hnsw_capacity_cache) > 8:
+            oldest = min(
+                _hnsw_capacity_cache,
+                key=lambda item: _hnsw_capacity_cache[item][0],
+            )
+            if oldest != key:
+                _hnsw_capacity_cache.pop(oldest, None)
+        _hnsw_capacity_inflight.pop(flight_key, None)
+        _hnsw_capacity_condition.notify_all()
+
+
+def _cached_hnsw_capacity_status(
+    palace_path: str,
+    collection_name: str,
+    *,
+    wait_timeout: Optional[float] = _HNSW_CAPACITY_WAITER_TIMEOUT_SECONDS,
+) -> dict:
+    """Return one fresh probe per DB identity, coalescing concurrent callers.
+
+    Every caller uses a daemon probe and a bounded lease. A stuck probe cannot
+    hold the serial flight forever, and a late result from an expired flight is
+    ignored instead of becoming fresh evidence.
+    """
+    key = _hnsw_capacity_probe_key(palace_path, collection_name)
+    flight_key = key[:2]
+    resolved_wait = _HNSW_CAPACITY_WAITER_TIMEOUT_SECONDS if wait_timeout is None else wait_timeout
+    deadline = time.monotonic() + max(0.0, resolved_wait)
+    with _hnsw_capacity_condition:
+        while True:
+            cached = _hnsw_capacity_cache.get(key)
+            if cached is not None:
+                age = time.monotonic() - cached[0]
+                if age <= _HNSW_CAPACITY_CACHE_TTL_SECONDS:
+                    current_key = _hnsw_capacity_probe_key(palace_path, collection_name)
+                    if current_key != key:
+                        key = current_key
+                        flight_key = key[:2]
+                        continue
+                    return dict(cached[1])
+            now = time.monotonic()
+            flight = _hnsw_capacity_inflight.get(flight_key)
+            if flight is not None and (flight["key"] != key or now >= flight["expires_at"]):
+                _hnsw_capacity_inflight.pop(flight_key, None)
+                _hnsw_capacity_condition.notify_all()
+                if flight["key"] == key:
+                    return _probe_unavailable_status(
+                        "HNSW capacity probe exceeded its bounded lifetime; "
+                        "vector search is disabled until fresh capacity evidence is available"
+                    )
+                flight = None
+            if flight is None:
+                token = object()
+                flight = {
+                    "token": token,
+                    "key": key,
+                    "expires_at": now + _HNSW_CAPACITY_PROBE_TIMEOUT_SECONDS,
+                }
+                _hnsw_capacity_inflight[flight_key] = flight
+                try:
+                    threading.Thread(
+                        target=_run_hnsw_capacity_probe,
+                        args=(key, flight_key, token, palace_path, collection_name),
+                        name="mempalace-hnsw-capacity-probe",
+                        daemon=True,
+                    ).start()
+                except RuntimeError:
+                    _hnsw_capacity_inflight.pop(flight_key, None)
+                    return _probe_unavailable_status(
+                        "HNSW capacity probe worker could not start; vector search is disabled"
+                    )
+            remaining = min(deadline, flight["expires_at"]) - time.monotonic()
+            if remaining <= 0:
+                return _probe_unavailable_status(
+                    "HNSW capacity probe is still running; vector search is disabled "
+                    "until fresh capacity evidence is available"
+                )
+            _hnsw_capacity_condition.wait(timeout=remaining)
+
+
+def _invalidate_hnsw_capacity_probe_cache() -> None:
+    """Invalidate completed evidence without disrupting an active probe."""
+    global _hnsw_capacity_generation
+    with _hnsw_capacity_condition:
+        _hnsw_capacity_cache.clear()
+        _hnsw_capacity_generation += 1
+
+
+def _refresh_vector_disabled_flag(
+    *,
+    wait_timeout: Optional[float] = _HNSW_CAPACITY_WAITER_TIMEOUT_SECONDS,
+) -> None:
     """Re-run the HNSW capacity probe and update the module-level flag.
 
-    Called from :func:`_get_client` whenever the client cache is rebuilt
-    (first open or palace replacement). Cheap — pure sqlite + pickle
-    read, no chromadb interaction. Never raises: a probe that crashes
-    would defeat the point.
+    The underlying sqlite/pickle scan is single-flight and briefly cached by
+    database identity. It never opens Chroma. Probe failure or waiter timeout
+    fails closed by keeping vector search disabled.
     """
     global _vector_disabled, _vector_disabled_reason, _vector_capacity_status
-    try:
-        info = hnsw_capacity_status(_config.palace_path, "mempalace_drawers")
-    except Exception:
-        logger.debug("HNSW capacity probe raised", exc_info=True)
-        return
-    _vector_capacity_status = info
-    if info.get("diverged"):
-        if not _vector_disabled:
-            logger.warning(
-                "HNSW capacity divergence detected (%s) — routing search to "
-                "BM25-only sqlite fallback. Run `mempalace repair` to restore "
-                "vector search.",
-                info.get("message", "unknown"),
-            )
-        _vector_disabled = True
-        _vector_disabled_reason = info.get("message", "")
-    else:
-        if _vector_disabled:
-            logger.info(
-                "HNSW capacity within tolerance (%s) — vector search re-enabled",
-                info.get("message", ""),
-            )
-        _vector_disabled = False
-        _vector_disabled_reason = ""
+    info = _cached_hnsw_capacity_status(
+        _config.palace_path,
+        "mempalace_drawers",
+        wait_timeout=wait_timeout,
+    )
+    with _hnsw_capacity_condition:
+        _vector_capacity_status = info
+        healthy = info.get("status") == "ok" and info.get("diverged") is False
+        if not healthy:
+            if not _vector_disabled:
+                logger.warning(
+                    "HNSW capacity is not proven healthy (%s) — routing search to "
+                    "BM25-only sqlite fallback. Run `mempalace repair` to restore "
+                    "vector search.",
+                    info.get("message", "unknown"),
+                )
+            _vector_disabled = True
+            _vector_disabled_reason = info.get("message", "")
+        else:
+            if _vector_disabled:
+                logger.info(
+                    "HNSW capacity within tolerance (%s) — vector search re-enabled",
+                    info.get("message", ""),
+                )
+            _vector_disabled = False
+            _vector_disabled_reason = ""
 
 
 # ==================== WRITE-AHEAD LOG ====================
@@ -223,6 +398,12 @@ def _wal_log(operation: str, params: dict, result: dict = None):
 
 
 def _get_client():
+    """Serialize client identity checks and construction within this process."""
+    with _collection_cache_lock:
+        return _get_client_locked()
+
+
+def _get_client_locked():
     """Return a ChromaDB PersistentClient, reconnecting if the database changed on disk.
 
     Detects palace rebuilds (repair/nuke/purge) by checking the inode of
@@ -270,16 +451,36 @@ def _get_client():
         # the whole MCP server (#1222). The probe is pure sqlite +
         # metadata-pickle read; never touches the HNSW binary files.
         _refresh_vector_disabled_flag()
+        if _vector_disabled:
+            raise RuntimeError(_vector_disabled_reason or "HNSW capacity is not proven healthy")
         _client_cache = ChromaBackend.make_client(_config.palace_path)
         _collection_cache = None
         _metadata_cache = None
         _metadata_cache_time = 0
-        _palace_db_inode = current_inode
-        _palace_db_mtime = current_mtime
+        _record_palace_db_identity()
     return _client_cache
 
 
+def _record_palace_db_identity() -> None:
+    """Record DB identity after local Chroma open/pinning mutations settle."""
+    global _palace_db_inode, _palace_db_mtime
+    db_path = os.path.join(_config.palace_path, "chroma.sqlite3")
+    try:
+        stat = os.stat(db_path)
+        _palace_db_inode = stat.st_ino
+        _palace_db_mtime = stat.st_mtime
+    except OSError:
+        _palace_db_inode = 0
+        _palace_db_mtime = 0.0
+
+
 def _get_collection(create=False, with_embedding=True):
+    """Serialize Chroma collection open/pinning and return the process cache."""
+    with _collection_cache_lock:
+        return _get_collection_locked(create=create, with_embedding=with_embedding)
+
+
+def _get_collection_locked(create=False, with_embedding=True):
     """Return the ChromaDB collection, caching the client between calls."""
     global _collection_cache, _metadata_cache, _metadata_cache_time
     try:
@@ -331,6 +532,7 @@ def _get_collection(create=False, with_embedding=True):
                 )
             _pin_hnsw_threads(raw)
             _collection_cache = ChromaCollection(raw)
+            _record_palace_db_identity()
             _metadata_cache = None
             _metadata_cache_time = 0
         elif _collection_cache is None:
@@ -341,6 +543,7 @@ def _get_collection(create=False, with_embedding=True):
             raw = client.get_collection(_config.collection_name, **ef_kwargs)
             _pin_hnsw_threads(raw)
             _collection_cache = ChromaCollection(raw)
+            _record_palace_db_identity()
             _metadata_cache = None
             _metadata_cache_time = 0
         return _collection_cache
@@ -826,6 +1029,28 @@ def tool_follow_tunnels(wing: str, room: str):
 # ==================== WRITE TOOLS ====================
 
 
+def _serialized_palace_mutation(handler):
+    """Coordinate MCP mutations with managed receipt writers for this palace."""
+    if getattr(handler, "_mempalace_serialized_mutation", False):
+        return handler
+
+    @wraps(handler)
+    def guarded(*args, **kwargs):
+        try:
+            with managed_write_scope(_config.palace_path, lock_factory=mine_palace_lock):
+                return handler(*args, **kwargs)
+        except MineAlreadyRunning as exc:
+            return {
+                "success": False,
+                "busy": True,
+                "error": str(exc),
+            }
+
+    guarded._mempalace_serialized_mutation = True
+    return guarded
+
+
+@_serialized_palace_mutation
 def tool_add_drawer(
     wing: str, room: str, content: str, source_file: str = None, added_by: str = "mcp"
 ):
@@ -858,29 +1083,43 @@ def tool_add_drawer(
         },
     )
 
-    # Idempotency: if the deterministic ID already exists, return success as a no-op.
     try:
-        existing = col.get(ids=[drawer_id])
-        if existing and existing["ids"]:
-            return {"success": True, "reason": "already_exists", "drawer_id": drawer_id}
-    except Exception:
-        pass
+        existing = _collection_rows_for_ids(
+            col,
+            [drawer_id],
+            require_all=False,
+            include_embeddings=True,
+        )
+        if drawer_id in existing:
+            existing_document, existing_metadata, _ = existing[drawer_id]
+            if (
+                existing_document == content
+                and existing_metadata.get("wing") == wing
+                and existing_metadata.get("room") == room
+                and existing_metadata.get("source_file", "") == (source_file or "")
+            ):
+                return {"success": True, "reason": "already_exists", "drawer_id": drawer_id}
+            return {
+                "success": False,
+                "error": f"Drawer ID already represents different content: {drawer_id}",
+            }
 
-    try:
-        col.upsert(
+        metadata = {
+            "wing": wing,
+            "room": room,
+            "source_file": source_file or "",
+            "chunk_index": 0,
+            "added_by": added_by,
+            "filed_at": datetime.now().isoformat(),
+        }
+        col.add(
             ids=[drawer_id],
             documents=[content],
-            metadatas=[
-                {
-                    "wing": wing,
-                    "room": room,
-                    "source_file": source_file or "",
-                    "chunk_index": 0,
-                    "added_by": added_by,
-                    "filed_at": datetime.now().isoformat(),
-                }
-            ],
+            metadatas=[metadata],
         )
+        readback = _collection_rows_for_ids(col, [drawer_id])
+        if readback.get(drawer_id, (None, None, None))[:2] != (content, metadata):
+            raise RuntimeError("drawer add exact readback did not match")
         _metadata_cache = None
         logger.info(f"Filed drawer: {drawer_id} → {wing}/{room}")
         return {"success": True, "drawer_id": drawer_id, "wing": wing, "room": room}
@@ -888,19 +1127,24 @@ def tool_add_drawer(
         return {"success": False, "error": str(e)}
 
 
+@_serialized_palace_mutation
 def tool_delete_drawer(drawer_id: str):
     """Delete a single drawer by ID."""
     global _metadata_cache
     col = _get_collection()
     if not col:
         return _no_palace()
-    existing = col.get(ids=[drawer_id])
-    if not existing["ids"]:
+    existing = _collection_rows_for_ids(
+        col,
+        [drawer_id],
+        require_all=False,
+        include_embeddings=True,
+    )
+    if drawer_id not in existing:
         return {"success": False, "error": f"Drawer not found: {drawer_id}"}
 
     # Log the deletion with the content being removed for audit trail
-    deleted_content = existing.get("documents", [""])[0] if existing.get("documents") else ""
-    deleted_meta = existing.get("metadatas", [{}])[0] if existing.get("metadatas") else {}
+    deleted_content, deleted_meta, _ = existing[drawer_id]
     _wal_log(
         "delete_drawer",
         {
@@ -911,7 +1155,17 @@ def tool_delete_drawer(drawer_id: str):
     )
 
     try:
+        final = _collection_rows_for_ids(
+            col,
+            [drawer_id],
+            require_all=False,
+            include_embeddings=True,
+        )
+        if final.get(drawer_id) != existing[drawer_id]:
+            raise RuntimeError("drawer identity changed before deletion; refusing delete")
         col.delete(ids=[drawer_id])
+        if _collection_rows_for_ids(col, [drawer_id], require_all=False):
+            raise RuntimeError("drawer deletion did not remove the exact target")
         _metadata_cache = None
         logger.info(f"Deleted drawer: {drawer_id}")
         return {"success": True, "drawer_id": drawer_id}
@@ -1001,6 +1255,7 @@ def tool_list_drawers(wing: str = None, room: str = None, limit: int = 20, offse
         return {"error": str(e)}
 
 
+@_serialized_palace_mutation
 def tool_update_drawer(drawer_id: str, content: str = None, wing: str = None, room: str = None):
     """Update an existing drawer's content and/or metadata."""
     global _metadata_cache
@@ -1012,12 +1267,16 @@ def tool_update_drawer(drawer_id: str, content: str = None, wing: str = None, ro
     if not col:
         return _no_palace()
     try:
-        existing = col.get(ids=[drawer_id], include=["documents", "metadatas"])
-        if not existing["ids"]:
+        existing = _collection_rows_for_ids(
+            col,
+            [drawer_id],
+            require_all=False,
+            include_embeddings=True,
+        )
+        if drawer_id not in existing:
             return {"success": False, "error": f"Drawer not found: {drawer_id}"}
 
-        old_meta = existing["metadatas"][0]
-        old_doc = existing["documents"][0]
+        old_doc, old_meta, old_embedding = existing[drawer_id]
 
         new_doc = old_doc
         if content is not None:
@@ -1055,7 +1314,26 @@ def tool_update_drawer(drawer_id: str, content: str = None, wing: str = None, ro
         if content is not None:
             update_kwargs["documents"] = [new_doc]
         update_kwargs["metadatas"] = [new_meta]
+        final = _collection_rows_for_ids(
+            col,
+            [drawer_id],
+            require_all=False,
+            include_embeddings=True,
+        )
+        if final.get(drawer_id) != existing[drawer_id]:
+            raise RuntimeError("drawer identity changed before update; refusing overwrite")
         col.update(**update_kwargs)
+
+        readback = _collection_rows_for_ids(
+            col,
+            [drawer_id],
+            include_embeddings=content is None,
+        )
+        actual_doc, actual_meta, actual_embedding = readback[drawer_id]
+        if actual_doc != new_doc or actual_meta != new_meta:
+            raise RuntimeError("drawer update exact readback did not match")
+        if content is None and actual_embedding != old_embedding:
+            raise RuntimeError("drawer metadata update changed its embedding identity")
 
         _metadata_cache = None
 
@@ -1439,6 +1717,7 @@ def tool_reconnect():
     # still applies after the reconnect.
     _vector_disabled = False
     _vector_disabled_reason = ""
+    _invalidate_hnsw_capacity_probe_cache()
     try:
         col = _get_collection()
         if col is None:
@@ -1460,6 +1739,17 @@ def tool_reconnect():
 
 
 # ==================== MCP PROTOCOL ====================
+
+# Durable MCP palace mutations share the same exclusive process/cross-process
+# boundary as managed source rewrites. Chroma still does not provide a backend
+# transaction across read predicates and mutation, so exact row rechecks above
+# remain mandatory inside this strongest process-local boundary.
+tool_create_tunnel = _serialized_palace_mutation(tool_create_tunnel)
+tool_delete_tunnel = _serialized_palace_mutation(tool_delete_tunnel)
+tool_kg_add = _serialized_palace_mutation(tool_kg_add)
+tool_kg_invalidate = _serialized_palace_mutation(tool_kg_invalidate)
+tool_diary_write = _serialized_palace_mutation(tool_diary_write)
+tool_reconnect = _serialized_palace_mutation(tool_reconnect)
 
 TOOLS = {
     "mempalace_status": {
@@ -1938,63 +2228,23 @@ def handle_request(request):
         return {
             "jsonrpc": "2.0",
             "id": req_id,
-            "result": {
-                "tools": [
-                    {"name": n, "description": t["description"], "inputSchema": t["input_schema"]}
-                    for n, t in TOOLS.items()
-                ]
-            },
+            "result": {"tools": list_tool_specs(TOOLS)},
         }
     elif method == "tools/call":
         tool_name = params.get("name")
         tool_args = params.get("arguments") or {}
-        if tool_name not in TOOLS:
-            return {
-                "jsonrpc": "2.0",
-                "id": req_id,
-                "error": {"code": -32601, "message": f"Unknown tool: {tool_name}"},
-            }
-        # Whitelist arguments to declared schema properties only.
-        # Prevents callers from spoofing internal params like added_by/source_file.
-        # Skip filtering if handler explicitly accepts **kwargs (pass-through).
-        # Default to filtering on inspect failure (safe fallback).
-        import inspect
-
-        schema_props = TOOLS[tool_name]["input_schema"].get("properties", {})
         try:
-            handler = TOOLS[tool_name]["handler"]
-            sig = inspect.signature(handler)
-            accepts_var_keyword = any(
-                p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
-            )
-        except (ValueError, TypeError):
-            accepts_var_keyword = False
-        if not accepts_var_keyword:
-            tool_args = {k: v for k, v in tool_args.items() if k in schema_props}
-        # Coerce argument types based on input_schema.
-        # MCP JSON transport may deliver integers as floats or strings;
-        # ChromaDB and Python slicing require native int.
-        for key, value in list(tool_args.items()):
-            prop_schema = schema_props.get(key, {})
-            declared_type = prop_schema.get("type")
-            try:
-                if declared_type == "integer" and not isinstance(value, int):
-                    tool_args[key] = int(value)
-                elif declared_type == "number" and not isinstance(value, (int, float)):
-                    tool_args[key] = float(value)
-            except (ValueError, TypeError):
-                return {
-                    "jsonrpc": "2.0",
-                    "id": req_id,
-                    "error": {"code": -32602, "message": f"Invalid value for parameter '{key}'"},
-                }
-        try:
-            tool_args.pop("wait_for_previous", None)
-            result = TOOLS[tool_name]["handler"](**tool_args)
+            result = dispatch_tool(TOOLS, tool_name, tool_args)
             return {
                 "jsonrpc": "2.0",
                 "id": req_id,
                 "result": {"content": [{"type": "text", "text": json.dumps(result, indent=2)}]},
+            }
+        except ToolDispatchError as exc:
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "error": {"code": exc.code, "message": str(exc)},
             }
         except Exception:
             logger.exception(f"Tool error in {tool_name}")
@@ -2033,7 +2283,7 @@ def main():
     # Pre-flight: probe HNSW capacity before any tool call so the warning
     # is visible at startup rather than on first use (#1222). Pure
     # filesystem read; never opens a chromadb client.
-    _refresh_vector_disabled_flag()
+    _refresh_vector_disabled_flag(wait_timeout=None)
     while True:
         try:
             line = sys.stdin.readline()

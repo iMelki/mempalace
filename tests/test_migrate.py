@@ -49,6 +49,34 @@ def test_migrate_aborts_without_confirmation(tmp_path, capsys):
     mock_rmtree.assert_not_called()
 
 
+def test_migrate_blocks_when_managed_receipt_state_exists(tmp_path, capsys):
+    palace_dir = tmp_path / "palace"
+    palace_dir.mkdir()
+    (palace_dir / "chroma.sqlite3").write_text("db")
+    receipt_root = palace_dir / ".mempalace" / "write-receipts" / "v1"
+    receipt_root.mkdir(parents=True)
+    (receipt_root / "identity.key").write_bytes(b"x" * 32)
+    mock_chromadb = SimpleNamespace(
+        __version__="0.6.0",
+        PersistentClient=MagicMock(side_effect=Exception("unreadable")),
+    )
+
+    with (
+        patch.dict("sys.modules", {"chromadb": mock_chromadb}),
+        patch("mempalace.migrate.detect_chromadb_version", return_value="0.5.x"),
+        patch("mempalace.migrate.extract_drawers_from_sqlite") as mock_extract,
+        patch("mempalace.migrate.shutil.copytree") as mock_copytree,
+    ):
+        result = migrate(str(palace_dir))
+
+    out = capsys.readouterr().out
+    assert result is False
+    assert "contains managed write receipts" in out
+    assert "cannot preserve receipt provenance" in out
+    mock_extract.assert_not_called()
+    mock_copytree.assert_not_called()
+
+
 def test_restore_stale_palace_with_clean_destination(tmp_path):
     """Rollback when no partial copy exists at palace_path."""
     palace_path = tmp_path / "palace"

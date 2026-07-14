@@ -1,10 +1,69 @@
 # MemPalace Open Tasks
 
-Last updated: 2026-07-07
+Last updated: 2026-07-14
 
 This file is the durable local index for active `mempalace` issues.
 
 ## Active Issues
+
+- [#22 - Add durable source-to-drawer receipts and supervised historical cohort recovery](https://github.com/iMelki/mempalace/issues/22)
+  - Status: the affected `279`-test receipt/transport/backend suite, final
+    repository-wide `1,673`-test release gate, and independent receipt re-review
+    are green. The managed-write foundation is committed on `dev` in `04f5bf3`.
+    Historical recovery remains NO-GO; no historical mining or recovery is
+    authorized.
+  - Fresh read-only audit reconciled 25,448 of 29,449 retained staged source
+    paths exactly. The remaining 4,001 comprise 1,435 bootstrap-only records,
+    2,548 format exclusions, and 18 intact current-rule candidates.
+  - The 18 sources project to 22,220 drawer rows, but none of those projected
+    IDs appears in the current store or retained July snapshots. All 18 exceed
+    the former 10 MiB scan cap, making `probable-never-receipted-current-rule-output`
+    the supported classification. They are not proven deleted or corrupted.
+  - Implemented locally: versioned terminal source-write receipts, exact
+    read-only verification, lock-before-read canonical source handling,
+    non-destructive normalization failure, create-only journal publication,
+    key-continuity checks, index-authoritative predecessor reconciliation,
+    fail-closed OS-durable pre-purge recovery with exact restart restoration,
+    post-publication row-set equality and exact-ID purge,
+    embedding-preserving rollback snapshots, palace-wide managed-adapter
+    and MCP mutation serialization, exact existing-row rechecks including
+    embeddings, managed drawer/closet receipt writes, a non-mutating verifier
+    lookup with mandatory durable COMPLETE markers, dual HMAC/source-file
+    ownership, bounded fail-closed HNSW probes, and a pseudonymized shared
+    projection using per-palace HMAC identities plus bucketed source size.
+  - Local proof: the affected receipt/backend/HTTP/dispatch/server run passes
+    `279` tests with one platform skip. Real-Chroma write readback is exact and
+    bounded; stale or temporarily missing rows are retried for at most two
+    seconds, and file mtimes are normalized to Chroma's six fractional digits
+    before comparison. Exact vectors are read only through Chroma's supported
+    collection API. If the Rust metadata/vector view does not converge inside
+    that window, the managed write fails closed and restores its durable
+    predecessor snapshot; MemPalace no longer opens Chroma's live SQLite/WAL as
+    an in-process fallback.
+  - Explicit remaining scope: receipts are not automatic across the whole
+    product. Migration, repair, dedup, sweep, compression, diary/closet/KG/
+    tunnel writes, MCP drawer mutations, backend open-time repairs, direct
+    collection APIs, and adapters that bypass `managed_adapter_ingest()` remain
+    unmanaged. Legacy `mempalace migrate` now blocks if receipt state exists so
+    it cannot silently discard the journal; adapting or retiring the remaining
+    paths stays in #22.
+  - Next: disposable real-Chroma interruption/restart proof. The separate
+    small-collection durability check is green: three explicit vectors below
+    MemPalace's `50,000` Chroma sync
+    threshold survived final-client close/reopen and matched within `1e-6`
+    float32 tolerance; the corrected disposable run completed in `1.68s` and is
+    now a normal real-Chroma regression. Historical recovery still stays NO-GO
+    until an interrupted managed rewrite is restored and reverified after a
+    true client/process restart. Explicit backend shutdown now calls Chroma's
+    public `close()`. Automatic cache replacement cannot do that safely until
+    collection-handle lifetimes are tracked; closing a replaced client while a
+    caller still held its collection reproduced `RustBindingsAPI` without
+    `bindings` in the full suite, so handle-aware retirement remains in #22.
+    Windows DACL enforcement/readback remains explicitly unproven follow-up;
+    POSIX mode requests are not evidence of an NTFS access-control boundary.
+    Any historical recovery still needs fresh backup/restore proof, a bounded
+    reviewed plan, an exact expected-output manifest, and separate operator
+    approval.
 
 - [#13 - mempalace_mcp_wrapper unconditionally disables real vector search (permanent keyword-only fallback since 2026-04)](https://github.com/iMelki/mempalace/issues/13)
   - Retitled 2026-07-04. The original count-divergence this issue was filed
@@ -90,6 +149,22 @@ This file is the durable local index for active `mempalace` issues.
   - Status: Open (preserved branch `agent/codex/mempalace-search-mcp-wip`).
 
 ## Recently Completed
+
+- [#21 - Implement native loopback Streamable HTTP MCP transport](https://github.com/iMelki/mempalace/issues/21)
+  - 2026-07-14: completed native authenticated Streamable HTTP on
+    `127.0.0.1:8787/mcp`, shared stdio/HTTP dispatch, strict Host/Origin/auth
+    handling, active-aware bounded sessions, and serial-by-default backend
+    calls in commit `04f5bf3`. The full release gate passed `1,673` tests with
+    `7` skips and `106` intentional deselections. Agent-settings selected the
+    native path, retained supergateway only as rollback, and proved an exact
+    attended restart. The four-client live gate passed; sustained artifact
+    `mempalace-attended-native-sustained-burnin-20260714T060927Z.json` then
+    passed six four-client waves over `132.39s` with `24/24` real read-only
+    calls, `24/24` cleanup, zero lingering workers, and one stable bridge
+    identity. Fresh transport decision
+    `mempalace-bridge-transport-readiness-20260714T061355Z` is
+    `native-transport-ready`. Railway and hosted deployment stayed out of
+    scope.
 
 - [#18 - repair-status lacks machine-readable read-only parity artifacts](https://github.com/iMelki/mempalace/issues/18)
   - 2026-07-05: implemented `mempalace repair-status --json` (single JSON

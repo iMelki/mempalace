@@ -18,6 +18,7 @@ except ImportError:  # pragma: no cover - older chromadb versions
 from .base import (
     BaseBackend,
     BaseCollection,
+    EmbeddingVisibilityError,
     GetResult,
     HealthStatus,
     PalaceNotFoundError,
@@ -890,6 +891,26 @@ class ChromaCollection(BaseCollection):
             embeddings=[list(v) for v in out_embeds] if out_embeds is not None else None,
         )
 
+    def get_exact_embeddings(self, ids: list[str]) -> dict[str, tuple[float, ...]]:
+        """Read exact vectors through Chroma's supported collection API."""
+        try:
+            result = self.get(ids=ids, include=["embeddings"])
+        except Exception as exc:
+            message = str(exc)
+            if "Nothing found on disk" in message or "Error finding id" in message:
+                raise EmbeddingVisibilityError(
+                    "Chroma exact embeddings are not yet visible in its vector view"
+                ) from exc
+            raise
+        if result.embeddings is None or len(result.embeddings) != len(result.ids):
+            raise EmbeddingVisibilityError("Chroma did not return the requested exact embeddings")
+        resolved = {
+            item_id: tuple(embedding) for item_id, embedding in zip(result.ids, result.embeddings)
+        }
+        if set(resolved) != set(ids):
+            raise EmbeddingVisibilityError("Chroma exact embedding readback is incomplete")
+        return resolved
+
     def delete(self, *, ids=None, where=None):
         _validate_where(where)
         kwargs: dict[str, Any] = {}
@@ -981,6 +1002,13 @@ class ChromaBackend(BaseBackend):
             return (st.st_ino, st.st_mtime)
         except OSError:
             return (0, 0.0)
+
+    @staticmethod
+    def _close_client(client: Any) -> None:
+        """Release a cached Chroma client through its supported lifecycle API."""
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
 
     def _client(self, palace_path: str):
         """Return a cached ``PersistentClient``, rebuilding on inode/mtime change.
@@ -1168,17 +1196,22 @@ class ChromaBackend(BaseBackend):
         return ChromaCollection(collection)
 
     def close_palace(self, palace) -> None:
-        """Drop cached handles for ``palace``. Accepts ``PalaceRef`` or legacy path str."""
+        """Close cached handles for ``palace``. Accepts ``PalaceRef`` or legacy path str."""
         path = palace.local_path if isinstance(palace, PalaceRef) else palace
         if path is None:
             return
-        self._clients.pop(path, None)
+        client = self._clients.pop(path, None)
         self._freshness.pop(path, None)
+        if client is not None:
+            self._close_client(client)
 
     def close(self) -> None:
+        clients = tuple({id(client): client for client in self._clients.values()}.values())
         self._clients.clear()
         self._freshness.clear()
         self._closed = True
+        for client in clients:
+            self._close_client(client)
 
     def health(self, palace: Optional[PalaceRef] = None) -> HealthStatus:
         if self._closed:
