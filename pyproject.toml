@@ -1,7 +1,7 @@
 [project]
 name = "mempalace"
 version = "3.3.4"
-description = "Give your AI a memory ╬ô├ç├╢ mine projects and conversations into a searchable palace. No API key required."
+description = "Give your AI a memory - mine projects and conversations into a searchable palace. No API key required."
 readme = "README.md"
 requires-python = ">=3.9"
 license = "MIT"
@@ -48,7 +48,7 @@ chroma = "mempalace.backends.chroma:ChromaBackend"
 # RFC 002 source-adapter entry-point group. Core publishes no first-party
 # adapters under this group yet; ``miner.py`` and ``convo_miner.py`` migrate
 # onto ``BaseSourceAdapter`` in a follow-up PR. Third-party adapter packages
-# (``mempalace-source-cursor``, ``mempalace-source-git``, ╬ô├ç┬¬) register here.
+# (``mempalace-source-cursor``, ``mempalace-source-git``, and others) register here.
 [project.entry-points."mempalace.sources"]
 
 [project.optional-dependencies]
@@ -62,9 +62,9 @@ dev = [
 mcp-http = ["mcp==1.28.1; python_version >= '3.10'"]
 spellcheck = ["autocorrect>=2.0"]
 # Hardware acceleration for the ONNX embedding model. Install exactly one:
-#   pip install mempalace[gpu]       ╬ô├ç├╢ NVIDIA CUDA
-#   pip install mempalace[dml]       ╬ô├ç├╢ DirectML (Windows AMD/Intel/NVIDIA)
-#   pip install mempalace[coreml]    ╬ô├ç├╢ macOS Neural Engine
+#   pip install mempalace[gpu]       - NVIDIA CUDA
+#   pip install mempalace[dml]       - DirectML (Windows AMD/Intel/NVIDIA)
+#   pip install mempalace[coreml]    - macOS Neural Engine
 # After install, set MEMPALACE_EMBEDDING_DEVICE=cuda|dml|coreml (or "auto").
 gpu = ["onnxruntime-gpu>=1.16"]
 dml = ["onnxruntime-directml>=1.16"]
