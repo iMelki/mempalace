@@ -76,27 +76,6 @@ This file is the durable local index for active `mempalace` issues.
     reviewed plan, an exact expected-output manifest, and separate operator
     approval.
 
-- [#13 - mempalace_mcp_wrapper unconditionally disables real vector search (permanent keyword-only fallback since 2026-04)](https://github.com/iMelki/mempalace/issues/13)
-  - Retitled 2026-07-04. The original count-divergence this issue was filed
-    for is fixed (see #12, closed): post-replay `repair-status` reports
-    drawers `sqlite=861,715`, `hnsw=850,000`, divergence `11,715`,
-    `status=OK (within flush-lag tolerance)`.
-  - The remaining, bigger problem: live `mempalace_search` still returns
-    `"_search_mode": "text_match"` with note `"Keyword matching (HNSW index
-    unreadable after Rust migration)"`. Root cause is
-    `agent-settings/shared/tools/mempalace_mcp_wrapper.py` (2026-04-20
-    chromadb crash workaround, see
-    `agent-settings/shared/memory/mempalace-mcp-crash-report-2026-04-20.md`):
-    Patch 4 unconditionally replaces `search_memories()` with keyword-only
-    `get(where_document)` regardless of current HNSW readability, and Patch 3
-    skips HNSW init entirely. Semantic/vector search has therefore been
-    silently keyword-only since April 2026, independent of the July replay.
-  - Next: verify on an ISOLATED palace copy (never live — the original
-    failure was a 0xC0000005 segfault) whether current chromadb/mempalace
-    pins can read the rebuilt HNSW files; then relax wrapper patches behind a
-    feature flag, or make the keyword fallback a visible CoreHealth warning
-    instead of a silent note.
-
 - [#19 - Audit likely duplicate drawers surfaced by #13 probe](https://github.com/iMelki/mempalace/issues/19)
   - Status: open go/no-go decision. This is a duplicate-drawer audit and
     dedupe safety lane, not a live deletion approval.
@@ -160,6 +139,15 @@ This file is the durable local index for active `mempalace` issues.
   - Status: Open (preserved branch `agent/codex/mempalace-search-mcp-wip`).
 
 ## Recently Completed
+
+- [#13 - Restore real vector search in the MemPalace wrapper](https://github.com/iMelki/mempalace/issues/13)
+  - 2026-07-07: closed after isolated current-pin proof, a 201-query
+    concurrent load test with zero errors or segfaults, live feature-flag
+    rollout, and a clean soak with no vector faults. Vector search is now the
+    default; `MEMPALACE_WRAPPER_VECTOR_SEARCH=0` is the explicit keyword-only
+    fallback. Final live/CoreHealth evidence reported vector mode and stable
+    HNSW divergence. Retained wrapper compatibility patches are follow-up
+    cleanup, not a functional blocker.
 
 - [#21 - Implement native loopback Streamable HTTP MCP transport](https://github.com/iMelki/mempalace/issues/21)
   - 2026-07-14: completed native authenticated Streamable HTTP on
