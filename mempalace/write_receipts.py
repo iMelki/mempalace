@@ -2484,19 +2484,31 @@ def _delete_filters_for_validated_row(
         conditions.append({META_RECEIPT_ID: receipt_id})
 
     content_hash = metadata.get(META_OUTPUT_CONTENT_HASH)
+    content_hash_matches_document = False
     if content_hash is not None:
         try:
             _require_sha256(content_hash, "validated row content hash")
         except ReceiptIdentityError as exc:
             raise ReceiptRecoveryError("validated row content identity is invalid") from exc
         conditions.append({META_OUTPUT_CONTENT_HASH: content_hash})
+        content_hash_matches_document = hmac.compare_digest(
+            content_hash,
+            sha256_bytes(row.document.encode("utf-8")),
+        )
     elif not row.document:
         raise ReceiptRecoveryError(
             "legacy empty row cannot be content-bound for conditional deletion"
         )
 
     where = conditions[0] if len(conditions) == 1 else {"$and": conditions}
-    where_document = {"$regex": f"(?s)^{re.escape(row.document)}$"} if row.document else None
+    if content_hash_matches_document:
+        where_document = None
+    elif row.document:
+        where_document = {"$regex": f"(?s)^{re.escape(row.document)}$"}
+    else:
+        raise ReceiptRecoveryError(
+            "stale content hash on empty row cannot be content-bound for conditional deletion"
+        )
     return where, where_document
 
 

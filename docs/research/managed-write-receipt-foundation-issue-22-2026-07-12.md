@@ -569,6 +569,9 @@ The focused receipt tests cover:
   addition/removal/duplicate-ID pre-purge rejection
 - exact conditional deletion under a true between-validation-and-delete
   replacement, including a replacement containing the full old document
+- exact metadata-bound deletion of a receipt-stamped `393,216`-byte row through
+  real Chroma without compiling the full document as a regex, plus legacy,
+  stale-hash, empty-row, and replacement-race fail-closed coverage
 - crash reconciliation deleting only its validated interrupted-row set, with a
   later row surviving and keeping recovery open
 - authoritative-DAG cleanup refusal, Windows first-use directory markers,
@@ -686,3 +689,44 @@ tracked separately rather than hidden behind unsafe eager shutdown. Historical
 recovery is still not authorized: a durable interrupted managed rewrite must be
 restored and reverified after a true client/process restart before the recovery
 cohort can run.
+
+### Chroma large document delete correction (2026-07-14)
+
+The failed Claude provider rewrite supplied the already validated source row's
+entire escaped document as a `where_document` regex during conditional delete.
+Chroma's 1.5.7 frontend resolves filtered deletes before deleting IDs, its
+SQLite metadata layer translates `$regex` into the SQLite `REGEXP` function,
+and SQLx compiles that expression with Rust `regex`. SQLite extended result
+code `1043` is `SQLITE_CONSTRAINT_FUNCTION`. The relevant upstream paths are:
+
+- [Chroma 1.5.7 filtered-delete implementation](https://github.com/chroma-core/chroma/blob/1.5.7/rust/frontend/src/impls/service_based_frontend.rs#L1413-L1485)
+- [Chroma 1.5.7 SQLite regex translation](https://github.com/chroma-core/chroma/blob/1.5.7/rust/segment/src/sqlite_metadata.rs#L676-L710)
+- [SQLx 0.8.3 SQLite regex function](https://github.com/launchbadge/sqlx/blob/v0.8.3/sqlx-sqlite/src/regexp.rs#L904-L918)
+- [SQLite extended result code 1043](https://www.sqlite.org/rescode.html#constraint_function)
+- [Rust regex compiled-size limit](https://docs.rs/regex/1.11.1/regex/struct.RegexBuilder.html#method.size_limit)
+
+Disposable reproduction established the boundary rather than inferring it from
+the live error. Chroma 1.5.7 deleted a `320,000`-byte document but returned code
+`1043` for `330,000`, `393,216`, and `524,287` byte documents after regex
+escaping; Chroma 1.5.9 returned the same error for the `393,216`-byte fixture.
+In every failing reproduction the row survived. Deleting the same validated ID
+with its source, receipt, and content-hash metadata but no `where_document`
+deleted exactly one row.
+
+The managed path now recomputes SHA-256 from the fetched document and compares
+it with the receipt-stamped output hash. When they match, deletion remains bound
+to the exact ID, source ownership, receipt ID, and content hash while omitting
+the redundant large regex. Missing or stale hashes keep the exact anchored
+document regex; malformed hashes and empty stale-hash rows fail closed. The
+pre-delete snapshot comparison, exclusive managed-write scope, exactly-one
+delete accounting, and survivor readback remain unchanged. This protects
+cooperating managed writers; Chroma still does not provide a compare-and-swap
+delete for an out-of-band writer that changes only the document while preserving
+all old metadata inside the final read/delete window.
+
+Validation used only disposable databases: the `393,216`-byte regression and
+focused cases passed, the full `tests/test_write_receipts.py` module passed
+`110` tests in `49.73s`, and Ruff was clean. This correction enables a bounded
+managed provider-chat canary. It does not establish historical provenance,
+authorize historical recovery, or remove the separate restart and operator
+approval gates.

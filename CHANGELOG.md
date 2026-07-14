@@ -69,7 +69,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   hashes and exact bytes. Legacy `mempalace migrate` now refuses a non-dry run
   when managed receipt state exists because that rebuild path cannot preserve
   the journal yet. Other unmanaged mutation paths remain explicitly tracked in
-  #22. Independent receipt re-review found no remaining implementation blocker.
+  #22. Managed recovery deletion no longer sends a full-document regex to
+  Chroma when the stored receipt content hash exactly matches the fetched
+  document. It instead binds deletion to the validated row ID plus source,
+  receipt, and content-hash metadata. This avoids Chroma/SQLite extended error
+  `1043` for large provider-chat documents while preserving exact-regex checks
+  for legacy or stale-hash rows and failing closed for an empty stale-hash row.
+  A disposable real-Chroma regression deletes exactly one `393,216`-byte
+  receipt-stamped row; the full receipt module passes `110` tests. Chroma
+  `1.5.9` still reproduces the oversized-regex failure, so this is a managed
+  compatibility boundary rather than an asserted upstream fix. Independent
+  receipt re-review found no remaining implementation blocker.
   No live historical recovery or cutover was performed; recovery remains gated
   on disposable interruption/restart proof and separate operator approval.
 

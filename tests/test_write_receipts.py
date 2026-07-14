@@ -9,6 +9,7 @@ import time
 import uuid
 from contextlib import contextmanager
 
+import chromadb
 import pytest
 
 import mempalace.convo_miner as convo_miner_module
@@ -1778,9 +1779,17 @@ def test_direct_replacement_between_validation_and_delete_survives_and_blocks_pu
             if self.race_enabled and ids:
                 self.race_enabled = False
                 baseline_document = self.rows[ids[0]][0]
+                baseline_metadata = self.rows[ids[0]][1]
+                replacement_document = f"prefix {baseline_document} suffix"
                 self.rows[ids[0]] = (
-                    f"prefix {baseline_document} suffix",
-                    {"source_file": "logical://another/source"},
+                    replacement_document,
+                    {
+                        **baseline_metadata,
+                        META_RECEIPT_ID: str(uuid.uuid4()),
+                        META_OUTPUT_CONTENT_HASH: sha256_bytes(
+                            replacement_document.encode("utf-8")
+                        ),
+                    },
                 )
             return super().delete(
                 ids=ids,
@@ -1823,6 +1832,102 @@ def test_direct_replacement_between_validation_and_delete_survives_and_blocks_pu
     )
     assert len(store._pending_recovery_paths(first["source"]["identity"])) == 1
     assert _current_for_path(store, source)["receipt_id"] == first["receipt_id"]
+
+
+def test_matching_stamped_hash_uses_metadata_binding_without_document_regex(tmp_path):
+    _, _, collection, _, _, _ = _seed_receipted_recovery_source(tmp_path)
+    document, metadata = collection.rows["baseline-row"]
+    row = write_receipts_module._validated_collection_row(
+        "baseline-row",
+        (document, metadata, None),
+    )
+
+    where, where_document = write_receipts_module._delete_filters_for_validated_row(row)
+
+    assert where_document is None
+    assert {META_OUTPUT_CONTENT_HASH: sha256_bytes(document.encode("utf-8"))} in where["$and"]
+
+
+@pytest.mark.parametrize("hash_state", ["missing", "stale"])
+def test_legacy_or_stale_hash_retains_exact_document_regex(tmp_path, hash_state):
+    _, _, collection, _, _, _ = _seed_receipted_recovery_source(tmp_path)
+    document, metadata = collection.rows["baseline-row"]
+    metadata = dict(metadata)
+    if hash_state == "missing":
+        metadata.pop(META_OUTPUT_CONTENT_HASH)
+    else:
+        metadata[META_OUTPUT_CONTENT_HASH] = sha256_bytes(b"different document")
+    row = write_receipts_module._validated_collection_row(
+        "baseline-row",
+        (document, metadata, None),
+    )
+
+    _, where_document = write_receipts_module._delete_filters_for_validated_row(row)
+
+    assert where_document == {"$regex": f"(?s)^{re.escape(document)}$"}
+
+
+def test_stale_hash_on_empty_row_fails_closed(tmp_path):
+    _, _, collection, _, _, _ = _seed_receipted_recovery_source(tmp_path)
+    _, metadata = collection.rows["baseline-row"]
+    row = write_receipts_module._validated_collection_row(
+        "baseline-row",
+        ("", metadata, None),
+    )
+
+    with pytest.raises(ReceiptRecoveryError, match="stale content hash on empty row"):
+        write_receipts_module._delete_filters_for_validated_row(row)
+
+
+def test_real_chroma_large_stamped_row_purges_without_compiling_document_regex(tmp_path):
+    palace_path = tmp_path / "real-chroma-large-delete"
+    store = ReceiptStore(palace_path)
+    run = store.create_run(caller="test-runner", mode="test", config={"fixture": "large"})
+    source_locator = "logical://recovery/large-source"
+    source_hash = sha256_bytes(b"large recovery baseline")
+    session = store.begin_source(
+        run=run,
+        source_locator=source_locator,
+        source_content_hash=source_hash,
+        source_version_hash=source_hash,
+        source_size_bytes=393216,
+        adapter_name="large-recovery-fixture",
+        adapter_version="1",
+    )
+    document = ("[](){}.*+?^$\\| large managed row\n" * 16384)[:393216]
+    metadata = stamp_output_metadata({"source_file": source_locator}, session, document)
+    client = chromadb.PersistentClient(path=str(palace_path))
+    collection = client.get_or_create_collection("drawers")
+    collection.add(
+        ids=["large-baseline-row"],
+        documents=[document],
+        metadatas=[metadata],
+        embeddings=[[0.1, 0.2, 0.3]],
+    )
+    session.record_output("large-baseline-row", document)
+    session.set_expected(drawers=1)
+    baseline = session.complete()
+    snapshot = snapshot_managed_source_rows(
+        collection,
+        source_file=source_locator,
+        source_identity=baseline["source"]["identity"],
+        local_path=False,
+    )
+    _, recovery_path = _begin_recovery_rewrite(store, source_locator, baseline, snapshot)
+
+    with _managed_write_scope(store):
+        deleted = purge_managed_source_snapshot(
+            collection,
+            snapshot,
+            recovery_path=recovery_path,
+            collection_name="drawers",
+            source_file=source_locator,
+            source_identity=baseline["source"]["identity"],
+            local_path=False,
+        )
+
+    assert deleted == ["large-baseline-row"]
+    assert collection.get(ids=["large-baseline-row"])["ids"] == []
 
 
 def test_private_purge_boundary_rejects_forged_capability_without_mutation(tmp_path):

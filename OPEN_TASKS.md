@@ -40,6 +40,17 @@ This file is the durable local index for active `mempalace` issues.
     that window, the managed write fails closed and restores its durable
     predecessor snapshot; MemPalace no longer opens Chroma's live SQLite/WAL as
     an in-process fallback.
+  - Large managed-row correction: the 2026-07-14 provider-chat failure was not
+    evidence of palace corruption. Chroma `1.5.7` compiled the escaped full
+    document supplied as `where_document` into a Rust regex and returned SQLite
+    extended constraint code `1043` once the regex exceeded the compiler size
+    limit. The same `393,216`-byte fixture still fails on Chroma `1.5.9`.
+    Receipt-stamped rows whose stored SHA-256 matches the fetched document now
+    delete by exact ID plus source/receipt/content-hash metadata and do not send
+    that redundant document regex. Legacy or stale-hash rows retain the exact
+    regex; an empty stale-hash row fails closed. A disposable real-Chroma test
+    deletes exactly one large row, `tests/test_write_receipts.py` passes `110`
+    tests, Ruff is clean, and no live palace was opened by this proof.
   - Explicit remaining scope: receipts are not automatic across the whole
     product. Migration, repair, dedup, sweep, compression, diary/closet/KG/
     tunnel writes, MCP drawer mutations, backend open-time repairs, direct
