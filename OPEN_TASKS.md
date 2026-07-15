@@ -69,9 +69,38 @@ This file is the durable local index for active `mempalace` issues.
     passes `207` tests in `59.03s`. Durable local evidence is under
     `.local-logs/pytest-diary-final-20260715T030401.out.log` and
     `.local-logs/diary-receipt-broad-final-20260715T030241.log`.
-  - Final repository gate: `1,695` passed, `7` skipped, `106` intentionally
-    deselected in `136.93s`; durable output is under
-    `.local-logs/pytest-full-final-20260715-014112.out.log`.
+  - JSONL sweeper managed-writer tranche implemented locally on `dev`: one
+    physical file now owns an isolated receipt source lane so message-level
+    rows can coexist with primary-miner chunks. Exact file bytes, deterministic
+    source-namespaced message IDs, and source-derived semantic metadata govern
+    whole-source reuse or replacement. Invalid UTF-8 and malformed message
+    input fail before mutation; removing every current row requires explicit
+    `--allow-zero-output`. Legacy unmanaged sweeper rows fail before receipt
+    storage is initialized. Renamed/copied sources use disjoint lanes instead
+    of failing on foreign IDs, while old lanes remain visible pending reviewed
+    cleanup. Exact terminal validation remains under the palace lock, and the
+    CLI reports semantic updates, receipt rebindings, and physical mutations
+    separately. Palace locking now precedes every Chroma/receipt side effect;
+    empty legacy sources detect historical relative path spellings; mixed JSON
+    content blocks are preserved. After `COMPLETE`, the generic driver reloads
+    the durable receipt event and verifies exact represented/missing/excess/
+    conflict/stale state before recovery cleanup. An injected verifier or
+    finalization failure reports `committed-unverified` and exits nonzero
+    instead of implying a rollback. Expected terminal-manifest rows and
+    verifier-confirmed represented rows are separate, so unverified output is
+    never counted as represented. Mixed directory runs expose partial per-file
+    verifier evidence but zero the whole-run represented claim, and the CLI
+    prints the single-file and directory distinctions. Injected second-batch
+    failure and source mutation both restore
+    the full exact predecessor lane with no replacement survivors. Focused
+    proof passes `35` tests; the expanded sweeper/CLI/receipt proof passes `204`
+    tests in `100.85s` with no stderr. Contract and upstream research are in
+    `docs/research/sweeper-jsonl-managed-write-contract-2026-07-15.md`; durable
+    expanded logs are under
+    `.local-logs/sweeper-aggregate-expanded-final-20260715T045557.{out,err}.log`.
+  - Final repository gate: `1,733` passed, `7` skipped, `106` intentionally
+    deselected in `232.05s` with no stderr; durable output is under
+    `.local-logs/pytest-sweeper-aggregate-full-final-20260715T045818.{out,err}.log`.
   - Local proof: the affected receipt/backend/HTTP/dispatch/server run passes
     `279` tests with one platform skip. Real-Chroma write readback is exact and
     bounded; stale or temporarily missing rows are retried for at most two
@@ -93,12 +122,14 @@ This file is the durable local index for active `mempalace` issues.
     deletes exactly one large row, `tests/test_write_receipts.py` passes `110`
     tests, Ruff is clean, and no live palace was opened by this proof.
   - Explicit remaining scope: receipts are not automatic across the whole
-    product. Migration, repair, dedup, sweep, compression, closet regeneration,
+    product. Migration, repair, dedup, compression, closet regeneration,
     KG/tunnel writes, backend open-time repairs, direct collection APIs, and
     adapters that bypass `managed_adapter_ingest()` remain unmanaged. The MCP
-    drawer, MCP diary, and diary-file paths are no longer in this list: three of
-    the ten managed-receipt adaptations are now met on `dev`, with seven still
-    open. Legacy `mempalace migrate` blocks if receipt state exists so it cannot
+    drawer, MCP diary, diary-file, and JSONL sweeper paths are no longer in this
+    list: four of the ten managed-receipt adaptations are now met on `dev`, with
+    six still open. Pre-receipt sweeper rows still require an explicit
+    provenance migration; this tranche does not fabricate historical receipts.
+    Legacy `mempalace migrate` blocks if receipt state exists so it cannot
     silently discard the journal; adapting or retiring the remaining paths
     stays in #22.
   - Writer disposition is now explicit and machine-readable in

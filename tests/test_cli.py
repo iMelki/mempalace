@@ -18,6 +18,7 @@ from mempalace.cli import (
     cmd_search,
     cmd_split,
     cmd_status,
+    cmd_sweep,
     cmd_wakeup,
     main,
 )
@@ -650,6 +651,90 @@ def test_main_split_dispatches():
     ):
         main()
         mock_cmd.assert_called_once()
+
+
+def test_main_sweep_parses_zero_output_approval():
+    with (
+        patch(
+            "sys.argv",
+            ["mempalace", "sweep", "/some/session.jsonl", "--allow-zero-output"],
+        ),
+        patch("mempalace.cli.cmd_sweep") as mock_cmd,
+    ):
+        main()
+
+    args = mock_cmd.call_args.args[0]
+    assert args.target == "/some/session.jsonl"
+    assert args.allow_zero_output is True
+
+
+def test_cmd_sweep_forwards_zero_output_approval(tmp_path, capsys):
+    source = tmp_path / "session.jsonl"
+    source.write_text("", encoding="utf-8")
+    palace = tmp_path / "palace"
+    result = {
+        "drawers_added": 0,
+        "drawers_already_present": 0,
+        "drawers_updated": 0,
+        "drawers_semantically_unchanged": 0,
+        "drawers_rebound": 0,
+        "drawers_upserted": 0,
+        "drawers_physical_mutations": 0,
+        "drawers_removed": 4,
+        "drawers_expected": 0,
+        "drawers_represented": 0,
+        "receipt_id": "receipt-1",
+        "verification_status": "represented",
+        "verification_error": None,
+    }
+    args = argparse.Namespace(
+        palace=str(palace),
+        target=str(source),
+        allow_zero_output=True,
+    )
+
+    with patch("mempalace.sweeper.sweep", return_value=result) as mock_sweep:
+        cmd_sweep(args)
+
+    mock_sweep.assert_called_once_with(
+        str(source),
+        str(palace),
+        allow_zero_output=True,
+    )
+    assert "-4 removed" in capsys.readouterr().out
+
+
+def test_cmd_sweep_reports_committed_unverified_as_nonzero(tmp_path, capsys):
+    source = tmp_path / "session.jsonl"
+    source.write_text("", encoding="utf-8")
+    result = {
+        "drawers_added": 4,
+        "drawers_updated": 0,
+        "drawers_semantically_unchanged": 0,
+        "drawers_removed": 0,
+        "drawers_rebound": 0,
+        "drawers_physical_mutations": 4,
+        "drawers_expected": 4,
+        "drawers_represented": 0,
+        "receipt_id": "receipt-committed",
+        "verification_status": "committed-unverified",
+        "verification_error": "terminal receipt readback unavailable",
+    }
+    args = argparse.Namespace(
+        palace=str(tmp_path / "palace"),
+        target=str(source),
+        allow_zero_output=False,
+    )
+
+    with patch("mempalace.sweeper.sweep", return_value=result):
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_sweep(args)
+
+    assert exc_info.value.code == 3
+    captured = capsys.readouterr()
+    assert "0/4 represented/expected" in captured.out
+    assert "committed-unverified" in captured.out
+    assert "the sweep committed" in captured.err
 
 
 def test_mcp_command_prints_setup_guidance(monkeypatch, capsys):

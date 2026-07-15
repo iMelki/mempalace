@@ -2845,11 +2845,53 @@ def test_managed_source_adapter_emits_receipts_and_reuses_unchanged_output(tmp_p
     current = store.find_current(store.source_identity(source.uri))
     assert current is not None
     assert first.drawers_written == 2
+    assert first.receipt_verification_statuses == ("represented",)
+    assert first.receipt_validation_errors == (None,)
     assert second.sources_unchanged == 1
+    assert second.receipt_verification_statuses == ("represented",)
+    assert second.receipt_validation_errors == (None,)
     assert collection.upsert_calls == first_writes
     assert collection.update_calls == first_updates + 1
     assert current["disposition"] == "UNCHANGED"
     assert verify_receipt(current, collection, store=store).status == "represented"
+
+
+def test_managed_adapter_default_post_commit_verification_failure_still_raises(
+    tmp_path, monkeypatch
+):
+    palace, store, _ = _store_and_run(tmp_path)
+    collection = _MemoryCollection()
+    context = PalaceContext(
+        drawer_collection=collection,
+        knowledge_graph=_FakeKnowledgeGraph(),
+        palace_path=str(palace),
+        adapter_name="receipt-fixture",
+        adapter_version="1.0",
+    )
+    source = SourceRef(uri="logical://adapter/default-terminal-error")
+
+    def fail_terminal_verification(*args, **kwargs):
+        raise RuntimeError("injected default terminal verification failure")
+
+    monkeypatch.setattr(
+        provenance_module,
+        "_verify_context_receipt",
+        fail_terminal_verification,
+    )
+    with pytest.raises(RuntimeError, match="injected default terminal verification failure"):
+        managed_adapter_ingest(
+            adapter=_ReceiptAdapter(),
+            source=source,
+            palace=context,
+            receipt_store=store,
+            caller="test-runner",
+            config={"fixture": True},
+        )
+
+    current = store.find_current(store.source_identity(source.uri))
+    assert current is not None
+    assert current["state"] == "COMPLETE"
+    assert len(list(store._pending_recovery_paths())) == 1
 
 
 def test_managed_adapter_raw_collection_write_is_stamped_and_receipted(tmp_path):

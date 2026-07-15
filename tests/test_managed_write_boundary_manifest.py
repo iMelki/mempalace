@@ -54,18 +54,22 @@ def test_managed_write_boundary_manifest_is_complete_and_actionable():
         "explicitlyExcludeWithBoundary": 5,
     }
     assert manifest["implementationProgress"] == {
-        "adaptationsMetOnDev": 3,
-        "adaptationsRemaining": 7,
+        "adaptationsMetOnDev": 4,
+        "adaptationsRemaining": 6,
         "completedAdaptationIds": [
             "diary-ingest",
             "mcp-diary-write",
             "mcp-drawer-mutations",
+            "sweeper-jsonl-ingest",
         ],
     }
 
     diary_ingest = next(entry for entry in entries if entry["id"] == "diary-ingest")
     assert diary_ingest["currentState"] == "managed-receipt-adapter-on-dev"
     assert diary_ingest["acceptanceStatus"] == "met-on-dev"
+    sweeper = next(entry for entry in entries if entry["id"] == "sweeper-jsonl-ingest")
+    assert sweeper["currentState"] == "managed-receipt-adapter-on-dev"
+    assert sweeper["acceptanceStatus"] == "met-on-dev"
 
     for entry in entries:
         assert entry["surface"]

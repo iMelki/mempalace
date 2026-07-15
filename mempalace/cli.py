@@ -530,32 +530,55 @@ def cmd_mine(args):
 def cmd_sweep(args):
     """Sweep a transcript file or directory.
 
-    The sweeper deduplicates against its own prior writes via
-    deterministic drawer IDs + a timestamp cursor. It does NOT currently
-    coordinate with the file-level miners (miner.py / convo_miner.py) —
-    those produce char-chunked drawers without compatible message
-    metadata, so running both miners may store overlapping content under
-    different IDs.
+    Each JSONL file replaces its complete message-level representation under
+    a managed receipt. The sweeper uses a separate source lane from the
+    file-level miners, so their chunked rows can coexist without either path
+    claiming the other's provenance.
     """
     from .sweeper import sweep, sweep_directory
 
     palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
     target = os.path.expanduser(args.target)
+    allow_zero_output = bool(getattr(args, "allow_zero_output", False))
 
     if os.path.isfile(target):
-        result = sweep(target, palace_path)
+        result = sweep(target, palace_path, allow_zero_output=allow_zero_output)
         print(
             f"  Swept {target}: +{result['drawers_added']} new, "
-            f"{result['drawers_already_present']} already present, "
-            f"{result['drawers_skipped']} skipped (< cursor)."
+            f"~{result['drawers_updated']} updated, "
+            f"={result['drawers_semantically_unchanged']} semantically unchanged, "
+            f"-{result['drawers_removed']} removed, "
+            f"{result['drawers_rebound']} receipt rebindings, "
+            f"{result['drawers_physical_mutations']} physical mutations; "
+            f"{result['drawers_represented']}/{result['drawers_expected']} "
+            "represented/expected; "
+            f"receipt {result['receipt_id']} ({result['verification_status']})."
         )
+        if result["verification_status"] != "represented":
+            print(
+                "  WARNING: the sweep committed, but terminal verification or recovery "
+                "finalization is incomplete: "
+                f"{result['verification_error']}",
+                file=sys.stderr,
+            )
+            sys.exit(3)
     elif os.path.isdir(target):
-        result = sweep_directory(target, palace_path)
+        result = sweep_directory(
+            target,
+            palace_path,
+            allow_zero_output=allow_zero_output,
+        )
         print(
             f"  Swept {result['files_succeeded']}/{result['files_attempted']} "
             f"files from {target}: +{result['drawers_added']} new, "
-            f"{result['drawers_already_present']} already present, "
-            f"{result['drawers_skipped']} skipped (< cursor)."
+            f"~{result['drawers_updated']} updated, "
+            f"={result['drawers_semantically_unchanged']} semantically unchanged, "
+            f"-{result['drawers_removed']} removed, "
+            f"{result['drawers_rebound']} receipt rebindings, "
+            f"{result['drawers_physical_mutations']} physical mutations, "
+            f"{result['drawers_represented']} whole-run represented, "
+            f"{result['drawers_verifier_confirmed']}/{result['drawers_expected']} "
+            "per-file verifier-confirmed/expected."
         )
         failures = result.get("failures") or []
         if failures:
@@ -564,6 +587,13 @@ def cmd_sweep(args):
                 file=sys.stderr,
             )
             sys.exit(2)
+        if result.get("files_committed_unverified"):
+            print(
+                "  WARNING: one or more files committed without complete terminal "
+                "verification/finalization; inspect per-file verification_error values.",
+                file=sys.stderr,
+            )
+            sys.exit(3)
     else:
         print(f"  ERROR: Not a file or directory: {target}", file=sys.stderr)
         sys.exit(1)
@@ -1169,6 +1199,11 @@ def main():
     p_sweep.add_argument(
         "target",
         help="A .jsonl transcript file, or a directory to scan recursively",
+    )
+    p_sweep.add_argument(
+        "--allow-zero-output",
+        action="store_true",
+        help="Allow a reviewed source version to remove every managed sweeper row",
     )
 
     # search

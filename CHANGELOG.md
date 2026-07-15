@@ -75,6 +75,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   207 tests, and the final repository gate passes 1,706 tests with 7 skips and
   106 intentional deselections.
 
+- **Receipt-managed JSONL sweeper ingestion (#22).** Replaced direct
+  timestamp-cursor upserts with one complete managed source transaction per
+  physical JSONL file. An isolated sweeper URI prevents message rows from
+  claiming or purging primary-miner chunks, while exact file bytes,
+  source-namespaced deterministic message IDs, and a source-derived semantic
+  metadata hash govern reuse and repair. Invalid UTF-8 and malformed or
+  incomplete message records fail before replacement, an existing source
+  cannot remove every row without explicit `--allow-zero-output`, and legacy
+  unmanaged sweeper rows fail before receipt storage is initialized. Copied or
+  renamed sources use disjoint lanes rather than colliding with the retained
+  old path. Palace locking now precedes Chroma/receipt access, legacy detection
+  covers conservative relative path equivalents for empty sources, and mixed
+  JSON content blocks are preserved rather than dropped. Failable semantic
+  checks occur before completion; after `COMPLETE`, the driver reloads the
+  durable terminal journal event and verifies exact current representation
+  before recovery cleanup. A verifier or finalization failure is reported as
+  committed-but-unverified instead of throwing as though irreversible success
+  rolled back. Terminal-manifest expected rows are reported separately from
+  verifier-confirmed represented rows, so a committed-unverified result cannot
+  inflate the represented count. Mixed directory runs retain a partial
+  per-file-verifier count while zeroing the whole-run represented claim; the
+  CLI prints both. Semantic updates, full rewrites, receipt
+  rebindings, and total physical mutations are reported separately. Source
+  changes during extraction and injected second-batch failures restore the full
+  ID-joined predecessor
+  lane with no replacement survivors. Windows path-case aliases reuse the same
+  source and output semantics. The focused sweeper/CLI proof passes 35 tests;
+  the expanded sweeper/CLI/receipt proof passes 204 tests in 100.85 seconds with
+  no stderr. The full repository gate passes 1,733 tests with 7 skips and 106
+  intentional deselections in 232.05 seconds, also with no stderr.
+
 - **Managed source-write receipts and exact verification foundation (#22).**
   Managed project, conversation, and RFC 002 adapter outputs now emit local
   append-only receipts with exact output manifests. Source locks cover read,

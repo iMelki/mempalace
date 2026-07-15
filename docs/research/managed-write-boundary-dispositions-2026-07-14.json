@@ -21,9 +21,14 @@
     "explicitlyExcludeWithBoundary": 5
   },
   "implementationProgress": {
-    "adaptationsMetOnDev": 3,
-    "adaptationsRemaining": 7,
-    "completedAdaptationIds": ["diary-ingest", "mcp-diary-write", "mcp-drawer-mutations"]
+    "adaptationsMetOnDev": 4,
+    "adaptationsRemaining": 6,
+    "completedAdaptationIds": [
+      "diary-ingest",
+      "mcp-diary-write",
+      "mcp-drawer-mutations",
+      "sweeper-jsonl-ingest"
+    ]
   },
   "entries": [
     {
@@ -95,14 +100,21 @@
       "id": "sweeper-jsonl-ingest",
       "surface": "Sweeper JSONL-to-drawer ingestion",
       "disposition": "adapt-to-managed-receipts",
-      "currentState": "direct-upsert",
-      "managedRepresentation": "Use the existing source and message identities through managed adapter ingestion and exact rewrite recovery.",
-      "reason": "The path already has deterministic source identity and is a normal source-derived write.",
+      "currentState": "managed-receipt-adapter-on-dev",
+      "acceptanceStatus": "met-on-dev",
+      "managedRepresentation": "Use an isolated per-file sweeper source lane, deterministic message IDs, exact source and semantic identity, managed adapter ingestion, and exact rewrite recovery.",
+      "reason": "The physical file identity is shared with primary mining, so the sweeper needs its own receipt selector while preserving origin metadata and deterministic message IDs.",
       "evidence": [
-        {"path": "mempalace/sweeper.py", "line": 193},
-        {"path": "tests/test_sweeper.py", "line": 148}
+        {"path": "mempalace/sweeper.py", "line": 453},
+        {"path": "mempalace/sweeper.py", "line": 809},
+        {"path": "mempalace/provenance.py", "line": 131},
+        {"path": "tests/test_sweeper.py", "line": 196},
+        {"path": "tests/test_sweeper.py", "line": 721},
+        {"path": "tests/test_sweeper.py", "line": 860},
+        {"path": "tests/test_sweeper.py", "line": 1019},
+        {"path": "docs/research/sweeper-jsonl-managed-write-contract-2026-07-15.md", "line": 1}
       ],
-      "requiredAcceptance": ["managed driver integration", "idempotent replay", "partial-write recovery test"]
+      "requiredAcceptance": ["managed driver integration", "idempotent replay", "partial-write recovery test", "durable terminal verification and post-commit reporting"]
     },
     {
       "id": "compression-derived-closets",

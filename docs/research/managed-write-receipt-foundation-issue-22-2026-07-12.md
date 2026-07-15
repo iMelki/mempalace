@@ -168,8 +168,9 @@ publications. Failed or rolled-back attempts do not appear in invalidation
 readback. Knowledge-graph invalidation, deduplication, repair deletion, diary
 ingest, sweeper writes, and MCP drawer mutations were separate paths in the
 initial foundation scope. Subsequent #22 tranches adapted MCP drawer/diary
-mutations and diary-file drawer/closet ingestion to the same managed receipt
-and rollback boundary; the other named paths remain separate.
+mutations, diary-file drawer/closet ingestion, and the isolated JSONL sweeper
+lane to the same managed receipt and rollback boundary; the other named paths
+remain separate.
 
 ## V1 event shape
 
@@ -450,6 +451,15 @@ rebinds every current row and manifest entry to the new terminal
 `reuses_receipt_id`. The rebind changes receipt metadata only; content and
 embeddings are preserved.
 
+RFC 002 managed-adapter completion now reloads the terminal event from its
+durable journal path and verifies the authoritative head plus exact current
+representation while the palace lock remains held. Recovery finalization runs
+only after that proof for ordinary rewrites. Existing callers keep exception
+semantics by default. Callers that explicitly select the reporting policy can
+return a terminal `committed-unverified` status when verification or recovery
+finalization fails after `COMPLETE`; this records that rollback is no longer an
+honest claim and preserves any unresolved recovery record for reconciliation.
+
 Changed bytes create a new source version. A rewrite records the previous
 receipt in `relations.supersedes`; after all collection writes succeed it queues
 an invalidation record for the prior output manifest. COMPLETE is published
@@ -606,14 +616,15 @@ The focused receipt tests cover:
 2. Managed project and adapter closets are included in the V1 output manifest
    and verifier. Unmanaged closet-producing paths remain outside this boundary.
 3. The V1 inventory is intentionally explicit. `migrate.py`, `repair.py`,
-   `dedup.py`, `sweeper.py`, compression, closet regeneration, topic-tunnel
+   `dedup.py`, compression, closet regeneration, topic-tunnel
    writes, knowledge-graph writes, project sidecars, backend open-time
    repair/configuration, direct `ChromaBackend` or `palace.get_collection()`
    use, and unmanaged `PalaceContext` calls do not emit V1 receipts. MCP drawer
-   and diary mutations plus diary-file drawer/closet ingestion now use managed
-   receipts, exact ownership checks, and rollback. This does not make Chroma a
-   multi-collection transaction, and missing/renamed diary files are not
-   deletion authority.
+   and diary mutations, diary-file drawer/closet ingestion, and the isolated
+   JSONL sweeper lane now use managed receipts, exact ownership checks, and
+   rollback. This does not make Chroma a multi-collection transaction, and
+   missing/renamed source files are not deletion authority. Four of the ten
+   receipt adaptations are met on `dev`; six remain.
    `mempalace migrate` now blocks non-dry rebuilding when a receipt root exists,
    but receipt-aware migration and invalidation from the other mutation paths
    remain open work in #22. Their reviewed dispositions are frozen in
