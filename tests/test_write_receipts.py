@@ -4559,3 +4559,54 @@ def test_managed_adapter_palace_lock_serializes_cross_source_writes(tmp_path, mo
         "content for logical://adapter/cross-source-one",
         "content for logical://adapter/cross-source-two",
     }
+
+
+def test_embedding_readback_matches_across_float32_round_trip():
+    match = write_receipts_module._embedding_matches_stored
+    float64_vector = (0.12345678901234567, -0.9876543210987654, 1.5e-3)
+    import struct as _struct
+
+    float32_round_trip = tuple(
+        _struct.unpack("<f", _struct.pack("<f", value))[0] for value in float64_vector
+    )
+    assert float32_round_trip != float64_vector
+    assert match(float32_round_trip, float64_vector)
+    assert match(float64_vector, float64_vector)
+    assert match(None, None)
+    assert not match(None, float64_vector)
+    assert not match(float64_vector, None)
+    assert not match(float32_round_trip[:2], float64_vector)
+    perturbed = (float64_vector[0] + 1e-3,) + float64_vector[1:]
+    assert not match(perturbed, float64_vector)
+    assert not match(("not-a-number", 0.0, 0.0), float64_vector)
+    # Re-embedding identical text can shift stored float32 components by one
+    # ULP (observed in production recovery 8787515f); that noise must match.
+    one_ulp_pairs = (
+        (-0.05243675038218498, -0.052436746656894684),
+        (-0.116607666015625, -0.1166076585650444),
+        (0.0036799798253923655, 0.003679979592561722),
+    )
+    assert match(
+        tuple(a for a, _ in one_ulp_pairs),
+        tuple(b for _, b in one_ulp_pairs),
+    )
+
+
+def test_row_matches_snapshot_tolerates_float32_quantization_noise():
+    import struct as _struct
+
+    exact = (0.111111111111111, 0.222222222222222)
+    quantized = tuple(_struct.unpack("<f", _struct.pack("<f", value))[0] for value in exact)
+    snapshot = write_receipts_module.ManagedSourceSnapshot(
+        ids=("row-1",),
+        documents=("doc",),
+        metadatas=({"k": "v"},),
+        embeddings=((exact),),
+    )
+    assert write_receipts_module._row_matches_snapshot(("doc", {"k": "v"}, quantized), snapshot, 0)
+    assert not write_receipts_module._row_matches_snapshot(
+        ("doc", {"k": "v"}, (exact[0] + 0.5, exact[1])), snapshot, 0
+    )
+    assert not write_receipts_module._row_matches_snapshot(
+        ("other", {"k": "v"}, quantized), snapshot, 0
+    )

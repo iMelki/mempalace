@@ -2461,7 +2461,9 @@ def _verify_managed_write_readback(collection: Any, kwargs: Mapping[str, Any]) -
                     break
                 if embeddings is not None:
                     expected_embedding = tuple(embeddings[index])
-                    if actual_embeddings[item_id] != expected_embedding:
+                    if not _embedding_matches_stored(
+                        actual_embeddings[item_id], expected_embedding
+                    ):
                         mismatch = "managed write embedding readback did not match"
                         break
             if mismatch is None:
@@ -2504,6 +2506,46 @@ def _recovery_snapshot_for_collection(
     return stored
 
 
+# Embeddings are derived data (mempalace repair rebuilds them wholesale), so
+# recovery verification tolerates float32 storage quantization and the
+# 1-ULP-scale nondeterminism of re-embedding identical text. Documents and
+# metadata stay bitwise-exact. Genuinely different text moves normalized
+# embedding components by orders of magnitude more than these bounds.
+_EMBEDDING_MATCH_REL_TOL = 1e-5
+_EMBEDDING_MATCH_ABS_TOL = 1e-8
+
+
+def _embedding_matches_stored(
+    actual: Optional[tuple[Any, ...]],
+    expected: Optional[tuple[Any, ...]],
+) -> bool:
+    """Compare an embedding readback against the values supplied to the store.
+
+    The storage backend persists vectors as float32 and identical text can
+    re-embed with 1-ULP numeric noise, so exact `==` wedges recovery in a
+    permanent verification loop. Values match within a tight numeric
+    tolerance; anything larger than derived-vector noise still fails.
+    """
+    if actual is None or expected is None:
+        return actual is None and expected is None
+    if len(actual) != len(expected):
+        return False
+    if tuple(actual) == tuple(expected):
+        return True
+    try:
+        return all(
+            math.isclose(
+                float(a),
+                float(b),
+                rel_tol=_EMBEDDING_MATCH_REL_TOL,
+                abs_tol=_EMBEDDING_MATCH_ABS_TOL,
+            )
+            for a, b in zip(actual, expected)
+        )
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
 def _row_matches_snapshot(
     row: tuple[str, dict, Optional[tuple[Any, ...]]],
     snapshot: ManagedSourceSnapshot,
@@ -2514,7 +2556,7 @@ def _row_matches_snapshot(
     return (
         document == snapshot.documents[index]
         and metadata == snapshot.metadatas[index]
-        and embedding == expected_embedding
+        and _embedding_matches_stored(embedding, expected_embedding)
     )
 
 

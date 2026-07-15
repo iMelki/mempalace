@@ -353,10 +353,13 @@ def detect_room(filepath: Path, content: str, rooms: list, project_path: Path) -
     content_lower = content[:2000].lower()
 
     # Priority 1: folder path matches room name or keywords
+    # str() coercion: YAML parses bare numeric keywords (e.g. 2024) as ints.
     path_parts = relative.replace("\\", "/").split("/")
     for part in path_parts[:-1]:  # skip filename itself
         for room in rooms:
-            candidates = [room["name"].lower()] + [k.lower() for k in room.get("keywords", [])]
+            candidates = [str(room["name"]).lower()] + [
+                str(k).lower() for k in room.get("keywords", [])
+            ]
             if any(part == c or c in part or part in c for c in candidates):
                 return room["name"]
 
@@ -370,7 +373,7 @@ def detect_room(filepath: Path, content: str, rooms: list, project_path: Path) -
     for room in rooms:
         keywords = room.get("keywords", []) + [room["name"]]
         for kw in keywords:
-            count = content_lower.count(kw.lower())
+            count = content_lower.count(str(kw).lower())
             scores[room["name"]] += count
 
     if scores:
