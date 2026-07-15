@@ -22,7 +22,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Optional, Union
@@ -245,6 +245,7 @@ class ManagedRunIdentity:
     mode: str
     config_digest: str
     producer: dict
+    _receipt_root: Path = field(repr=False, compare=False)
 
     def as_dict(self) -> dict:
         return {
@@ -377,6 +378,7 @@ class ReceiptStore:
             mode=mode,
             config_digest=config_hash(config),
             producer=_producer_identity(),
+            _receipt_root=self.root,
         )
 
     def source_identity(self, locator: str, *, local_path: bool = False) -> str:
@@ -399,6 +401,8 @@ class ReceiptStore:
         local_path: bool = False,
     ) -> "SourceWriteReceiptSession":
         """Persist START and return the mutable in-process receipt session."""
+        if not isinstance(run, ManagedRunIdentity) or run._receipt_root != self.root:
+            raise ReceiptIdentityError("managed run belongs to a different ReceiptStore")
         _require_sha256(source_content_hash, "source content hash")
         _require_sha256(source_version_hash, "source version hash")
         _require_text(adapter_name, "adapter name")
@@ -1050,6 +1054,28 @@ class ReceiptStore:
             hashlib.sha256,
         ).hexdigest()
         return f"hmac-sha256:{digest}"
+
+
+def require_managed_receipts(
+    *,
+    dry_run: bool,
+    receipt_store: Optional[ReceiptStore],
+    receipt_run: Optional[ManagedRunIdentity],
+    operation: str,
+) -> None:
+    """Reject non-dry core writes that would bypass durable receipts."""
+    if dry_run:
+        return
+    if not isinstance(receipt_store, ReceiptStore) or not isinstance(
+        receipt_run, ManagedRunIdentity
+    ):
+        raise ReceiptIdentityError(
+            f"{operation} non-dry writes require both ReceiptStore and "
+            "ManagedRunIdentity; use the managed top-level mine API or supply "
+            "an explicit receipt run"
+        )
+    if receipt_run._receipt_root != receipt_store.root:
+        raise ReceiptIdentityError(f"{operation} receipt run belongs to a different ReceiptStore")
 
 
 class SourceWriteReceiptSession:
@@ -3948,6 +3974,7 @@ __all__ = [
     "managed_write_scope",
     "output_identity",
     "purge_managed_source_snapshot",
+    "require_managed_receipts",
     "rollback_managed_source_rows",
     "sha256_bytes",
     "sha256_text",

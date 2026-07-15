@@ -28,6 +28,11 @@
       "mcp-diary-write",
       "mcp-drawer-mutations",
       "sweeper-jsonl-ingest"
+    ],
+    "retirementsMetOnDev": 1,
+    "retirementsRemaining": 5,
+    "completedRetirementIds": [
+      "receipt-optional-core-miners"
     ]
   },
   "entries": [
@@ -270,12 +275,17 @@
       "id": "receipt-optional-core-miners",
       "surface": "Project and conversation miner branches that permit receipt_store=None",
       "disposition": "retire-unmanaged-mutation-surface",
-      "currentState": "receipt-optional-internal-path",
+      "currentState": "non-dry-bypass-retired-on-dev",
       "retirementTarget": "Require a ReceiptStore for non-dry core mining; preserve receiptless behavior only for explicitly read-only/dry execution.",
       "reason": "An optional receipt parameter leaves the canonical miner capable of silently returning to best-effort destructive rewrites.",
+      "acceptanceStatus": "met-on-dev",
       "evidence": [
         {"path": "mempalace/miner.py", "line": 815},
-        {"path": "mempalace/convo_miner.py", "line": 568}
+        {"path": "mempalace/convo_miner.py", "line": 568},
+        {"path": "mempalace/write_receipts.py", "line": 1056},
+        {"path": "tests/test_write_receipts.py", "line": 54},
+        {"path": "tests/test_miner.py", "line": 474},
+        {"path": "docs/research/core-miner-receipt-required-contract-2026-07-15.md", "line": 1}
       ],
       "requiredAcceptance": ["non-dry receipt requirement", "dry-run compatibility", "CLI and API regression coverage"]
     },

@@ -44,6 +44,7 @@ from mempalace.write_receipts import (
     canonical_source_locator,
     purge_managed_source_snapshot,
     rollback_managed_source_rows,
+    require_managed_receipts,
     sha256_bytes,
     shared_receipt_projection,
     snapshot_managed_source_rows,
@@ -51,6 +52,55 @@ from mempalace.write_receipts import (
 )
 
 _THREAD_TEST_TIMEOUT_SECONDS = 10.0
+
+
+def test_managed_receipt_requirement_preserves_receipt_free_dry_runs():
+    require_managed_receipts(
+        dry_run=True,
+        receipt_store=None,
+        receipt_run=None,
+        operation="test dry run",
+    )
+
+
+def test_managed_receipt_requirement_rejects_partial_invalid_and_foreign_pairs(tmp_path):
+    store = ReceiptStore(tmp_path / "palace-a")
+    run = store.create_run(caller="test", mode="test", config={})
+    foreign_store = ReceiptStore(tmp_path / "palace-b")
+
+    for receipt_store, receipt_run in (
+        (store, None),
+        (None, run),
+        (object(), run),
+        (store, object()),
+    ):
+        with pytest.raises(ReceiptIdentityError, match="require both ReceiptStore"):
+            require_managed_receipts(
+                dry_run=False,
+                receipt_store=receipt_store,
+                receipt_run=receipt_run,
+                operation="test write",
+            )
+
+    with pytest.raises(ReceiptIdentityError, match="different ReceiptStore"):
+        require_managed_receipts(
+            dry_run=False,
+            receipt_store=foreign_store,
+            receipt_run=run,
+            operation="test write",
+        )
+
+    digest = sha256_bytes(b"source")
+    with pytest.raises(ReceiptIdentityError, match="different ReceiptStore"):
+        foreign_store.begin_source(
+            run=run,
+            source_locator="logical://source",
+            source_content_hash=digest,
+            source_version_hash=digest,
+            source_size_bytes=6,
+            adapter_name="test",
+            adapter_version="1",
+        )
 
 
 class _MemoryCollection:
@@ -956,7 +1006,7 @@ def test_managed_conversation_rewrite_with_fewer_chunks_leaves_no_stale_ids(tmp_
     assert verify_receipt(second, collection, store=store).status == "represented"
 
 
-def test_unmanaged_miners_preserve_best_effort_purge_behavior(tmp_path):
+def test_unmanaged_miners_fail_closed_before_best_effort_purge_or_write(tmp_path):
     project = tmp_path / "project"
     project.mkdir()
     project_source = project / "legacy-project.md"
@@ -964,36 +1014,37 @@ def test_unmanaged_miners_preserve_best_effort_purge_behavior(tmp_path):
     project_collection = _MemoryCollection()
     project_collection.delete_error = RuntimeError("legacy project purge failure")
 
-    project_drawers, _ = process_file(
-        project_source,
-        project,
-        project_collection,
-        "project",
-        [{"name": "general", "description": "general"}],
-        "test-runner",
-        False,
-    )
+    with pytest.raises(ReceiptIdentityError, match="require both ReceiptStore"):
+        process_file(
+            project_source,
+            project,
+            project_collection,
+            "project",
+            [{"name": "general", "description": "general"}],
+            "test-runner",
+            False,
+        )
 
     conversation_source = project / "legacy-conversation.txt"
     conversation_source.write_text(_long_source_text("conversation"), encoding="utf-8")
     conversation_collection = _MemoryCollection()
     conversation_collection.delete_error = RuntimeError("legacy conversation purge failure")
-    conversation_drawers, _, skipped = _process_conversation_file(
-        filepath=conversation_source,
-        collection=conversation_collection,
-        wing="conversations",
-        agent="test-runner",
-        extract_mode="exchange",
-        dry_run=False,
-        index=1,
-        total_files=1,
-    )
+    with pytest.raises(ReceiptIdentityError, match="require both ReceiptStore"):
+        _process_conversation_file(
+            filepath=conversation_source,
+            collection=conversation_collection,
+            wing="conversations",
+            agent="test-runner",
+            extract_mode="exchange",
+            dry_run=False,
+            index=1,
+            total_files=1,
+        )
 
-    assert project_drawers > 0
-    assert project_collection.upsert_calls > 0
-    assert conversation_drawers > 0
-    assert conversation_collection.upsert_calls > 0
-    assert skipped is False
+    assert project_collection.delete_calls == 0
+    assert project_collection.upsert_calls == 0
+    assert conversation_collection.delete_calls == 0
+    assert conversation_collection.upsert_calls == 0
 
 
 def test_managed_normalization_consumes_the_bytes_bound_to_the_receipt(tmp_path):

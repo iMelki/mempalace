@@ -10,6 +10,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Receipt-required project and conversation miner helpers (#22).** Retired
+  the low-level non-dry fallback that could purge or upsert when
+  `ReceiptStore` or `ManagedRunIdentity` was omitted. Both public and locked
+  helper layers now fail before collection mutation unless the pair is valid
+  and bound to the same receipt root; `ReceiptStore.begin_source()` enforces
+  the same binding. Dry runs remain receipt-free, top-level CLI mining already
+  supplies the managed pair, and the batched benchmark now creates a disposable
+  run instead of relying on the retired bypass. The focused requirement and
+  real-Chroma batch proof passes `5` tests in `1.31s` and preserves `2,2,1`
+  bounded writes. The expanded receipt/miner/conversation/CLI proof passes
+  `209` tests in `69.91s`; the final repository gate passes `1,735` tests with
+  `7` skipped and `106` intentionally deselected in `211.25s`. No configured
+  palace was opened.
+
 - **Native authenticated Streamable HTTP MCP transport (#21).** Added
   `mempalace-mcp-http`, built on the stable Python MCP SDK 1.x low-level
   server/session manager. It binds to loopback by default, requires the

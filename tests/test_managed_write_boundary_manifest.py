@@ -62,7 +62,29 @@ def test_managed_write_boundary_manifest_is_complete_and_actionable():
             "mcp-drawer-mutations",
             "sweeper-jsonl-ingest",
         ],
+        "retirementsMetOnDev": 1,
+        "retirementsRemaining": 5,
+        "completedRetirementIds": ["receipt-optional-core-miners"],
     }
+
+    completed_adaptations = {
+        entry["id"]
+        for entry in entries
+        if entry["disposition"] == "adapt-to-managed-receipts"
+        and entry.get("acceptanceStatus") == "met-on-dev"
+    }
+    completed_retirements = {
+        entry["id"]
+        for entry in entries
+        if entry["disposition"] == "retire-unmanaged-mutation-surface"
+        and entry.get("acceptanceStatus") == "met-on-dev"
+    }
+    assert completed_adaptations == set(
+        manifest["implementationProgress"]["completedAdaptationIds"]
+    )
+    assert completed_retirements == set(
+        manifest["implementationProgress"]["completedRetirementIds"]
+    )
 
     diary_ingest = next(entry for entry in entries if entry["id"] == "diary-ingest")
     assert diary_ingest["currentState"] == "managed-receipt-adapter-on-dev"
@@ -70,6 +92,9 @@ def test_managed_write_boundary_manifest_is_complete_and_actionable():
     sweeper = next(entry for entry in entries if entry["id"] == "sweeper-jsonl-ingest")
     assert sweeper["currentState"] == "managed-receipt-adapter-on-dev"
     assert sweeper["acceptanceStatus"] == "met-on-dev"
+    core_miners = next(entry for entry in entries if entry["id"] == "receipt-optional-core-miners")
+    assert core_miners["currentState"] == "non-dry-bypass-retired-on-dev"
+    assert core_miners["acceptanceStatus"] == "met-on-dev"
 
     for entry in entries:
         assert entry["surface"]

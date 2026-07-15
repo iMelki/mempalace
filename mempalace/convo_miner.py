@@ -37,6 +37,7 @@ from .write_receipts import (
     complete_reused_receipt,
     managed_write_scope,
     purge_managed_source_snapshot,
+    require_managed_receipts,
     rollback_managed_source_rows,
     sha256_bytes,
     snapshot_managed_source_rows,
@@ -579,6 +580,12 @@ def _process_conversation_file(
     receipt_run: ManagedRunIdentity = None,
 ) -> tuple[int, dict, bool]:
     """Lock before reading so a waiting invocation cannot retain stale bytes."""
+    require_managed_receipts(
+        dry_run=dry_run,
+        receipt_store=receipt_store,
+        receipt_run=receipt_run,
+        operation="conversation _process_conversation_file",
+    )
     raw_source_alias = os.fspath(filepath)
     source_file = canonical_source_locator(filepath, local_path=True)
     managed = not dry_run and receipt_store is not None and receipt_run is not None
@@ -619,6 +626,12 @@ def _process_conversation_file_locked(
     source_aliases: tuple[str, ...] = (),
 ) -> tuple[int, dict, bool]:
     """Process one conversation source and close its receipt terminally."""
+    require_managed_receipts(
+        dry_run=dry_run,
+        receipt_store=receipt_store,
+        receipt_run=receipt_run,
+        operation="conversation _process_conversation_file_locked",
+    )
     source_file = str(filepath)
     receipt = None
     if not dry_run and receipt_store is not None and receipt_run is not None:

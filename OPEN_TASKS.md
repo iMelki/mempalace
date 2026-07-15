@@ -101,6 +101,21 @@ This file is the durable local index for active `mempalace` issues.
   - Final repository gate: `1,733` passed, `7` skipped, `106` intentionally
     deselected in `232.05s` with no stderr; durable output is under
     `.local-logs/pytest-sweeper-aggregate-full-final-20260715T045818.{out,err}.log`.
+  - Receipt-optional core-miner bypass retired locally on `dev`: project and
+    conversation helper writes now require a valid `ReceiptStore` and
+    `ManagedRunIdentity` bound to the same receipt root. Missing, invalid, or
+    foreign pairs fail before collection reads, purge, or upsert; dry runs stay
+    receipt-free and the top-level CLI paths already supply the pair. The
+    batched benchmark now creates a disposable managed run. Focused proof
+    passes `5` tests in `1.31s` and retains `2,2,1` bounded real-Chroma writes.
+    Final expanded receipt/miner/conversation/CLI proof passes `209` tests with
+    `29` dependency warnings in `69.91s` and no stderr. Contract and community
+    basis are in
+    `docs/research/core-miner-receipt-required-contract-2026-07-15.md`.
+    The final repository gate passes `1,735` tests, with `7` skipped and `106`
+    intentionally deselected, in `211.25s`; its stderr log is empty. Durable
+    output is under
+    `.local-logs/pytest-receipt-required-full-final-20260715T054246.{out,err}.log`.
   - Local proof: the affected receipt/backend/HTTP/dispatch/server run passes
     `279` tests with one platform skip. Real-Chroma write readback is exact and
     bounded; stale or temporarily missing rows are retried for at most two
@@ -124,14 +139,16 @@ This file is the durable local index for active `mempalace` issues.
   - Explicit remaining scope: receipts are not automatic across the whole
     product. Migration, repair, dedup, compression, closet regeneration,
     KG/tunnel writes, backend open-time repairs, direct collection APIs, and
-    adapters that bypass `managed_adapter_ingest()` remain unmanaged. The MCP
-    drawer, MCP diary, diary-file, and JSONL sweeper paths are no longer in this
-    list: four of the ten managed-receipt adaptations are now met on `dev`, with
-    six still open. Pre-receipt sweeper rows still require an explicit
-    provenance migration; this tranche does not fabricate historical receipts.
-    Legacy `mempalace migrate` blocks if receipt state exists so it cannot
-    silently discard the journal; adapting or retiring the remaining paths
-    stays in #22.
+    `PalaceContext` paths that bypass `managed_adapter_ingest()` remain
+    unmanaged. The MCP drawer, MCP diary, diary-file, and JSONL sweeper paths
+    are no longer in this list: four of the ten managed-receipt adaptations are
+    met on `dev`, with six still open. The receipt-optional canonical
+    project/conversation helper bypass is also retired: one of six retirement
+    dispositions is met, with five still open. Pre-receipt sweeper rows still
+    require an explicit provenance migration; no tranche fabricates historical
+    receipts. Legacy `mempalace migrate` blocks if receipt state exists so it
+    cannot silently discard the journal; adapting or retiring the remaining
+    paths stays in #22.
   - Writer disposition is now explicit and machine-readable in
     `docs/research/managed-write-boundary-dispositions-2026-07-14.json`: 21
     mutation surfaces are accounted for. Ten source/derived-output paths must
