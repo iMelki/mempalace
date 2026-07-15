@@ -3256,6 +3256,60 @@ def test_managed_write_retries_supported_exact_embedding_readback(tmp_path):
     assert [item["id"] for item in session.outputs] == ["stable-row"]
 
 
+def test_exact_snapshot_retries_supported_delayed_embedding_visibility():
+    class DelayedSnapshotCollection(_MemoryCollection):
+        def __init__(self):
+            super().__init__()
+            self.exact_reads = 0
+
+        def get_exact_embeddings(self, ids):
+            self.exact_reads += 1
+            if self.exact_reads == 1:
+                raise EmbeddingVisibilityError("Nothing found on disk")
+            return {item_id: (0.25, 0.5) for item_id in ids}
+
+    collection = DelayedSnapshotCollection()
+    collection.upsert(
+        documents=["stable output"],
+        ids=["stable-row"],
+        metadatas=[{"source_file": "logical://snapshot/delayed"}],
+    )
+
+    rows = write_receipts_module._collection_rows_for_ids(
+        collection,
+        ["stable-row"],
+        include_embeddings=True,
+    )
+
+    assert collection.exact_reads == 2
+    assert rows["stable-row"][2] == (0.25, 0.5)
+
+
+def test_exact_snapshot_fails_closed_when_embedding_visibility_never_arrives(monkeypatch):
+    class MissingSnapshotCollection(_MemoryCollection):
+        def get_exact_embeddings(self, _ids):
+            raise EmbeddingVisibilityError("Nothing found on disk")
+
+    collection = MissingSnapshotCollection()
+    collection.upsert(
+        documents=["stable output"],
+        ids=["stable-row"],
+        metadatas=[{"source_file": "logical://snapshot/missing"}],
+    )
+    monkeypatch.setattr(
+        write_receipts_module,
+        "_MANAGED_WRITE_READBACK_TIMEOUT_SECONDS",
+        0.0,
+    )
+
+    with pytest.raises(ReceiptIdentityError, match="exact embeddings did not stabilize"):
+        write_receipts_module._collection_rows_for_ids(
+            collection,
+            ["stable-row"],
+            include_embeddings=True,
+        )
+
+
 def test_exact_embedding_readback_propagates_unrelated_backend_errors():
     class ClosedCollection(_MemoryCollection):
         def get_exact_embeddings(self, ids):

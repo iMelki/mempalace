@@ -704,7 +704,12 @@ def detect_hall(content: str) -> str:
     return "general"
 
 
-def _extract_entities_for_metadata(content: str) -> str:
+def _extract_entities_for_metadata(
+    content: str,
+    *,
+    known_entities=None,
+    entity_languages=None,
+) -> str:
     """Extract entity names from content for metadata tagging.
 
     Combines the user's known-entity registry (cached across calls) with
@@ -722,7 +727,7 @@ def _extract_entities_for_metadata(content: str) -> str:
 
     matched: set = set()
 
-    known = _load_known_entities()
+    known = _load_known_entities() if known_entities is None else frozenset(known_entities)
     for name in known:
         if re.search(r"(?<!\w)" + re.escape(name) + r"(?!\w)", content):
             matched.add(name)
@@ -730,7 +735,7 @@ def _extract_entities_for_metadata(content: str) -> str:
     from .palace import _candidate_entity_words
 
     window = content[:_ENTITY_EXTRACT_WINDOW]
-    words = _candidate_entity_words(window)
+    words = _candidate_entity_words(window, entity_languages=entity_languages)
     freq: dict = {}
     for w in words:
         if w in _ENTITY_STOPLIST:

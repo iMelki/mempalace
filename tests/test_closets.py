@@ -18,9 +18,9 @@ Coverage map:
     no whole-file glue, max_distance enforcement.
   * Entity metadata — extracted, stoplist applied, registry cached by mtime.
   * Real BM25 — real IDF over candidate corpus, hybrid rerank.
-  * Diary ingest — drawers + closets created, incremental skips, state
-    file lives outside the diary dir, wing-prefixed drawer IDs prevent
-    cross-diary collisions, force=True purges leftover closets.
+  * Diary ingest — receipt-managed drawers + closets, exact unchanged reuse,
+    same-size source replacement, zero-output cleanup, rollback, external
+    state file, and wing-prefixed IDs.
 """
 
 import json
@@ -30,6 +30,7 @@ import tempfile
 import threading
 import time
 
+import pytest
 import yaml
 
 from mempalace.miner import (
@@ -577,25 +578,238 @@ class TestBM25:
 
 
 class TestDiaryIngest:
-    def test_ingest_creates_drawers_and_closets(self, tmp_path):
+    def test_undated_markdown_is_a_noop_without_palace_creation(self, tmp_path):
         diary_dir = tmp_path / "diaries"
         diary_dir.mkdir()
-        (diary_dir / "2026-04-13.md").write_text(
-            "# 2026-04-13\n\n## 10:00 PDT — Test\n\nBuilt the auth system.\n"
+        (diary_dir / "notes.md").write_text(
+            "# Notes\n\n## Undated\n\nThis content is not a dated diary source.\n",
+            encoding="utf-8",
         )
         palace_dir = tmp_path / "palace"
 
         from mempalace.diary_ingest import ingest_diaries
 
+        result = ingest_diaries(str(diary_dir), str(palace_dir))
+
+        assert result["days_updated"] == 0
+        assert result["receipt_ids"] == []
+        assert not palace_dir.exists()
+
+    def test_duplicate_date_files_fail_before_any_palace_mutation(self, tmp_path):
+        diary_dir = tmp_path / "diaries"
+        diary_dir.mkdir()
+        first = diary_dir / "2026-04-13-alpha.md"
+        second = diary_dir / "2026-04-13-bravo.md"
+        first.write_text(
+            "# 2026-04-13\n\n## Alpha — Test\n\nFirst source with enough diary content.\n",
+            encoding="utf-8",
+        )
+        second.write_text(
+            "# 2026-04-13\n\n## Bravo — Test\n\nSecond source with enough diary content.\n",
+            encoding="utf-8",
+        )
+        palace_dir = tmp_path / "palace"
+
+        from mempalace.diary_ingest import ingest_diaries
+
+        with pytest.raises(ValueError, match="multiple diary files target the same managed day"):
+            ingest_diaries(str(diary_dir), str(palace_dir))
+
+        assert not palace_dir.exists()
+
+    def test_entity_config_change_rewrites_unchanged_source(self, tmp_path, monkeypatch):
+        diary_dir = tmp_path / "diaries"
+        diary_dir.mkdir()
+        diary_path = diary_dir / "2026-04-13.md"
+        diary_path.write_text(
+            "# 2026-04-13\n\n## Entity config\n\nAtlas appears once in this diary entry.\n",
+            encoding="utf-8",
+        )
+        palace_dir = tmp_path / "palace"
+
+        import mempalace.diary_ingest as diary_ingest
+        from mempalace.write_receipts import ReceiptStore
+
+        known_entities: set[str] = set()
+        monkeypatch.setattr(
+            diary_ingest,
+            "_load_known_entities",
+            lambda: frozenset(known_entities),
+        )
+        first = diary_ingest.ingest_diaries(str(diary_dir), str(palace_dir))
+        store = ReceiptStore(str(palace_dir))
+        source_identity = store.source_identity(str(diary_path.resolve()), local_path=True)
+        first_receipt = store.find_current(source_identity)
+        assert first_receipt is not None
+
+        known_entities.add("Atlas")
+        second = diary_ingest.ingest_diaries(str(diary_dir), str(palace_dir))
+        second_receipt = store.find_current(source_identity)
+        assert second_receipt is not None
+
+        assert first["days_updated"] == 1
+        assert second["days_updated"] == 1
+        assert second_receipt["receipt_id"] != first_receipt["receipt_id"]
+        drawer = get_collection(str(palace_dir)).get(include=["metadatas"])
+        assert "Atlas" in drawer["metadatas"][0]["entities"].split(";")
+
+    def test_entity_language_change_rewrites_drawer_and_closets_from_same_snapshot(
+        self, tmp_path, monkeypatch
+    ):
+        diary_dir = tmp_path / "diaries"
+        diary_dir.mkdir()
+        diary_path = diary_dir / "2026-04-13.md"
+        diary_path.write_text(
+            "# 2026-04-13\n\n## Language config\n\n"
+            "Михаил написал код. Михаил отправил PR. Михаил получил ревью.\n",
+            encoding="utf-8",
+        )
+        palace_dir = tmp_path / "palace"
+
+        import mempalace.diary_ingest as diary_ingest
+        import mempalace.palace as palace_module
+        from mempalace.write_receipts import ReceiptStore
+
+        languages = ["en"]
+        monkeypatch.setattr(diary_ingest, "_load_known_entities", lambda: frozenset())
+        monkeypatch.setattr(
+            diary_ingest.MempalaceConfig,
+            "entity_languages",
+            property(lambda _self: tuple(languages)),
+        )
+        monkeypatch.setattr(palace_module, "_CANDIDATE_RX_CACHE", None)
+        palace_module._candidate_entity_words("Alice met Alice")
+
+        first = diary_ingest.ingest_diaries(str(diary_dir), str(palace_dir))
+        store = ReceiptStore(str(palace_dir))
+        source_identity = store.source_identity(str(diary_path.resolve()), local_path=True)
+        first_receipt = store.find_current(source_identity)
+        assert first_receipt is not None
+
+        languages.append("ru")
+        second = diary_ingest.ingest_diaries(str(diary_dir), str(palace_dir))
+        second_receipt = store.find_current(source_identity)
+        assert second_receipt is not None
+
+        assert first["days_updated"] == 1
+        assert second["days_updated"] == 1
+        assert second_receipt["receipt_id"] != first_receipt["receipt_id"]
+        drawer = get_collection(str(palace_dir)).get(include=["metadatas"])
+        assert "Михаил" in drawer["metadatas"][0]["entities"].split(";")
+        closets = get_closets_collection(str(palace_dir)).get(include=["documents"])
+        closet_entities = [
+            line.split("|")[1]
+            for document in closets["documents"]
+            for line in document.splitlines()
+        ]
+        assert any("Михаил" in entities.split(";") for entities in closet_entities)
+
+    def test_malformed_state_entry_is_repaired_after_managed_commit(self, tmp_path, monkeypatch):
+        diary_dir = tmp_path / "diaries"
+        diary_dir.mkdir()
+        diary_path = diary_dir / "2026-04-13.md"
+        diary_path.write_text(
+            "# 2026-04-13\n\n## State repair\n\nContent long enough for managed ingestion.\n",
+            encoding="utf-8",
+        )
+        palace_dir = tmp_path / "palace"
+
+        import mempalace.diary_ingest as diary_ingest
+
+        state_path = tmp_path / "state" / "diary.json"
+        state_path.parent.mkdir()
+        state_path.write_text(
+            json.dumps({f"diary|{diary_path.name}": "legacy-scalar"}),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            diary_ingest,
+            "_state_file_for",
+            lambda _palace_path, _diary_dir: state_path,
+        )
+
+        result = diary_ingest.ingest_diaries(str(diary_dir), str(palace_dir))
+        repaired = json.loads(state_path.read_text(encoding="utf-8"))
+
+        assert result["days_updated"] == 1
+        assert isinstance(repaired[f"diary|{diary_path.name}"], dict)
+        assert repaired[f"diary|{diary_path.name}"]["receipt_id"] == result["receipt_ids"][0]
+
+    def test_non_object_state_root_is_replaced_after_managed_commit(self, tmp_path, monkeypatch):
+        diary_dir = tmp_path / "diaries"
+        diary_dir.mkdir()
+        diary_path = diary_dir / "2026-04-13.md"
+        diary_path.write_text(
+            "# 2026-04-13\n\n## State root repair\n\n"
+            "Content long enough for managed ingestion.\n",
+            encoding="utf-8",
+        )
+        palace_dir = tmp_path / "palace"
+
+        import mempalace.diary_ingest as diary_ingest
+
+        state_path = tmp_path / "state" / "diary.json"
+        state_path.parent.mkdir()
+        state_path.write_text('["legacy-root"]', encoding="utf-8")
+        monkeypatch.setattr(
+            diary_ingest,
+            "_state_file_for",
+            lambda _palace_path, _diary_dir: state_path,
+        )
+
+        result = diary_ingest.ingest_diaries(str(diary_dir), str(palace_dir))
+        repaired = json.loads(state_path.read_text(encoding="utf-8"))
+
+        assert result["days_updated"] == 1
+        assert isinstance(repaired, dict)
+        assert repaired[f"diary|{diary_path.name}"]["receipt_id"] == result["receipt_ids"][0]
+
+    def test_ingest_creates_drawers_and_closets(self, tmp_path):
+        diary_dir = tmp_path / "diaries"
+        diary_dir.mkdir()
+        diary_path = diary_dir / "2026-04-13.md"
+        diary_path.write_text(
+            "# 2026-04-13\n\n## 10:00 PDT — Test\n\nBuilt the auth system.\n",
+            encoding="utf-8",
+        )
+        palace_dir = tmp_path / "palace"
+
+        from mempalace.diary_ingest import ingest_diaries
+        from mempalace.receipt_verifier import verify_receipt
+        from mempalace.write_receipts import ReceiptStore
+
         result = ingest_diaries(str(diary_dir), str(palace_dir), force=True)
         assert result["days_updated"] >= 1
-        assert get_collection(str(palace_dir)).count() >= 1
+        drawers = get_collection(str(palace_dir))
+        closets = get_closets_collection(str(palace_dir))
+        assert drawers.count() >= 1
+        assert closets.count() >= 1
+        assert len(result["receipt_ids"]) == 1
+
+        store = ReceiptStore(str(palace_dir))
+        source_identity = store.source_identity(str(diary_path.resolve()), local_path=True)
+        current = store.find_current(source_identity)
+        assert current is not None
+        assert current["receipt_id"] == result["receipt_ids"][0]
+        assert {output["collection"] for output in current["outputs"]["identities"]} == {
+            "drawers",
+            "closets",
+        }
+        assert (
+            verify_receipt(
+                current,
+                collections={"drawers": drawers, "closets": closets},
+                store=store,
+            ).status
+            == "represented"
+        )
 
     def test_ingest_skips_unchanged_on_second_run(self, tmp_path):
         diary_dir = tmp_path / "diaries"
         diary_dir.mkdir()
         (diary_dir / "2026-04-13.md").write_text(
-            "# 2026-04-13\n\n## 10:00 — Test\n\nContent here that's long enough.\n"
+            "# 2026-04-13\n\n## 10:00 — Test\n\nContent here that's long enough.\n",
+            encoding="utf-8",
         )
         palace_dir = tmp_path / "palace"
 
@@ -604,6 +818,172 @@ class TestDiaryIngest:
         ingest_diaries(str(diary_dir), str(palace_dir), force=True)
         result = ingest_diaries(str(diary_dir), str(palace_dir))
         assert result["days_updated"] == 0
+        assert result["days_unchanged"] == 1
+
+    def test_same_size_change_supersedes_receipt_and_rebuilds_complete_closets(self, tmp_path):
+        diary_dir = tmp_path / "diaries"
+        diary_dir.mkdir()
+        diary_path = diary_dir / "2026-04-13.md"
+        first_text = (
+            "# 2026-04-13\n\n## Alpha — Test\n\n"
+            "This marker records the initial diary topic in full.\n"
+        )
+        second_text = first_text.replace("Alpha", "Bravo")
+        assert len(first_text) == len(second_text)
+        diary_path.write_text(first_text, encoding="utf-8")
+        first_size = diary_path.stat().st_size
+        palace_dir = tmp_path / "palace"
+
+        from mempalace.diary_ingest import _diary_drawer_id, ingest_diaries
+        from mempalace.write_receipts import ReceiptStore, sha256_bytes
+
+        first = ingest_diaries(str(diary_dir), str(palace_dir), force=True)
+        store = ReceiptStore(str(palace_dir))
+        source_identity = store.source_identity(str(diary_path.resolve()), local_path=True)
+        first_current = store.find_current(source_identity)
+        assert first_current is not None
+
+        diary_path.write_text(second_text, encoding="utf-8")
+        assert diary_path.stat().st_size == first_size
+        second = ingest_diaries(str(diary_dir), str(palace_dir))
+
+        assert first["days_updated"] == 1
+        assert second["days_updated"] == 1
+        assert second["days_unchanged"] == 0
+        current = store.find_current(source_identity)
+        assert current is not None
+        assert current["receipt_id"] != first_current["receipt_id"]
+        assert current["source"]["content_hash"] == sha256_bytes(diary_path.read_bytes())
+
+        drawer_id = _diary_drawer_id("diary", "2026-04-13")
+        drawer = get_collection(str(palace_dir)).get(ids=[drawer_id])
+        assert drawer["documents"] == [second_text]
+        closet_docs = get_closets_collection(str(palace_dir)).get(
+            where={"source_file": str(diary_path.resolve())},
+            include=["documents"],
+        )["documents"]
+        closet_text = "\n".join(closet_docs).lower()
+        assert "bravo" in closet_text
+        assert "alpha" not in closet_text
+
+    def test_small_source_publishes_zero_output_and_removes_stale_rows(self, tmp_path):
+        diary_dir = tmp_path / "diaries"
+        diary_dir.mkdir()
+        diary_path = diary_dir / "2026-04-13.md"
+        diary_path.write_text(
+            "# 2026-04-13\n\n## 10:00 — Test\n\n"
+            "This represented diary content is intentionally long enough.\n",
+            encoding="utf-8",
+        )
+        palace_dir = tmp_path / "palace"
+
+        from mempalace.diary_ingest import _diary_drawer_id, ingest_diaries
+        from mempalace.receipt_verifier import verify_receipt
+        from mempalace.write_receipts import ReceiptStore
+
+        ingest_diaries(str(diary_dir), str(palace_dir), force=True)
+        diary_path.write_text("# 2026-04-13\n", encoding="utf-8")
+        removed = ingest_diaries(str(diary_dir), str(palace_dir))
+
+        drawer_id = _diary_drawer_id("diary", "2026-04-13")
+        drawers = get_collection(str(palace_dir))
+        closets = get_closets_collection(str(palace_dir))
+        assert removed["days_updated"] == 1
+        assert drawers.get(ids=[drawer_id])["ids"] == []
+        assert (
+            closets.get(
+                where={"source_file": str(diary_path.resolve())},
+                include=[],
+            )["ids"]
+            == []
+        )
+
+        store = ReceiptStore(str(palace_dir))
+        source_identity = store.source_identity(str(diary_path.resolve()), local_path=True)
+        current = store.find_current(source_identity)
+        assert current is not None
+        assert current["disposition"] == "ZERO_OUTPUT"
+        assert current["outputs"]["identities"] == []
+        assert (
+            verify_receipt(
+                current,
+                collections={"drawers": drawers, "closets": closets},
+                store=store,
+            ).status
+            == "represented"
+        )
+
+        repeated = ingest_diaries(str(diary_dir), str(palace_dir))
+        assert repeated["days_updated"] == 0
+        assert repeated["days_unchanged"] == 1
+
+    def test_failed_closet_write_rolls_back_outputs_receipt_and_state(self, tmp_path, monkeypatch):
+        diary_dir = tmp_path / "diaries"
+        diary_dir.mkdir()
+        diary_path = diary_dir / "2026-04-13.md"
+        diary_path.write_text(
+            "# 2026-04-13\n\n## 10:00 — Test\n\n"
+            "Baseline diary marker with enough content for a closet.\n",
+            encoding="utf-8",
+        )
+        palace_dir = tmp_path / "palace"
+
+        import mempalace.diary_ingest as diary_ingest
+        from mempalace.write_receipts import ReceiptStore
+
+        diary_ingest.ingest_diaries(str(diary_dir), str(palace_dir), force=True)
+        state_path = diary_ingest._state_file_for(str(palace_dir), diary_dir.resolve())
+        state_before = state_path.read_bytes()
+        drawers = get_collection(str(palace_dir))
+        closets = get_closets_collection(str(palace_dir))
+        drawer_before = drawers.get(include=["documents", "metadatas"])
+        closets_before = closets.get(include=["documents", "metadatas"])
+        store = ReceiptStore(str(palace_dir))
+        source_identity = store.source_identity(str(diary_path.resolve()), local_path=True)
+        receipt_before = store.find_current(source_identity)
+        assert receipt_before is not None
+
+        class FailOneClosetWrite:
+            def __init__(self, collection):
+                self.collection = collection
+                self.fail = True
+
+            def _write(self, method, kwargs):
+                if self.fail:
+                    self.fail = False
+                    raise RuntimeError("injected managed closet failure")
+                return getattr(self.collection, method)(**kwargs)
+
+            def add(self, **kwargs):
+                return self._write("add", kwargs)
+
+            def upsert(self, **kwargs):
+                return self._write("upsert", kwargs)
+
+            def __getattr__(self, name):
+                return getattr(self.collection, name)
+
+        failing_closets = FailOneClosetWrite(closets)
+        monkeypatch.setattr(
+            diary_ingest,
+            "get_closets_collection",
+            lambda _palace_path: failing_closets,
+        )
+        diary_path.write_text(
+            "# 2026-04-13\n\n## 10:00 — Test\n\n"
+            "Replacement diary marker that must be rolled back exactly.\n",
+            encoding="utf-8",
+        )
+
+        with pytest.raises(RuntimeError, match="injected managed closet failure"):
+            diary_ingest.ingest_diaries(str(diary_dir), str(palace_dir))
+
+        assert state_path.read_bytes() == state_before
+        assert drawers.get(include=["documents", "metadatas"]) == drawer_before
+        assert closets.get(include=["documents", "metadatas"]) == closets_before
+        current = store.find_current(source_identity)
+        assert current is not None
+        assert current["receipt_id"] == receipt_before["receipt_id"]
 
     def test_state_file_lives_outside_diary_dir(self, tmp_path):
         # Regression: the original implementation wrote
@@ -613,7 +993,8 @@ class TestDiaryIngest:
         diary_dir = tmp_path / "diaries"
         diary_dir.mkdir()
         (diary_dir / "2026-04-13.md").write_text(
-            "# 2026-04-13\n\n## 10:00 — Test\n\nBody content here long enough.\n"
+            "# 2026-04-13\n\n## 10:00 — Test\n\nBody content here long enough.\n",
+            encoding="utf-8",
         )
         palace_dir = tmp_path / "palace"
 
@@ -645,11 +1026,13 @@ class TestDiaryIngest:
         # different wings. Each must produce a distinct drawer.
         personal_dir = tmp_path / "personal"
         personal_dir.mkdir()
-        (personal_dir / "2026-04-13.md").write_text(date_md + "Personal-only marker.\n")
+        (personal_dir / "2026-04-13.md").write_text(
+            date_md + "Personal-only marker.\n", encoding="utf-8"
+        )
 
         work_dir = tmp_path / "work"
         work_dir.mkdir()
-        (work_dir / "2026-04-13.md").write_text(date_md + "Work-only marker.\n")
+        (work_dir / "2026-04-13.md").write_text(date_md + "Work-only marker.\n", encoding="utf-8")
 
         palace_dir = tmp_path / "palace"
 
@@ -764,8 +1147,6 @@ class TestTunnels:
     def test_empty_endpoint_fields_rejected(self):
         """Regression: create_tunnel must reject empty strings on any
         endpoint field so the JSON store can't grow phantom tunnels."""
-        import pytest
-
         for args in [
             ("", "r1", "wing", "r2"),
             ("wing", "", "wing", "r2"),

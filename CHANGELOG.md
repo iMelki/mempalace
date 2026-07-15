@@ -55,6 +55,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   skip; the final repository gate passes 1,695 tests with 7 skips and 106
   intentional deselections.
 
+- **Receipt-managed diary-file drawer and closet ingestion (#22).** Replaced
+  size-only incremental checks and direct Chroma upserts with one managed
+  source transaction per dated Markdown file. Exact source bytes and an
+  output-affecting entity-registry/language digest now govern reuse; changes
+  replace the complete day drawer and closet set, semantic small-file removal
+  publishes a verified `ZERO_OUTPUT` successor, and handled failures restore
+  the exact prior drawers, closets, embeddings, receipt head, and state file.
+  State publication is atomic convenience state after receipt completion,
+  malformed legacy scalar entries self-repair, and duplicate `(wing, date)`
+  files fail before palace mutation, while undated-only input returns before
+  palace creation. Missing or renamed files remain
+  deliberately unpruned until an explicit deletion policy is approved. The
+  same language snapshot governs drawer and closet extraction, non-object
+  state roots self-repair after the managed commit, and the focused diary proof
+  passes 13 tests. Exact snapshot/reuse reads now retry Chroma's classified
+  delayed-vector visibility for at most two seconds, while unrelated errors or
+  permanent absence still fail closed. The expanded receipt/diary proof passes
+  207 tests, and the final repository gate passes 1,706 tests with 7 skips and
+  106 intentional deselections.
+
 - **Managed source-write receipts and exact verification foundation (#22).**
   Managed project, conversation, and RFC 002 adapter outputs now emit local
   append-only receipts with exact output manifests. Source locks cover read,

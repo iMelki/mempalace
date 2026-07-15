@@ -20,6 +20,11 @@
     "retireUnmanagedMutationSurface": 6,
     "explicitlyExcludeWithBoundary": 5
   },
+  "implementationProgress": {
+    "adaptationsMetOnDev": 3,
+    "adaptationsRemaining": 7,
+    "completedAdaptationIds": ["diary-ingest", "mcp-diary-write", "mcp-drawer-mutations"]
+  },
   "entries": [
     {
       "id": "migration-rebuild-swap",
@@ -116,11 +121,12 @@
       "id": "diary-ingest",
       "surface": "Diary file drawer and closet ingestion",
       "disposition": "adapt-to-managed-receipts",
-      "currentState": "source-locked-direct-write",
+      "currentState": "managed-receipt-adapter-on-dev",
+      "acceptanceStatus": "met-on-dev",
       "managedRepresentation": "Preserve the diary source lock while routing drawer and closet writes through managed ingestion and rewrite recovery.",
       "reason": "A diary file is a normal versioned source and should have the same exact representation proof as project and conversation files.",
       "evidence": [
-        {"path": "mempalace/diary_ingest.py", "line": 75},
+        {"path": "mempalace/diary_ingest.py", "line": 138},
         {"path": "tests/test_closets.py", "line": 580}
       ],
       "requiredAcceptance": ["changed-file supersession", "zero-output behavior", "drawer and closet verification"]

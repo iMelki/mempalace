@@ -53,6 +53,19 @@ def test_managed_write_boundary_manifest_is_complete_and_actionable():
         "retireUnmanagedMutationSurface": 6,
         "explicitlyExcludeWithBoundary": 5,
     }
+    assert manifest["implementationProgress"] == {
+        "adaptationsMetOnDev": 3,
+        "adaptationsRemaining": 7,
+        "completedAdaptationIds": [
+            "diary-ingest",
+            "mcp-diary-write",
+            "mcp-drawer-mutations",
+        ],
+    }
+
+    diary_ingest = next(entry for entry in entries if entry["id"] == "diary-ingest")
+    assert diary_ingest["currentState"] == "managed-receipt-adapter-on-dev"
+    assert diary_ingest["acceptanceStatus"] == "met-on-dev"
 
     for entry in entries:
         assert entry["surface"]

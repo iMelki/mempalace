@@ -2197,7 +2197,55 @@ def _collection_rows_for_ids(
     require_all: bool = True,
     include_embeddings: bool = False,
 ) -> dict[str, tuple[str, dict, Optional[tuple[Any, ...]]]]:
-    """Read stable row identity, fetching embeddings only when explicitly required."""
+    """Read stable row identity with bounded retry for delayed exact vectors."""
+    if not include_embeddings:
+        return _collection_rows_for_ids_once(
+            collection,
+            item_ids,
+            require_all=require_all,
+            include_embeddings=False,
+        )
+
+    from .backends.base import EmbeddingVisibilityError
+
+    started = time.monotonic()
+    deadline = started + _MANAGED_WRITE_READBACK_TIMEOUT_SECONDS
+    retry_seconds = _MANAGED_WRITE_READBACK_INITIAL_RETRY_SECONDS
+    attempts = 0
+    while True:
+        attempts += 1
+        try:
+            return _collection_rows_for_ids_once(
+                collection,
+                item_ids,
+                require_all=require_all,
+                include_embeddings=True,
+            )
+        except ReceiptIdentityError as exc:
+            if not isinstance(exc.__cause__, EmbeddingVisibilityError):
+                raise
+            if time.monotonic() >= deadline:
+                elapsed = time.monotonic() - started
+                raise ReceiptIdentityError(
+                    "collection exact embeddings did not stabilize "
+                    f"after {attempts} attempts in {elapsed:.3f}s"
+                ) from exc
+            remaining = max(0.0, deadline - time.monotonic())
+            time.sleep(min(retry_seconds, remaining))
+            retry_seconds = min(
+                retry_seconds * _MANAGED_WRITE_READBACK_BACKOFF,
+                _MANAGED_WRITE_READBACK_MAX_RETRY_SECONDS,
+            )
+
+
+def _collection_rows_for_ids_once(
+    collection: Any,
+    item_ids: list[str],
+    *,
+    require_all: bool,
+    include_embeddings: bool,
+) -> dict[str, tuple[str, dict, Optional[tuple[Any, ...]]]]:
+    """Read one exact document, metadata, and optional embedding snapshot."""
     rows: dict[str, tuple[str, dict, Optional[tuple[Any, ...]]]] = {}
     for start in range(0, len(item_ids), 1000):
         expected = item_ids[start : start + 1000]

@@ -10,7 +10,7 @@ This file is the durable local index for active `mempalace` issues.
   - Status: the managed MCP writer proof passes `270` tests with one platform
     skip, the MCP-server proof passes `91` tests with one skip, and the protected
     repository gate passes `1,695` tests with `7` skipped and `106` intentionally
-    deselected. The current managed-write tranche is committed and pushed on
+    deselected. The MCP managed-write tranche is committed and pushed on
     `dev` in `3cd8d10`; GitHub #22 remains open and `In progress`. Historical
     recovery remains NO-GO; no historical mining or recovery is authorized.
   - Fresh read-only audit reconciled 25,448 of 29,449 retained staged source
@@ -49,6 +49,26 @@ This file is the durable local index for active `mempalace` issues.
     server suites pass `270` tests with one platform skip. The durable log is
     under `.local-logs/pytest-mcp-managed-20260715-013828.out.log` and remains
     an untracked local artifact.
+  - Diary-file writer tranche implemented on `dev`: each dated Markdown source
+    now replaces one day drawer plus its complete current closets under one
+    managed receipt and durable rollback snapshot. Exact source-byte hashes,
+    the entity-registry/language configuration digest, same-size changes,
+    semantic zero-output, and drawer/closet identities participate in reuse or
+    supersession. The mutable state file is atomic convenience state rather
+    than authority; malformed scalar entries are repaired after commit. Two
+    files targeting one `(wing, date)` fail before palace mutation, and a
+    conflicting source from another invocation fails the managed ownership
+    check before overwrite. Undated-only Markdown is a no-op before palace
+    creation. Exact snapshot/reuse reads also retry only Chroma's classified
+    delayed-vector visibility for at most two seconds and otherwise fail
+    closed. The focused diary proof passes `13` tests; contract
+    and community research are in
+    `docs/research/diary-file-managed-write-contract-2026-07-15.md`.
+  - Diary-file final repository gate: `1,706` passed, `7` skipped, `106`
+    intentionally deselected in `141.05s`. The expanded receipt/diary proof
+    passes `207` tests in `59.03s`. Durable local evidence is under
+    `.local-logs/pytest-diary-final-20260715T030401.out.log` and
+    `.local-logs/diary-receipt-broad-final-20260715T030241.log`.
   - Final repository gate: `1,695` passed, `7` skipped, `106` intentionally
     deselected in `136.93s`; durable output is under
     `.local-logs/pytest-full-final-20260715-014112.out.log`.
@@ -73,13 +93,14 @@ This file is the durable local index for active `mempalace` issues.
     deletes exactly one large row, `tests/test_write_receipts.py` passes `110`
     tests, Ruff is clean, and no live palace was opened by this proof.
   - Explicit remaining scope: receipts are not automatic across the whole
-    product. Migration, repair, dedup, sweep, compression, diary-file
-    drawer/closet ingestion, closet regeneration, KG/tunnel writes, backend
-    open-time repairs, direct collection APIs, and adapters that bypass
-    `managed_adapter_ingest()` remain unmanaged. The MCP drawer and MCP diary
-    paths are no longer in this list. Legacy `mempalace migrate` now blocks if
-    receipt state exists so it cannot silently discard the journal; adapting
-    or retiring the remaining paths stays in #22.
+    product. Migration, repair, dedup, sweep, compression, closet regeneration,
+    KG/tunnel writes, backend open-time repairs, direct collection APIs, and
+    adapters that bypass `managed_adapter_ingest()` remain unmanaged. The MCP
+    drawer, MCP diary, and diary-file paths are no longer in this list: three of
+    the ten managed-receipt adaptations are now met on `dev`, with seven still
+    open. Legacy `mempalace migrate` blocks if receipt state exists so it cannot
+    silently discard the journal; adapting or retiring the remaining paths
+    stays in #22.
   - Writer disposition is now explicit and machine-readable in
     `docs/research/managed-write-boundary-dispositions-2026-07-14.json`: 21
     mutation surfaces are accounted for. Ten source/derived-output paths must
@@ -110,7 +131,9 @@ This file is the durable local index for active `mempalace` issues.
     backend shutdown calls Chroma's public `close()`, but automatic cache
     replacement still needs handle-aware retirement because eager close
     invalidated live collection handles in the full suite. Windows DACL
-    enforcement/readback remains unproven.
+    enforcement/readback remains unproven. Diary files that disappear or are
+    renamed are not auto-pruned: absence remains visible as stale convenience
+    state until #22 defines an explicit, reviewable deletion policy.
 
 - [#19 - Audit likely duplicate drawers surfaced by #13 probe](https://github.com/iMelki/mempalace/issues/19)
   - Status: open go/no-go decision. This is a duplicate-drawer audit and

@@ -166,8 +166,10 @@ the redundant immutable invalidation file. Readback reconciles missing hook
 files from authoritative COMPLETE events, covering a crash between those two
 publications. Failed or rolled-back attempts do not appear in invalidation
 readback. Knowledge-graph invalidation, deduplication, repair deletion, diary
-ingest, sweeper writes, and MCP drawer mutations are separate paths and were
-not changed in this scope.
+ingest, sweeper writes, and MCP drawer mutations were separate paths in the
+initial foundation scope. Subsequent #22 tranches adapted MCP drawer/diary
+mutations and diary-file drawer/closet ingestion to the same managed receipt
+and rollback boundary; the other named paths remain separate.
 
 ## V1 event shape
 
@@ -604,13 +606,14 @@ The focused receipt tests cover:
 2. Managed project and adapter closets are included in the V1 output manifest
    and verifier. Unmanaged closet-producing paths remain outside this boundary.
 3. The V1 inventory is intentionally explicit. `migrate.py`, `repair.py`,
-   `dedup.py`, `sweeper.py`, compression, diary ingestion, closet regeneration,
-   topic-tunnel writes, knowledge-graph writes, MCP drawer mutations, project
-   sidecars, backend open-time repair/configuration, direct `ChromaBackend` or
-   `palace.get_collection()` use, and unmanaged `PalaceContext` calls do not
-   emit V1 receipts. MCP palace mutations now share the process/cross-process
-   palace lock with managed rewrites and perform exact process-local row
-   rechecks; this is serialization, not provenance or a Chroma transaction.
+   `dedup.py`, `sweeper.py`, compression, closet regeneration, topic-tunnel
+   writes, knowledge-graph writes, project sidecars, backend open-time
+   repair/configuration, direct `ChromaBackend` or `palace.get_collection()`
+   use, and unmanaged `PalaceContext` calls do not emit V1 receipts. MCP drawer
+   and diary mutations plus diary-file drawer/closet ingestion now use managed
+   receipts, exact ownership checks, and rollback. This does not make Chroma a
+   multi-collection transaction, and missing/renamed diary files are not
+   deletion authority.
    `mempalace migrate` now blocks non-dry rebuilding when a receipt root exists,
    but receipt-aware migration and invalidation from the other mutation paths
    remain open work in #22. Their reviewed dispositions are frozen in
