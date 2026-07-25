@@ -668,15 +668,20 @@ def create_http_app(
         async with manager.run():
             yield
 
+    from .status import get_fast_drawer_count
+
     async def healthz(_request: Any) -> JSONResponse:
-        return JSONResponse(
-            {
-                "status": "ok",
-                "service": "mempalace-mcp",
-                "transport": "native-http",
-                "version": __version__,
-            }
-        )
+        drawers = get_fast_drawer_count()
+        payload = {
+            "status": "ok",
+            "service": "mempalace-mcp",
+            "transport": "native-http",
+            "version": __version__,
+        }
+        if drawers is not None:
+            payload["drawers"] = drawers
+            payload["drawerCount"] = drawers
+        return JSONResponse(payload)
 
     app = Starlette(
         routes=[

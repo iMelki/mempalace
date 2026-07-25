@@ -18,6 +18,53 @@ from typing import DefaultDict
 COLLECTION_NAME = "mempalace_drawers"
 
 
+def _sqlite_fast_drawer_count(palace_path: str) -> int | None:
+    """Return fast total drawer count from SQLite without wing/room metadata JOINs."""
+    sqlite_path = os.path.join(palace_path, "chroma.sqlite3")
+    if not os.path.exists(sqlite_path):
+        return None
+
+    try:
+        conn = sqlite3.connect(f"file:{sqlite_path}?mode=ro", uri=True)
+        try:
+            row = conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM embeddings e
+                JOIN segments s ON e.segment_id = s.id
+                JOIN collections c ON s.collection = c.id
+                WHERE c.name = ? AND s.scope = 'METADATA'
+                """,
+                (COLLECTION_NAME,),
+            ).fetchone()
+            return int(row[0]) if row and row[0] is not None else 0
+        finally:
+            conn.close()
+    except Exception:
+        return None
+
+
+def get_fast_drawer_count(palace_path: str | None = None) -> int | None:
+    """Fast O(1) total drawer count for health checks and status probes."""
+    if not palace_path:
+        palace_path = (
+            os.environ.get("MEMPALACE_PATH")
+            or os.environ.get("MEMPALACE_PALACE_PATH")
+            or os.path.expanduser("~/.mempalace")
+        )
+    count = _sqlite_fast_drawer_count(palace_path)
+    if count is not None:
+        return count
+
+    try:
+        from .palace import get_collection
+
+        col = get_collection(palace_path, create=False)
+        return col.count()
+    except Exception:
+        return None
+
+
 def _sqlite_status_counts(palace_path: str):
     """Return ``(total, wing_rooms)`` from Chroma SQLite metadata when available."""
 
