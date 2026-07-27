@@ -44,14 +44,37 @@ def _sqlite_fast_drawer_count(palace_path: str) -> int | None:
         return None
 
 
+def _default_palace_path() -> str:
+    """Resolve the palace path the same way every other module does.
+
+    This module previously fell back to ``~/.mempalace`` -- the CONFIG
+    directory -- while ``config.DEFAULT_PALACE_PATH`` and every other caller
+    use ``~/.mempalace/palace``. Both directories contain a ``chroma.sqlite3``,
+    so the wrong one opened cleanly and returned a confident **0** for a palace
+    holding 1,003,935 drawers. That zero was served on ``/healthz`` next to
+    ``status: ok``, which reads as "the palace is empty" rather than "I read
+    the wrong file".
+
+    Imported lazily so this module stays dependency-light: the CLI status
+    command must keep working when the vector backend is broken.
+    """
+
+    explicit = os.environ.get("MEMPALACE_PATH") or os.environ.get("MEMPALACE_PALACE_PATH")
+    if explicit:
+        return explicit
+
+    try:
+        from .config import DEFAULT_PALACE_PATH
+
+        return DEFAULT_PALACE_PATH
+    except Exception:
+        return os.path.join(os.path.expanduser("~"), ".mempalace", "palace")
+
+
 def get_fast_drawer_count(palace_path: str | None = None) -> int | None:
     """Fast O(1) total drawer count for health checks and status probes."""
     if not palace_path:
-        palace_path = (
-            os.environ.get("MEMPALACE_PATH")
-            or os.environ.get("MEMPALACE_PALACE_PATH")
-            or os.path.expanduser("~/.mempalace")
-        )
+        palace_path = _default_palace_path()
     count = _sqlite_fast_drawer_count(palace_path)
     if count is not None:
         return count
