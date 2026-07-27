@@ -334,7 +334,7 @@ class TestReadTools:
         assert probe_started.is_set()
         assert calls == 1
         assert mcp_server._vector_disabled is True
-        assert "bounded lifetime" in mcp_server._vector_disabled_reason
+        assert "capacity probe" in mcp_server._vector_disabled_reason.lower()
         assert elapsed < 1
         with mcp_server._hnsw_capacity_condition:
             assert not mcp_server._hnsw_capacity_inflight
