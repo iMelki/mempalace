@@ -1,0 +1,13 @@
+   Building mempalace @ file:///S:/source/CCAI/Assistants/tools/Memory/mempalace
+WARN Retry attempt #0. Sleeping 1.4771643s before the next attempt
+WARN Retry attempt #1. Sleeping 1.9586575s before the next attempt
+WARN Retry attempt #2. Sleeping 1.3009065s before the next attempt
+  × Failed to build `mempalace @
+  │ file:///S:/source/CCAI/Assistants/tools/Memory/mempalace`
+  ├─▶ Failed to resolve requirements from `build-system.requires`
+  ├─▶ No solution found when resolving: `hatchling`
+  ├─▶ Request failed after 3 retries in 5.4s
+  ├─▶ Failed to fetch: `https://pypi.org/simple/hatchling/`
+  ├─▶ error sending request for url (https://pypi.org/simple/hatchling/)
+  ├─▶ client error (Connect)
+  ╰─▶ invalid peer certificate: UnknownIssuer

@@ -1,0 +1,82 @@
+{
+  "artifactDirectory": "C:\\Users\\Milky\\AppData\\Local\\MemSys\\eval-artifacts\\mempalace-write-receipt-restart\\20260714T141328Z-b708938a",
+  "artifactPath": "C:\\Users\\Milky\\AppData\\Local\\MemSys\\eval-artifacts\\mempalace-write-receipt-restart\\20260714T141328Z-b708938a\\probe-result.json",
+  "cleanup": {
+    "attempted": true,
+    "succeeded": true
+  },
+  "durationSeconds": 6.242,
+  "failure": null,
+  "finishedAt": "2026-07-14T14:13:35.101715Z",
+  "phases": [
+    {
+      "durationSeconds": 1.821,
+      "exitCode": 0,
+      "exitMatched": true,
+      "expectedExitCode": 0,
+      "phase": "seed",
+      "stderrLog": "C:\\Users\\Milky\\AppData\\Local\\MemSys\\eval-artifacts\\mempalace-write-receipt-restart\\20260714T141328Z-b708938a\\phase-seed.stderr.log",
+      "stdoutLog": "C:\\Users\\Milky\\AppData\\Local\\MemSys\\eval-artifacts\\mempalace-write-receipt-restart\\20260714T141328Z-b708938a\\phase-seed.stdout.log",
+      "timedOut": false
+    },
+    {
+      "durationSeconds": 1.54,
+      "exitCode": 73,
+      "exitMatched": true,
+      "expectedExitCode": 73,
+      "phase": "interrupt",
+      "stderrLog": "C:\\Users\\Milky\\AppData\\Local\\MemSys\\eval-artifacts\\mempalace-write-receipt-restart\\20260714T141328Z-b708938a\\phase-interrupt.stderr.log",
+      "stdoutLog": "C:\\Users\\Milky\\AppData\\Local\\MemSys\\eval-artifacts\\mempalace-write-receipt-restart\\20260714T141328Z-b708938a\\phase-interrupt.stdout.log",
+      "timedOut": false
+    },
+    {
+      "durationSeconds": 1.563,
+      "exitCode": 0,
+      "exitMatched": true,
+      "expectedExitCode": 0,
+      "phase": "recover",
+      "stderrLog": "C:\\Users\\Milky\\AppData\\Local\\MemSys\\eval-artifacts\\mempalace-write-receipt-restart\\20260714T141328Z-b708938a\\phase-recover.stderr.log",
+      "stdoutLog": "C:\\Users\\Milky\\AppData\\Local\\MemSys\\eval-artifacts\\mempalace-write-receipt-restart\\20260714T141328Z-b708938a\\phase-recover.stdout.log",
+      "timedOut": false
+    },
+    {
+      "durationSeconds": 1.301,
+      "exitCode": 0,
+      "exitMatched": true,
+      "expectedExitCode": 0,
+      "phase": "verify",
+      "stderrLog": "C:\\Users\\Milky\\AppData\\Local\\MemSys\\eval-artifacts\\mempalace-write-receipt-restart\\20260714T141328Z-b708938a\\phase-verify.stderr.log",
+      "stdoutLog": "C:\\Users\\Milky\\AppData\\Local\\MemSys\\eval-artifacts\\mempalace-write-receipt-restart\\20260714T141328Z-b708938a\\phase-verify.stdout.log",
+      "timedOut": false
+    }
+  ],
+  "processBoundary": {
+    "expectedHardExitCode": 73,
+    "expectedHardExitObserved": true,
+    "overlappingPersistentClients": false,
+    "strictlySequential": true
+  },
+  "recovery": {
+    "action": "restore",
+    "remainingRecoveries": 0,
+    "restoredRows": 1,
+    "sqliteIntegrity": "ok",
+    "vectorQueryTopId": "restart-probe-baseline"
+  },
+  "runId": "20260714T141328Z-b708938a",
+  "schema": "mempalace-write-receipt-restart-probe/v1",
+  "scope": {
+    "historicalSourcesRead": false,
+    "livePalaceTouched": false,
+    "mutationTarget": "disposable-synthetic-chroma",
+    "networkRequired": false,
+    "providerCalls": false,
+    "railwayAccessed": false
+  },
+  "startedAt": "2026-07-14T14:13:28.859669Z",
+  "status": "ok",
+  "versions": {
+    "chromadb": "1.5.9",
+    "python": "3.13.2"
+  }
+}

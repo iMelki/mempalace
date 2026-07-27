@@ -1,0 +1,18 @@
+........................................................................ [ 42%]
+........................................................................ [ 84%]
+...........................                                              [100%]
+============================== warnings summary ===============================
+tests/test_write_receipts.py::test_real_chroma_receipt_readback_does_not_require_embeddings
+tests/test_backends.py::test_below_sync_threshold_exact_embeddings_survive_backend_close_reopen
+tests/test_backends.py::test_chroma_backend_accepts_palace_ref_kwarg
+tests/test_backends.py::test_chroma_backend_create_true_creates_directory_and_collection
+tests/test_backends.py::test_chroma_backend_creates_collection_with_cosine_distance
+tests/test_backends.py::test_chroma_backend_sets_hnsw_bloat_guard_on_creation
+tests/test_backends.py::test_chroma_backend_create_collection_sets_hnsw_bloat_guard
+tests/test_backends.py::test_get_collection_create_true_is_idempotent
+tests/test_backends.py::test_get_collection_create_true_preserves_existing_metadata
+  C:\Users\Milky\AppData\Local\Programs\Python\Python313\Lib\site-packages\chromadb\api\collection_configuration.py:327: DeprecationWarning: legacy embedding function config: '_DeterministicEmbeddingFunction' object has no attribute 'is_legacy'
+    return json.dumps(create_collection_configuration_to_json(config, metadata))
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+171 passed, 9 warnings in 49.19s

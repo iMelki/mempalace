@@ -1,0 +1,7 @@
+{
+  "pid": 81568,
+  "stderr": "S:\\source\\CCAI\\Assistants\\tools\\Memory\\mempalace\\.local-logs\\receipt-restart-probe\\20260714-173238.regression.stderr.log",
+  "command": "python -m pytest tests/test_receipt_restart_probe.py tests/test_managed_write_boundary_manifest.py tests/test_historical_cohort_recovery_plan.py tests/test_write_receipts.py tests/test_backends.py -q",
+  "stdout": "S:\\source\\CCAI\\Assistants\\tools\\Memory\\mempalace\\.local-logs\\receipt-restart-probe\\20260714-173238.regression.stdout.log",
+  "startedAt": "2026-07-14T17:32:38.8364227+03:00"
+}

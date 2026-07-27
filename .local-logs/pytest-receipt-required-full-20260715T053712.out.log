@@ -1,0 +1,103 @@
+........................................................................ [  4%]
+........................................................................ [  8%]
+........................................................................ [ 12%]
+........................................................................ [ 16%]
+........................................................................ [ 20%]
+........................................................................ [ 24%]
+........................................................................ [ 28%]
+........................................................................ [ 33%]
+..............................................................s......... [ 37%]
+................sss..................................................... [ 41%]
+........................................................................ [ 45%]
+........................................................................ [ 49%]
+..................F..................................................... [ 53%]
+........................................................................ [ 57%]
+.s...................................................................... [ 61%]
+........................................................................ [ 66%]
+........................................................................ [ 70%]
+............................s........................................... [ 74%]
+........................................................................ [ 78%]
+........................................................................ [ 82%]
+....................................s................................... [ 86%]
+........................................................................ [ 90%]
+........................................................................ [ 95%]
+........................................................................ [ 99%]
+..............                                                           [100%]
+================================== FAILURES ===================================
+_______ test_managed_write_boundary_manifest_is_complete_and_actionable _______
+
+    def test_managed_write_boundary_manifest_is_complete_and_actionable():
+        manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+        assert manifest["schema"] == "mempalace-managed-write-boundary-disposition/v1"
+        assert manifest["status"] == "decisions-recorded-implementation-open"
+        assert manifest["ownerIssue"] == "https://github.com/iMelki/mempalace/issues/22"
+    
+        entries = manifest["entries"]
+        assert {entry["id"] for entry in entries} == EXPECTED_IDS
+        assert len(entries) == len(EXPECTED_IDS)
+        allowed = set(manifest["allowedDispositions"])
+        counts = Counter(entry["disposition"] for entry in entries)
+        assert set(counts) <= allowed
+        assert counts == {
+            "adapt-to-managed-receipts": 10,
+            "retire-unmanaged-mutation-surface": 6,
+            "explicitly-exclude-with-boundary": 5,
+        }
+        assert manifest["summary"] == {
+            "total": 21,
+            "adaptToManagedReceipts": 10,
+            "retireUnmanagedMutationSurface": 6,
+            "explicitlyExcludeWithBoundary": 5,
+        }
+>       assert manifest["implementationProgress"] == {
+            "adaptationsMetOnDev": 4,
+            "adaptationsRemaining": 6,
+            "completedAdaptationIds": [
+                "diary-ingest",
+                "mcp-diary-write",
+                "mcp-drawer-mutations",
+                "sweeper-jsonl-ingest",
+            ],
+        }
+E       AssertionError: assert {'adaptations...miners'], ...} == {'adaptations...sonl-ingest']}
+E         
+E         Omitting 3 identical items, use -vv to show
+E         Left contains 3 more items:
+E         {'completedRetirementIds': ['receipt-optional-core-miners'],
+E          'retirementsMetOnDev': 1,
+E          'retirementsRemaining': 5}
+E         Use -v to get more diff
+
+tests\test_managed_write_boundary_manifest.py:56: AssertionError
+============================== warnings summary ===============================
+tests/test_backends.py: 8 warnings
+tests/test_cli.py: 2 warnings
+tests/test_closet_llm.py: 4 warnings
+tests/test_closets.py: 39 warnings
+tests/test_collection_metric_invariant.py: 7 warnings
+tests/test_convo_miner.py: 4 warnings
+tests/test_exporter.py: 7 warnings
+tests/test_hall_detection.py: 4 warnings
+tests/test_hybrid_candidate_union.py: 9 warnings
+tests/test_hybrid_search.py: 8 warnings
+tests/test_mcp_server.py: 33 warnings
+tests/test_miner.py: 22 warnings
+tests/test_searcher.py: 15 warnings
+tests/test_sweeper.py: 24 warnings
+tests/test_write_receipts.py: 1 warning
+  C:\Users\Milky\AppData\Local\Programs\Python\Python313\Lib\site-packages\chromadb\api\collection_configuration.py:327: DeprecationWarning: legacy embedding function config: '_DeterministicEmbeddingFunction' object has no attribute 'is_legacy'
+    return json.dumps(create_collection_configuration_to_json(config, metadata))
+
+tests/test_closets.py: 3 warnings
+tests/test_mcp_server.py: 15 warnings
+tests/test_searcher.py: 14 warnings
+  C:\Users\Milky\AppData\Local\Programs\Python\Python313\Lib\site-packages\chromadb\types.py:152: DeprecationWarning: legacy embedding function config
+    return load_collection_configuration_from_json(self.configuration_json)
+
+tests/test_fact_checker.py::TestCLI::test_exits_nonzero_when_issues_found
+  <frozen runpy>:128: RuntimeWarning: 'mempalace.fact_checker' found in sys.modules after import of package 'mempalace', but prior to execution of 'mempalace.fact_checker'; this may result in unpredictable behaviour
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ===========================
+FAILED tests/test_managed_write_boundary_manifest.py::test_managed_write_boundary_manifest_is_complete_and_actionable
+1 failed, 1734 passed, 7 skipped, 106 deselected, 220 warnings in 209.36s (0:03:29)

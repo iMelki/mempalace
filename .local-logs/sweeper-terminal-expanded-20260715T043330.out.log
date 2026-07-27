@@ -1,0 +1,12 @@
+........................................................................ [ 35%]
+........................................................................ [ 71%]
+.........................................................                [100%]
+============================== warnings summary ===============================
+tests/test_sweeper.py: 23 warnings
+tests/test_cli.py: 2 warnings
+tests/test_write_receipts.py: 1 warning
+  C:\Users\Milky\AppData\Local\Programs\Python\Python313\Lib\site-packages\chromadb\api\collection_configuration.py:327: DeprecationWarning: legacy embedding function config: '_DeterministicEmbeddingFunction' object has no attribute 'is_legacy'
+    return json.dumps(create_collection_configuration_to_json(config, metadata))
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+201 passed, 26 warnings in 82.58s (0:01:22)

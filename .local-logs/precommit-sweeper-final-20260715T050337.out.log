@@ -1,0 +1,8 @@
+ruff.....................................................................Passed
+ruff-format..............................................................Failed
+- hook id: ruff-format
+- files were modified by this hook
+
+2 files reformatted, 5 files left unchanged
+
+markdown link integrity..................................................Passed

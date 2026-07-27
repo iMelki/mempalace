@@ -1,0 +1,73 @@
+.................................F......................                 [100%]
+================================== FAILURES ===================================
+_ TestDiaryIngest.test_same_size_change_supersedes_receipt_and_rebuilds_complete_closets _
+
+self = <test_closets.TestDiaryIngest object at 0x000001A7ED195CD0>
+tmp_path = WindowsPath('C:/Users/Milky/AppData/Local/Temp/pytest-of-Milky/pytest-627/test_same_size_change_supersed0')
+
+    def test_same_size_change_supersedes_receipt_and_rebuilds_complete_closets(self, tmp_path):
+        diary_dir = tmp_path / "diaries"
+        diary_dir.mkdir()
+        diary_path = diary_dir / "2026-04-13.md"
+        first_text = (
+            "# 2026-04-13\n\n## 10:00 — Test\n\n"
+            "Alpha marker records the initial diary topic in full.\n"
+        )
+        second_text = first_text.replace("Alpha", "Bravo")
+        assert len(first_text) == len(second_text)
+        diary_path.write_text(first_text, encoding="utf-8")
+        first_size = diary_path.stat().st_size
+        palace_dir = tmp_path / "palace"
+    
+        from mempalace.diary_ingest import _diary_drawer_id, ingest_diaries
+        from mempalace.write_receipts import ReceiptStore, sha256_bytes
+    
+        first = ingest_diaries(str(diary_dir), str(palace_dir), force=True)
+        store = ReceiptStore(str(palace_dir))
+        source_identity = store.source_identity(str(diary_path.resolve()), local_path=True)
+        first_current = store.find_current(source_identity)
+        assert first_current is not None
+    
+        diary_path.write_text(second_text, encoding="utf-8")
+        assert diary_path.stat().st_size == first_size
+        second = ingest_diaries(str(diary_dir), str(palace_dir))
+    
+        assert first["days_updated"] == 1
+        assert second["days_updated"] == 1
+        assert second["days_unchanged"] == 0
+        current = store.find_current(source_identity)
+        assert current is not None
+        assert current["receipt_id"] != first_current["receipt_id"]
+        assert current["source"]["content_hash"] == sha256_bytes(diary_path.read_bytes())
+    
+        drawer_id = _diary_drawer_id("diary", "2026-04-13")
+        drawer = get_collection(str(palace_dir)).get(ids=[drawer_id])
+        assert drawer["documents"] == [second_text]
+        closet_docs = get_closets_collection(str(palace_dir)).get(
+            where={"source_file": str(diary_path.resolve())},
+            include=["documents"],
+        )["documents"]
+>       assert "Bravo marker" in "\n".join(closet_docs)
+E       AssertionError: assert 'Bravo marker' in '10:00 — test||→drawer_diary_14205b68758d4b3ccd03fb0e'
+E        +  where '10:00 — test||→drawer_diary_14205b68758d4b3ccd03fb0e' = <built-in method join of str object at 0x00007FFBF4A653F8>(['10:00 — test||→drawer_diary_14205b68758d4b3ccd03fb0e'])
+E        +    where <built-in method join of str object at 0x00007FFBF4A653F8> = '\n'.join
+
+tests\test_closets.py:679: AssertionError
+---------------------------- Captured stdout call -----------------------------
+Diary: 1 days updated, 1 closets written
+Diary: 1 days updated, 1 closets written
+============================== warnings summary ===============================
+tests/test_closets.py: 31 warnings
+  S:\source\CCAI\Assistants\tools\Memory\mempalace\.venv\Lib\site-packages\chromadb\api\collection_configuration.py:327: DeprecationWarning: legacy embedding function config: '_DeterministicEmbeddingFunction' object has no attribute 'is_legacy'
+    return json.dumps(create_collection_configuration_to_json(config, metadata))
+
+tests/test_closets.py::TestSearchMemoriesHybrid::test_pure_drawer_when_no_closets
+tests/test_closets.py::TestSearchMemoriesHybrid::test_closet_boost_marks_hit_as_drawer_plus_closet
+tests/test_closets.py::TestSearchMemoriesHybrid::test_max_distance_filters_hybrid_hits
+  S:\source\CCAI\Assistants\tools\Memory\mempalace\.venv\Lib\site-packages\chromadb\types.py:152: DeprecationWarning: legacy embedding function config
+    return load_collection_configuration_from_json(self.configuration_json)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ===========================
+FAILED tests/test_closets.py::TestDiaryIngest::test_same_size_change_supersedes_receipt_and_rebuilds_complete_closets
+1 failed, 55 passed, 34 warnings in 15.48s

@@ -1,0 +1,8 @@
+...................................                                      [100%]
+============================== warnings summary ===============================
+tests\test_mcp_http.py:24
+  S:\source\CCAI\Assistants\tools\Memory\mempalace\tests\test_mcp_http.py:24: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient  # noqa: E402
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+35 passed, 1 warning in 5.40s

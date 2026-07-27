@@ -1,0 +1,65 @@
+...................F.................................................... [ 34%]
+........................................................................ [ 68%]
+...................................................................      [100%]
+================================== FAILURES ===================================
+__________ test_unmanaged_miners_preserve_best_effort_purge_behavior __________
+
+tmp_path = WindowsPath('C:/Users/Milky/AppData/Local/Temp/pytest-of-Milky/pytest-692/test_unmanaged_miners_preserve0')
+
+    def test_unmanaged_miners_preserve_best_effort_purge_behavior(tmp_path):
+        project = tmp_path / "project"
+        project.mkdir()
+        project_source = project / "legacy-project.md"
+        project_source.write_text(_long_source_text("project"), encoding="utf-8")
+        project_collection = _MemoryCollection()
+        project_collection.delete_error = RuntimeError("legacy project purge failure")
+    
+>       project_drawers, _ = process_file(
+            project_source,
+            project,
+            project_collection,
+            "project",
+            [{"name": "general", "description": "general"}],
+            "test-runner",
+            False,
+        )
+
+tests\test_write_receipts.py:1058: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+mempalace\miner.py:834: in process_file
+    require_managed_receipts(
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+    def require_managed_receipts(
+        *,
+        dry_run: bool,
+        receipt_store: Optional[ReceiptStore],
+        receipt_run: Optional[ManagedRunIdentity],
+        operation: str,
+    ) -> None:
+        """Reject non-dry core writes that would bypass durable receipts."""
+        if dry_run:
+            return
+        if not isinstance(receipt_store, ReceiptStore) or not isinstance(
+            receipt_run, ManagedRunIdentity
+        ):
+>           raise ReceiptIdentityError(
+                f"{operation} non-dry writes require both ReceiptStore and "
+                "ManagedRunIdentity; use the managed top-level mine API or supply "
+                "an explicit receipt run"
+            )
+E           mempalace.write_receipts.ReceiptIdentityError: project process_file non-dry writes require both ReceiptStore and ManagedRunIdentity; use the managed top-level mine API or supply an explicit receipt run
+
+mempalace\write_receipts.py:1072: ReceiptIdentityError
+============================== warnings summary ===============================
+tests/test_write_receipts.py: 1 warning
+tests/test_miner.py: 22 warnings
+tests/test_convo_miner.py: 4 warnings
+tests/test_cli.py: 2 warnings
+  C:\Users\Milky\AppData\Local\Programs\Python\Python313\Lib\site-packages\chromadb\api\collection_configuration.py:327: DeprecationWarning: legacy embedding function config: '_DeterministicEmbeddingFunction' object has no attribute 'is_legacy'
+    return json.dumps(create_collection_configuration_to_json(config, metadata))
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ===========================
+FAILED tests/test_write_receipts.py::test_unmanaged_miners_preserve_best_effort_purge_behavior
+1 failed, 210 passed, 29 warnings in 70.84s (0:01:10)
