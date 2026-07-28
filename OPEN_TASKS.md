@@ -7,13 +7,18 @@ This file is the durable local index for active `mempalace` issues.
 ## Active Issues
 
 - [#25 - Expose deterministic mine manifests and resumable source progress](https://github.com/iMelki/mempalace/issues/25)
-  - The miner's managed per-source receipts already make replay idempotent, but
-    source traversal is filesystem-order dependent and `MineAlreadyRunning`
-    can warn while returning process success.
-  - Add a hash-bound deterministic source manifest, next-source progress
-    receipts flushed only after represented COMPLETE/ZERO_OUTPUT proof, a
-    distinct nonzero temporary-lock outcome, drift rejection, and kill/restart
-    tests. This is the exact-file continuation dependency for
+  - Implemented locally: normalized deterministic source ordering; immutable
+    stat/content/parser/config/miner-bound manifests; exact `--start-index`;
+    hash-chained and fsynced sanitized progress; target-palace receipt readback;
+    torn-tail recovery; drift/committed-corruption/cross-palace rejection; and
+    CLI temporary-lock exit `75`.
+  - Disposable focused proof covers hard exit/restart, lagging-prefix replay,
+    output equality, idempotency, source drift, lock conflict, and no
+    path/content leakage (`10` passed). The expanded miner, lock, receipt, CLI,
+    and progress regression passes `223` tests in `63.98s`; Ruff and local
+    Markdown-link checks pass. No configured palace was opened.
+  - Remaining closeout is scoped review and commit/push. This unblocks the
+    exact-file continuation dependency for
     [agent-settings#486](https://github.com/iMelki/agent-settings/issues/486).
 
 - [#22 - Add durable source-to-drawer receipts and supervised historical cohort recovery](https://github.com/iMelki/mempalace/issues/22)

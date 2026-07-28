@@ -501,6 +501,11 @@ def test_cmd_mine_projects_mode(mock_config_cls):
             dry_run=False,
             respect_gitignore=True,
             include_ignored=[],
+            plan_out=None,
+            manifest_path=None,
+            start_index=None,
+            progress_jsonl=None,
+            raise_on_lock_conflict=True,
         )
 
 

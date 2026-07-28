@@ -486,6 +486,10 @@ def _maybe_run_mine_after_init(args, cfg) -> None:
 
 def cmd_mine(args):
     palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
+    plan_out = getattr(args, "plan_out", None)
+    manifest_path = getattr(args, "manifest", None)
+    start_index = getattr(args, "start_index", None)
+    progress_jsonl = getattr(args, "progress_jsonl", None)
     include_ignored = []
     for raw in args.include_ignored or []:
         include_ignored.extend(part.strip() for part in raw.split(",") if part.strip())
@@ -501,6 +505,14 @@ def cmd_mine(args):
         )
 
     if args.mode == "convos":
+        if any(
+            value is not None for value in (plan_out, manifest_path, start_index, progress_jsonl)
+        ):
+            print(
+                "  ERROR: deterministic source manifests currently support projects mode only",
+                file=sys.stderr,
+            )
+            sys.exit(2)
         from .convo_miner import mine_convos
 
         mine_convos(
@@ -513,18 +525,31 @@ def cmd_mine(args):
             extract_mode=args.extract,
         )
     else:
-        from .miner import mine
+        from .miner import MINE_LOCK_CONFLICT_EXIT_CODE, mine
+        from .palace import MineAlreadyRunning
 
-        mine(
-            project_dir=args.dir,
-            palace_path=palace_path,
-            wing_override=args.wing,
-            agent=args.agent,
-            limit=args.limit,
-            dry_run=args.dry_run,
-            respect_gitignore=not args.no_gitignore,
-            include_ignored=include_ignored,
-        )
+        try:
+            mine(
+                project_dir=args.dir,
+                palace_path=palace_path,
+                wing_override=args.wing,
+                agent=args.agent,
+                limit=args.limit,
+                dry_run=args.dry_run,
+                respect_gitignore=not args.no_gitignore,
+                include_ignored=include_ignored,
+                plan_out=plan_out,
+                manifest_path=manifest_path,
+                start_index=start_index,
+                progress_jsonl=progress_jsonl,
+                raise_on_lock_conflict=True,
+            )
+        except MineAlreadyRunning:
+            print(
+                "mempalace: another mine already holds the requested palace; retry later.",
+                file=sys.stderr,
+            )
+            sys.exit(MINE_LOCK_CONFLICT_EXIT_CODE)
 
 
 def cmd_sweep(args):
@@ -1169,6 +1194,36 @@ def main():
         help="Your name — recorded on every drawer (default: mempalace)",
     )
     p_mine.add_argument("--limit", type=int, default=0, help="Max files to process (0 = all)")
+    p_mine.add_argument(
+        "--plan-out",
+        default=None,
+        help=(
+            "Create or reuse an immutable deterministic project-source manifest "
+            "at this path before mining"
+        ),
+    )
+    p_mine.add_argument(
+        "--manifest",
+        default=None,
+        help="Consume an existing immutable project-source manifest",
+    )
+    p_mine.add_argument(
+        "--start-index",
+        type=int,
+        default=None,
+        help=(
+            "Expected next zero-based source index; must equal the contiguous "
+            "verified progress prefix"
+        ),
+    )
+    p_mine.add_argument(
+        "--progress-jsonl",
+        default=None,
+        help=(
+            "Append a sanitized durable cursor after each source receipt is "
+            "terminal and exactly represented"
+        ),
+    )
     p_mine.add_argument(
         "--redetect-origin",
         action="store_true",

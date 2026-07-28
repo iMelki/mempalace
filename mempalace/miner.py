@@ -16,7 +16,7 @@ from contextlib import nullcontext
 from pathlib import Path
 from datetime import datetime
 from collections import defaultdict
-from typing import Optional
+from typing import Mapping, Optional
 
 from .palace import (
     NORMALIZE_VERSION,
@@ -32,6 +32,18 @@ from .palace import (
     upsert_closet_lines,
 )
 from .receipt_verifier import ReceiptVerificationError, verify_receipt
+from .mine_progress import (
+    MineManifestDrift,
+    MinePlanError,
+    MineProgressJournal,
+    build_source_manifest,
+    load_source_manifest,
+    miner_revision,
+    publish_source_manifest,
+    source_path_for_item,
+    validate_manifest_context,
+    validate_source_bytes,
+)
 from .write_receipts import (
     ManagedRunIdentity,
     ReceiptError,
@@ -39,6 +51,7 @@ from .write_receipts import (
     ReceiptStore,
     SourceWriteReceiptSession,
     canonical_source_locator,
+    config_hash,
     complete_reused_receipt,
     managed_write_scope,
     purge_managed_source_snapshot,
@@ -88,6 +101,7 @@ CHUNK_OVERLAP = 100  # overlap between chunks
 MIN_CHUNK_SIZE = 50  # skip tiny chunks
 DRAWER_UPSERT_BATCH_SIZE = 1000
 MAX_FILE_SIZE = 500 * 1024 * 1024  # 500 MB — skip files larger than this.
+MINE_LOCK_CONFLICT_EXIT_CODE = 75
 # Long Claude Code sessions and large transcript exports routinely exceed
 # 10 MB. The cap exists as a defensive rail against pathological binary
 # files, not as a limit on legitimate text. Per-drawer size is bounded
@@ -832,6 +846,7 @@ def process_file(
     closets_col=None,
     receipt_store: Optional[ReceiptStore] = None,
     receipt_run: Optional[ManagedRunIdentity] = None,
+    expected_source: Optional[Mapping] = None,
 ) -> tuple:
     """Lock before reading so a waiting invocation cannot retain stale bytes."""
     require_managed_receipts(
@@ -862,6 +877,7 @@ def process_file(
                 receipt_store=receipt_store,
                 receipt_run=receipt_run,
                 source_aliases=(raw_source_alias,),
+                expected_source=expected_source,
             )
 
 
@@ -877,6 +893,7 @@ def _process_file_locked(
     receipt_store: Optional[ReceiptStore] = None,
     receipt_run: Optional[ManagedRunIdentity] = None,
     source_aliases: tuple[str, ...] = (),
+    expected_source: Optional[Mapping] = None,
 ) -> tuple:
     """Read, chunk, route, and file one file. Returns (drawer_count, room_name)."""
 
@@ -897,9 +914,24 @@ def _process_file_locked(
         return 0, "general"
 
     try:
+        stat_before = filepath.stat()
         raw_content = filepath.read_bytes()
-    except OSError:
+        stat_after = filepath.stat()
+    except OSError as exc:
+        if expected_source is not None:
+            raise MineManifestDrift(
+                f"source index {expected_source.get('index')} is no longer readable"
+            ) from exc
         return 0, "general"
+    if expected_source is not None:
+        validate_source_bytes(
+            path=filepath,
+            project_path=project_path,
+            item=expected_source,
+            content=raw_content,
+            stat_before=stat_before,
+            stat_after=stat_after,
+        )
 
     # Match Path.read_text's universal-newline behavior while binding the
     # receipt to the exact retained source bytes, before any transformation.
@@ -1512,21 +1544,30 @@ def scan_project(
             if current_matcher is not None:
                 active_matchers.append(current_matcher)
 
-        dirs[:] = [
-            d
-            for d in dirs
-            if is_force_included(root_path / d, project_path, include_paths)
-            or not should_skip_dir(d)
-        ]
-        if respect_gitignore and active_matchers:
-            dirs[:] = [
+        dirs[:] = sorted(
+            [
                 d
                 for d in dirs
                 if is_force_included(root_path / d, project_path, include_paths)
-                or not is_gitignored(root_path / d, active_matchers, is_dir=True)
-            ]
+                or not should_skip_dir(d)
+            ],
+            key=lambda value: (os.path.normcase(value), value),
+        )
+        if respect_gitignore and active_matchers:
+            dirs[:] = sorted(
+                [
+                    d
+                    for d in dirs
+                    if is_force_included(root_path / d, project_path, include_paths)
+                    or not is_gitignored(root_path / d, active_matchers, is_dir=True)
+                ],
+                key=lambda value: (os.path.normcase(value), value),
+            )
 
-        for filename in filenames:
+        for filename in sorted(
+            filenames,
+            key=lambda value: (os.path.normcase(value), value),
+        ):
             filepath = root_path / filename
             force_include = is_force_included(filepath, project_path, include_paths)
             exact_force_include = is_exact_force_include(filepath, project_path, include_paths)
@@ -1548,12 +1589,228 @@ def scan_project(
             except OSError:
                 continue
             files.append(filepath)
-    return files
+    return sorted(
+        files,
+        key=lambda path: (
+            os.path.normcase(path.relative_to(project_path).as_posix()),
+            path.relative_to(project_path).as_posix(),
+        ),
+    )
 
 
 # =============================================================================
 # MAIN: MINE
 # =============================================================================
+
+
+def _project_run_config(
+    *,
+    wing: str,
+    rooms: list,
+    respect_gitignore: bool,
+    include_ignored: list,
+    limit: int,
+) -> dict:
+    return {
+        "pipeline": "filesystem",
+        "wing": wing,
+        "rooms": rooms,
+        "normalize_version": NORMALIZE_VERSION,
+        "chunk_size": CHUNK_SIZE,
+        "chunk_overlap": CHUNK_OVERLAP,
+        "managed_output_collections": ["closets", "drawers"],
+        "respect_gitignore": respect_gitignore,
+        "include_ignored": sorted(normalize_include_paths(include_ignored)),
+        "limit": limit,
+    }
+
+
+def _source_plan_contract(run_config: Mapping) -> dict:
+    return {
+        "mode": "project",
+        "parser": "filesystem",
+        "receipt_config_digest": config_hash(run_config),
+        "miner_revision": miner_revision(__file__),
+    }
+
+
+def _verify_manifest_source_receipt(
+    *,
+    receipt_store: ReceiptStore,
+    receipt_run: ManagedRunIdentity,
+    filepath: Path,
+    item: Mapping,
+    collection,
+    closets_col,
+) -> tuple[dict, object]:
+    """Reload and exactly verify the source head before cursor advancement."""
+    source_identity = receipt_store.source_identity(str(filepath), local_path=True)
+    receipt = receipt_store.find_current_read_only(
+        source_identity,
+        content_hash=item["content_hash"],
+        version_digest=item["content_hash"],
+        config_digest=receipt_run.config_digest,
+    )
+    if receipt is None or receipt.get("state") != "COMPLETE":
+        raise MineProgressJournalError(
+            f"source index {item['index']} has no matching terminal managed receipt"
+        )
+    if receipt.get("disposition") not in {"WRITE", "UNCHANGED", "ZERO_OUTPUT"}:
+        raise MineProgressJournalError(
+            f"source index {item['index']} has an unsupported terminal disposition"
+        )
+    try:
+        verification = verify_receipt(
+            receipt,
+            collections={"drawers": collection, "closets": closets_col},
+            current_source_content_hash=item["content_hash"],
+            store=receipt_store,
+        )
+    except (ReceiptVerificationError, ReceiptIdentityError, ValueError) as exc:
+        raise MineProgressJournalError(
+            f"source index {item['index']} terminal receipt could not be verified"
+        ) from exc
+    if verification.status != "represented":
+        raise MineProgressJournalError(
+            f"source index {item['index']} terminal receipt is not represented"
+        )
+    return receipt, verification
+
+
+def _verify_progress_prefix_against_palace(
+    *,
+    progress: MineProgressJournal,
+    receipt_store: ReceiptStore,
+    receipt_run: ManagedRunIdentity,
+    project_path: Path,
+    manifest_items: list,
+    collection,
+    closets_col,
+) -> int:
+    """Re-prove every persisted cursor entry against the selected palace."""
+    records = progress.records()
+    for source_index, record in enumerate(records):
+        item = manifest_items[source_index]
+        filepath = source_path_for_item(project_path, item)
+        expected_identity = receipt_store.source_identity(str(filepath), local_path=True)
+        if record["source_identity"] != expected_identity:
+            raise MineProgressJournalError(
+                "mine progress belongs to a different palace or source identity"
+            )
+        try:
+            with mine_lock(os.path.normcase(str(filepath))):
+                stat_before = filepath.stat()
+                source_bytes = filepath.read_bytes()
+                stat_after = filepath.stat()
+                validate_source_bytes(
+                    path=filepath,
+                    project_path=project_path,
+                    item=item,
+                    content=source_bytes,
+                    stat_before=stat_before,
+                    stat_after=stat_after,
+                )
+        except OSError as exc:
+            raise MineManifestDrift(f"source index {source_index} is no longer readable") from exc
+        receipt, verification = _verify_manifest_source_receipt(
+            receipt_store=receipt_store,
+            receipt_run=receipt_run,
+            filepath=filepath,
+            item=item,
+            collection=collection,
+            closets_col=closets_col,
+        )
+        if receipt["receipt_id"] != record["receipt_id"]:
+            raise MineProgressJournalError(
+                f"source index {source_index} progress no longer names the current receipt"
+            )
+        if len(verification.represented) != record["represented_count"]:
+            raise MineProgressJournalError(f"source index {source_index} represented count changed")
+    return len(records)
+
+
+class MineProgressJournalError(MinePlanError):
+    """Raised when a terminal per-source receipt cannot authorize progress."""
+
+
+def _prepare_mine_source_plan(
+    *,
+    project_path: Path,
+    project_dir: str,
+    run_config: Mapping,
+    limit: int,
+    dry_run: bool,
+    respect_gitignore: bool,
+    include_ignored: list,
+    files: Optional[list],
+    plan_out: Optional[str],
+    manifest_path: Optional[str],
+    start_index: Optional[int],
+    progress_jsonl: Optional[str],
+) -> tuple[dict, list[Path], Optional[MineProgressJournal], int, int]:
+    if plan_out and manifest_path:
+        raise MinePlanError("--plan-out and --manifest are mutually exclusive")
+    if start_index is not None and (
+        not isinstance(start_index, int) or isinstance(start_index, bool) or start_index < 0
+    ):
+        raise MinePlanError("--start-index must be a non-negative integer")
+    if progress_jsonl and dry_run:
+        raise MinePlanError("--progress-jsonl requires a managed non-dry mine")
+
+    plan_contract = _source_plan_contract(run_config)
+    if manifest_path:
+        manifest = load_source_manifest(manifest_path)
+        validate_manifest_context(
+            manifest,
+            project_path=project_path,
+            contract=plan_contract,
+        )
+    else:
+        discovered = files
+        if discovered is None:
+            discovered = scan_project(
+                project_dir,
+                respect_gitignore=respect_gitignore,
+                include_ignored=include_ignored,
+            )
+        excluded_artifacts = {
+            Path(path).expanduser().resolve() for path in (plan_out, progress_jsonl) if path
+        }
+        discovered = [
+            Path(path).expanduser().resolve()
+            for path in discovered
+            if Path(path).expanduser().resolve() not in excluded_artifacts
+        ]
+        try:
+            discovered = sorted(
+                discovered,
+                key=lambda path: (
+                    os.path.normcase(path.relative_to(project_path).as_posix()),
+                    path.relative_to(project_path).as_posix(),
+                ),
+            )
+        except ValueError as exc:
+            raise MinePlanError("source plan contains a path outside the project root") from exc
+        if limit > 0:
+            discovered = discovered[:limit]
+        manifest = build_source_manifest(
+            project_path=project_path,
+            files=discovered,
+            contract=plan_contract,
+        )
+        if plan_out:
+            manifest = publish_source_manifest(plan_out, manifest)
+
+    manifest_items = manifest["items"]
+    planned_files = [source_path_for_item(project_path, item) for item in manifest_items]
+    progress = MineProgressJournal(progress_jsonl, manifest=manifest) if progress_jsonl else None
+    verified_prefix = progress.verified_prefix() if progress is not None else 0
+    if start_index is not None and start_index != verified_prefix:
+        raise MinePlanError("--start-index must equal the contiguous verified progress prefix")
+    effective_start = (
+        start_index if start_index is not None else (verified_prefix if progress is not None else 0)
+    )
+    return manifest, planned_files, progress, verified_prefix, effective_start
 
 
 def mine(
@@ -1566,6 +1823,11 @@ def mine(
     respect_gitignore: bool = True,
     include_ignored: list = None,
     files: list = None,
+    plan_out: str = None,
+    manifest_path: str = None,
+    start_index: Optional[int] = None,
+    progress_jsonl: str = None,
+    raise_on_lock_conflict: bool = False,
 ):
     """Mine a project directory into the palace.
 
@@ -1587,6 +1849,10 @@ def mine(
             respect_gitignore=respect_gitignore,
             include_ignored=include_ignored,
             files=files,
+            plan_out=plan_out,
+            manifest_path=manifest_path,
+            start_index=start_index,
+            progress_jsonl=progress_jsonl,
         )
 
     try:
@@ -1601,11 +1867,16 @@ def mine(
                 respect_gitignore=respect_gitignore,
                 include_ignored=include_ignored,
                 files=files,
+                plan_out=plan_out,
+                manifest_path=manifest_path,
+                start_index=start_index,
+                progress_jsonl=progress_jsonl,
             )
     except MineAlreadyRunning:
+        if raise_on_lock_conflict:
+            raise
         print(
-            f"mempalace: another `mine` is already running against "
-            f"{palace_path} — exiting cleanly.",
+            "mempalace: another `mine` already holds the requested palace; retry later.",
             file=sys.stderr,
         )
         return
@@ -1621,21 +1892,38 @@ def _mine_impl(
     respect_gitignore: bool = True,
     include_ignored: list = None,
     files: list = None,
+    plan_out: str = None,
+    manifest_path: str = None,
+    start_index: Optional[int] = None,
+    progress_jsonl: str = None,
 ):
     project_path = Path(project_dir).expanduser().resolve()
     config = load_config(project_dir)
 
     wing = wing_override or config["wing"]
     rooms = config.get("rooms", [{"name": "general", "description": "All project files"}])
-
-    if files is None:
-        files = scan_project(
-            project_dir,
-            respect_gitignore=respect_gitignore,
-            include_ignored=include_ignored,
-        )
-    if limit > 0:
-        files = files[:limit]
+    run_config = _project_run_config(
+        wing=wing,
+        rooms=rooms,
+        respect_gitignore=respect_gitignore,
+        include_ignored=include_ignored,
+        limit=limit,
+    )
+    manifest, files, progress, verified_prefix, effective_start = _prepare_mine_source_plan(
+        project_path=project_path,
+        project_dir=project_dir,
+        run_config=run_config,
+        limit=limit,
+        dry_run=dry_run,
+        respect_gitignore=respect_gitignore,
+        include_ignored=include_ignored,
+        files=files,
+        plan_out=plan_out,
+        manifest_path=manifest_path,
+        start_index=start_index,
+        progress_jsonl=progress_jsonl,
+    )
+    manifest_items = manifest["items"]
 
     from .embedding import describe_device
 
@@ -1645,7 +1933,12 @@ def _mine_impl(
     print(f"  Wing:    {wing}")
     print(f"  Rooms:   {', '.join(r['name'] for r in rooms)}")
     print(f"  Files:   {len(files)}")
-    print(f"  Palace:  {palace_path}")
+    print(f"  Start:   {effective_start}")
+    print(f"  Plan:    {manifest['manifest_digest']}")
+    if progress is not None and progress.recovered_torn_bytes:
+        print(f"  Progress recovery: {progress.recovered_torn_bytes} torn tail byte(s) discarded")
+    if not (plan_out or manifest_path or progress_jsonl):
+        print(f"  Palace:  {palace_path}")
     print(f"  Device:  {describe_device()}")
     if dry_run:
         print("  DRY RUN — nothing will be filed")
@@ -1663,19 +1956,22 @@ def _mine_impl(
         receipt_run = receipt_store.create_run(
             caller=agent,
             mode="project",
-            config={
-                "pipeline": "filesystem",
-                "wing": wing,
-                "rooms": rooms,
-                "normalize_version": NORMALIZE_VERSION,
-                "chunk_size": CHUNK_SIZE,
-                "chunk_overlap": CHUNK_OVERLAP,
-                "managed_output_collections": ["closets", "drawers"],
-                "respect_gitignore": respect_gitignore,
-                "include_ignored": sorted(normalize_include_paths(include_ignored)),
-                "limit": limit,
-            },
+            config=run_config,
         )
+        if progress is not None and verified_prefix:
+            verified_against_palace = _verify_progress_prefix_against_palace(
+                progress=progress,
+                receipt_store=receipt_store,
+                receipt_run=receipt_run,
+                project_path=project_path,
+                manifest_items=manifest_items,
+                collection=collection,
+                closets_col=closets_col,
+            )
+            if verified_against_palace != verified_prefix:
+                raise MineProgressJournalError(
+                    "mine progress prefix changed during palace verification"
+                )
     else:
         collection = None
         closets_col = None
@@ -1689,7 +1985,10 @@ def _mine_impl(
     room_counts = defaultdict(int)
 
     try:
-        for i, filepath in enumerate(files, 1):
+        for source_index in range(effective_start, len(files)):
+            filepath = files[source_index]
+            item = manifest_items[source_index]
+            display_index = source_index + 1
             try:
                 drawers, room = process_file(
                     filepath=filepath,
@@ -1702,21 +2001,46 @@ def _mine_impl(
                     closets_col=closets_col,
                     receipt_store=receipt_store,
                     receipt_run=receipt_run,
+                    expected_source=item,
                 )
             except KeyboardInterrupt:
                 # Re-raise so the outer handler prints the summary; we
                 # capture the last-attempted file via last_file below.
                 last_file = filepath.name
                 raise
-            files_processed = i
+            files_processed += 1
             last_file = filepath.name
+            if not dry_run and progress is not None:
+                receipt, verification = _verify_manifest_source_receipt(
+                    receipt_store=receipt_store,
+                    receipt_run=receipt_run,
+                    filepath=filepath,
+                    item=item,
+                    collection=collection,
+                    closets_col=closets_col,
+                )
+                progress.append_verified(
+                    source_index=source_index,
+                    source_identity=receipt["source"]["identity"],
+                    receipt=receipt,
+                    represented_count=len(verification.represented),
+                )
             if drawers == 0 and not dry_run:
                 files_skipped += 1
             else:
                 total_drawers += drawers
                 room_counts[room] += 1
                 if not dry_run:
-                    print(f"  + [{i:4}/{len(files)}] {filepath.name[:50]:50} +{drawers}")
+                    if plan_out or manifest_path or progress_jsonl:
+                        print(
+                            f"  + [{display_index:4}/{len(files)}] "
+                            f"source-index:{source_index} +{drawers}"
+                        )
+                    else:
+                        print(
+                            f"  + [{display_index:4}/{len(files)}] "
+                            f"{filepath.name[:50]:50} +{drawers}"
+                        )
 
         if not dry_run:
             # Cross-wing topic tunnels: after every file in this wing has been
@@ -1736,7 +2060,7 @@ def _mine_impl(
 
         print(f"\n{'=' * 55}")
         print("  Done.")
-        print(f"  Files processed: {len(files) - files_skipped}")
+        print(f"  Files processed: {files_processed - files_skipped}")
         print(f"  Files skipped (already filed): {files_skipped}")
         print(f"  Drawers filed: {total_drawers}")
         print("\n  By room:")
@@ -1751,9 +2075,12 @@ def _mine_impl(
         # propagates to the default handler — we don't try to catch
         # everything.
         print("\n\n  Mine interrupted.")
-        print(f"    files_processed: {files_processed}/{len(files)}")
+        print(f"    files_processed: {files_processed}/{len(files) - effective_start}")
         print(f"    drawers_filed:   {total_drawers}")
-        print(f"    last_file:       {last_file or '<none>'}")
+        if plan_out or manifest_path or progress_jsonl:
+            print("    last_source:     sanitized; inspect the verified cursor")
+        else:
+            print(f"    last_file:       {last_file or '<none>'}")
         print(
             f"\n  Re-run `mempalace mine {shlex.quote(project_dir)}` to resume — "
             "already-filed drawers are\n  upserted idempotently and will not duplicate.\n"

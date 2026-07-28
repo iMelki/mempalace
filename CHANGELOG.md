@@ -10,12 +10,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
-- **Deterministic mine-progress contract tracked (#25).** Existing managed
-  source receipts make replay safe, but filesystem-dependent traversal order
-  and warning-only lock contention currently prevent exact-file continuation
-  by long-running callers. Issue #25 owns a hash-bound source manifest, durable
-  next-source receipts, a non-success temporary-lock outcome, and kill/restart
-  proof. This tracking change performs no mining or palace mutation.
+- **Crash-resumable deterministic project mining (#25).** Project sources are
+  now ordered by normalized project-relative path and can be bound to an
+  immutable `--plan-out` / `--manifest` source plan containing exact stat,
+  content, parser/config, and miner-revision identities. `--progress-jsonl`
+  appends one hash-chained, fsynced, path-free cursor record only after the
+  source's managed `COMPLETE`/`ZERO_OUTPUT` receipt is reloaded and exactly
+  represented; restart re-verifies the entire prefix against the selected
+  palace before skipping it. `--start-index` cannot guess beyond or replay
+  behind that prefix. A non-newline torn final append is truncated to the last
+  committed record and replayed; complete corrupt/divergent progress, source
+  drift, and cross-palace reuse fail closed. CLI palace-lock contention now
+  exits with temporary-failure code `75` and a sanitized message. Focused
+  hard-exit/restart, drift, lock, idempotency, no-secret, and uninterrupted-
+  output-equivalence tests use only disposable palaces (`10` passed); the
+  expanded miner, lock, receipt, CLI, and progress regression passes `223`
+  tests in `63.98s`.
 
 - **Receipt-required project and conversation miner helpers (#22).** Retired
   the low-level non-dry fallback that could purge or upsert when
