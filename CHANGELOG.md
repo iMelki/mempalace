@@ -10,6 +10,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Deterministic mine-progress contract tracked (#25).** Existing managed
+  source receipts make replay safe, but filesystem-dependent traversal order
+  and warning-only lock contention currently prevent exact-file continuation
+  by long-running callers. Issue #25 owns a hash-bound source manifest, durable
+  next-source receipts, a non-success temporary-lock outcome, and kill/restart
+  proof. This tracking change performs no mining or palace mutation.
+
 - **Receipt-required project and conversation miner helpers (#22).** Retired
   the low-level non-dry fallback that could purge or upsert when
   `ReceiptStore` or `ManagedRunIdentity` was omitted. Both public and locked

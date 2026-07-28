@@ -6,6 +6,16 @@ This file is the durable local index for active `mempalace` issues.
 
 ## Active Issues
 
+- [#25 - Expose deterministic mine manifests and resumable source progress](https://github.com/iMelki/mempalace/issues/25)
+  - The miner's managed per-source receipts already make replay idempotent, but
+    source traversal is filesystem-order dependent and `MineAlreadyRunning`
+    can warn while returning process success.
+  - Add a hash-bound deterministic source manifest, next-source progress
+    receipts flushed only after represented COMPLETE/ZERO_OUTPUT proof, a
+    distinct nonzero temporary-lock outcome, drift rejection, and kill/restart
+    tests. This is the exact-file continuation dependency for
+    [agent-settings#486](https://github.com/iMelki/agent-settings/issues/486).
+
 - [#22 - Add durable source-to-drawer receipts and supervised historical cohort recovery](https://github.com/iMelki/mempalace/issues/22)
   - Status: the managed MCP writer proof passes `270` tests with one platform
     skip, the MCP-server proof passes `91` tests with one skip, and the protected
