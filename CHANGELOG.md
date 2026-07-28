@@ -23,7 +23,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   drift, and cross-palace reuse fail closed. CLI palace-lock contention now
   exits with temporary-failure code `75` and a sanitized message. Focused
   hard-exit/restart, drift, lock, idempotency, no-secret, and uninterrupted-
-  output-equivalence tests use only disposable palaces (`10` passed); the
+  output-equivalence tests use only disposable palaces. The progress journal
+  caches its validated prefix and invalidates that cache on file identity
+  change, so repeated durable appends stay linear rather than rereading the
+  entire JSONL prefix for every source (`11` focused tests passed); the
   expanded miner, lock, receipt, CLI, and progress regression passes `223`
   tests in `63.98s`.
 

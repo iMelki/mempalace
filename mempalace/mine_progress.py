@@ -264,6 +264,8 @@ class MineProgressJournal:
         self.manifest_digest = self.manifest["manifest_digest"]
         self.items = self.manifest["items"]
         self.recovered_torn_bytes = 0
+        self._records_cache: list[dict] | None = None
+        self._records_cache_stat: tuple[int, int, int] | None = None
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
     def verified_prefix(self) -> int:
@@ -271,13 +273,36 @@ class MineProgressJournal:
 
     def records(self) -> list[dict]:
         """Return the validated, hash-chained contiguous progress records."""
+        if self._records_cache is not None:
+            try:
+                current_stat = self.path.stat()
+                current_signature = (
+                    current_stat.st_size,
+                    current_stat.st_mtime_ns,
+                    current_stat.st_ctime_ns,
+                )
+            except FileNotFoundError:
+                current_signature = None
+            if current_signature == self._records_cache_stat:
+                return list(self._records_cache)
+            self._records_cache = None
+            self._records_cache_stat = None
         if not self.path.exists():
+            self._records_cache = []
+            self._records_cache_stat = None
             return []
         try:
             raw = self.path.read_bytes()
         except OSError as exc:
             raise MineProgressError("mine progress journal is unreadable") from exc
         if not raw:
+            self._records_cache = []
+            current_stat = self.path.stat()
+            self._records_cache_stat = (
+                current_stat.st_size,
+                current_stat.st_mtime_ns,
+                current_stat.st_ctime_ns,
+            )
             return []
         if not raw.endswith(b"\n"):
             committed_end = raw.rfind(b"\n") + 1
@@ -285,6 +310,13 @@ class MineProgressJournal:
             raw = raw[:committed_end]
             self._truncate_torn_tail(committed_end)
             if not raw:
+                self._records_cache = []
+                current_stat = self.path.stat()
+                self._records_cache_stat = (
+                    current_stat.st_size,
+                    current_stat.st_mtime_ns,
+                    current_stat.st_ctime_ns,
+                )
                 return []
 
         records = []
@@ -303,7 +335,14 @@ class MineProgressJournal:
             )
             records.append(record)
             previous_digest = record["record_digest"]
-        return records
+        self._records_cache = records
+        current_stat = self.path.stat()
+        self._records_cache_stat = (
+            current_stat.st_size,
+            current_stat.st_mtime_ns,
+            current_stat.st_ctime_ns,
+        )
+        return list(records)
 
     def _truncate_torn_tail(self, length: int) -> None:
         """Discard only bytes after the last committed newline and fsync."""
@@ -390,6 +429,13 @@ class MineProgressJournal:
             raise
         except OSError as exc:
             raise MineProgressError("mine progress append could not be made durable") from exc
+        self._records_cache = [*records, record]
+        current_stat = self.path.stat()
+        self._records_cache_stat = (
+            current_stat.st_size,
+            current_stat.st_mtime_ns,
+            current_stat.st_ctime_ns,
+        )
         return record
 
     def _validate_record(

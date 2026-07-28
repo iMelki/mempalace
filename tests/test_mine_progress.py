@@ -260,6 +260,42 @@ def test_progress_is_sanitized_and_only_accepts_terminal_receipts(tmp_path):
     assert '"verification_status":"represented"' in raw
 
 
+def test_progress_append_reuses_a_validated_prefix_without_quadratic_rereads(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    _write_project(project, names=("one.md", "two.md", "three.md"))
+    manifest = build_source_manifest(
+        project_path=project,
+        files=[project / "one.md", project / "two.md", project / "three.md"],
+        contract=_contract(),
+    )
+    progress_path = tmp_path / "progress.jsonl"
+    original_read_bytes = Path.read_bytes
+    read_count = 0
+
+    def counted_read_bytes(path):
+        nonlocal read_count
+        if path == progress_path:
+            read_count += 1
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", counted_read_bytes)
+    journal = MineProgressJournal(progress_path, manifest=manifest)
+    for source_index in range(3):
+        journal.append_verified(
+            source_index=source_index,
+            source_identity=_hmac_identity(str(source_index + 1)),
+            receipt=_fake_receipt(),
+            represented_count=1,
+        )
+    assert journal.verified_prefix() == 3
+    assert read_count == 0
+
+    restarted = MineProgressJournal(progress_path, manifest=manifest)
+    assert restarted.verified_prefix() == 3
+    assert restarted.verified_prefix() == 3
+    assert read_count == 1
+
+
 def test_mine_does_not_advance_progress_when_receipt_readback_fails(tmp_path, monkeypatch):
     project = tmp_path / "project"
     _write_project(project, names=("one.md",))

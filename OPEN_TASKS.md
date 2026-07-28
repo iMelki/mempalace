@@ -14,11 +14,13 @@ This file is the durable local index for active `mempalace` issues.
     CLI temporary-lock exit `75`.
   - Disposable focused proof covers hard exit/restart, lagging-prefix replay,
     output equality, idempotency, source drift, lock conflict, and no
-    path/content leakage (`10` passed). The expanded miner, lock, receipt, CLI,
-    and progress regression passes `223` tests in `63.98s`; Ruff and local
-    Markdown-link checks pass. No configured palace was opened.
-  - Remaining closeout is scoped review and commit/push. This unblocks the
-    exact-file continuation dependency for
+    path/content leakage. The journal reuses an unchanged validated prefix so
+    repeated appends are linear rather than quadratic (`11` focused tests
+    passed). The expanded miner, lock, receipt, CLI, and progress regression
+    passes `223` tests in `63.98s`; Ruff and local Markdown-link checks pass.
+    No configured palace was opened.
+  - Implementation and the linear-prefix follow-up are pushed on `dev`. This
+    unblocks the exact-file continuation dependency for
     [agent-settings#486](https://github.com/iMelki/agent-settings/issues/486).
 
 - [#22 - Add durable source-to-drawer receipts and supervised historical cohort recovery](https://github.com/iMelki/mempalace/issues/22)
