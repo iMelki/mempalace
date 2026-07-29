@@ -12,7 +12,10 @@ This file is the durable local index for active `mempalace` issues.
     backup is retained first, a resumable private id/hash scan runs only over
     that immutable snapshot, and a public manifest remains unavailable until
     the complete shard chain validates. This replaces the prior all-in-memory
-    inventory path that could lose a multi-gigabyte snapshot on timeout.
+    inventory path that could lose a multi-gigabyte snapshot on timeout. The
+    snapshot creator revision remains immutable provenance; the first scan
+    separately pins its processor revision, which must also perform finalization
+    so a post-snapshot evaluator update cannot silently change results.
   - The active managed-palace snapshot is a runtime artifact, not proof of a
     complete identity yet. It must finish, scan to EOF, finalize the public
     manifest and attestation, and then be bound on a separately attended bridge

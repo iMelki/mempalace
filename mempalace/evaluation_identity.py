@@ -25,6 +25,7 @@ _MANIFEST_FIELDS = {
     "inventorySha256",
     "scopeSha256",
     "sourceRevision",
+    "processingSourceRevision",
     "capturedAtUtc",
     "itemCount",
     "corpusRevision",
@@ -82,6 +83,7 @@ def validate_evaluation_corpus_manifest(
     inventory = _required_sha256(manifest.get("inventorySha256"), label="inventorySha256")
     scope = _required_sha256(manifest.get("scopeSha256"), label="scopeSha256")
     source = _required_sha256(manifest.get("sourceRevision"), label="sourceRevision")
+    processing_source = _required_sha256(manifest.get("processingSourceRevision"), label="processingSourceRevision")
     captured_at = _captured_at(manifest.get("capturedAtUtc"))
     item_count = manifest.get("itemCount")
     if type(item_count) is not int or item_count < 0:
@@ -92,6 +94,7 @@ def validate_evaluation_corpus_manifest(
         "inventorySha256": inventory,
         "scopeSha256": scope,
         "sourceRevision": source,
+        "processingSourceRevision": processing_source,
         "itemCount": item_count,
     }
     corpus_revision = _required_sha256(manifest.get("corpusRevision"), label="corpusRevision")

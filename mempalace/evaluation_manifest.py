@@ -221,8 +221,6 @@ def _load_stage(
         raise EvaluationCorpusManifestError("evaluation snapshot dataPlaneId is unbound")
     if collection_name is not None and receipt.get("collection") != collection_name:
         raise EvaluationCorpusManifestError("evaluation snapshot collection is unbound")
-    if receipt.get("sourceRevision") != _package_source_digest(Path(__file__).resolve().parent):
-        raise EvaluationCorpusManifestError("evaluation staging source revision is stale")
     return snapshot, receipt, checkpoint
 
 
@@ -338,6 +336,13 @@ def scan_evaluation_snapshot(
         return checkpoint
     if checkpoint.get("status") != "scanning":
         raise EvaluationCorpusManifestError("evaluation inventory checkpoint status is unsupported")
+    processing_source_revision = _package_source_digest(Path(__file__).resolve().parent)
+    recorded_processing_revision = checkpoint.get("processingSourceRevision")
+    if recorded_processing_revision is None:
+        checkpoint = {**checkpoint, "processingSourceRevision": processing_source_revision}
+        _replace_checkpoint(staging_dir.expanduser().resolve() / "inventory-checkpoint.json", checkpoint)
+    elif recorded_processing_revision != processing_source_revision:
+        raise EvaluationCorpusManifestError("evaluation scan processing source revision is stale")
     recorded_batch_size = checkpoint.get("batchSize")
     if recorded_batch_size not in (None, batch_size):
         raise EvaluationCorpusManifestError("evaluation inventory batch size cannot change during resume")
@@ -436,6 +441,9 @@ def finalize_evaluation_corpus_manifest(
     )
     if checkpoint.get("status") != "complete":
         raise EvaluationCorpusManifestError("evaluation inventory scan is incomplete")
+    processing_source_revision = _package_source_digest(Path(__file__).resolve().parent)
+    if checkpoint.get("processingSourceRevision") != processing_source_revision:
+        raise EvaluationCorpusManifestError("evaluation finalization processing source revision is stale")
     staging = staging_dir.expanduser().resolve()
     inventory_sha256, item_count = _stream_inventory_identity(
         staging, checkpoint, collection_name=collection_name
@@ -454,6 +462,7 @@ def finalize_evaluation_corpus_manifest(
         "inventorySha256": inventory_sha256,
         "scopeSha256": sha256_identity(scope),
         "sourceRevision": source_revision,
+        "processingSourceRevision": processing_source_revision,
         "itemCount": item_count,
     }
     manifest: dict[str, object] = {
@@ -471,6 +480,7 @@ def finalize_evaluation_corpus_manifest(
         "sourceSnapshotSha256": snapshot_receipt["snapshotSha256"],
         "snapshotMethod": SNAPSHOT_METHOD,
         "sourceRevision": source_revision,
+        "processingSourceRevision": processing_source_revision,
         "itemCount": item_count,
     }
     return manifest, attestation

@@ -68,6 +68,7 @@ def _evaluation_manifest(data_plane_id: str) -> dict[str, object]:
         "inventorySha256": "sha256:" + "a" * 64,
         "scopeSha256": "sha256:" + "b" * 64,
         "sourceRevision": "sha256:" + "c" * 64,
+        "processingSourceRevision": "sha256:" + "d" * 64,
         "itemCount": 42,
     }
     return {

@@ -37,6 +37,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **Immutable evaluation-corpus identity for MemSys gold baselines (#31).**
   - Added the read-only manifest producer. It snapshots `chroma.sqlite3` through SQLite's online backup API, hashes sorted logical drawer rows, validates the strict startup contract, and emits a separate provenance attestation without source rows, paths, or credentials. The producer now persists a completed, integrity-checked snapshot before scanning; the scan writes a source-revision- and snapshot-bound private id/hash shard chain that resumes safely after interruption. Finalization externally merges the shards and streams the historical canonical inventory hash, so incomplete/tampered work cannot publish a public identity and the full logical inventory is never retained in memory.
+  - Snapshot-creator and scan/finalizer processor revisions are distinct,
+    strict identities. This permits a completed immutable snapshot to be scanned
+    after a compatible evaluator release while preventing a scanner/finalizer
+    revision change mid-scan from silently altering a published result.
   Native MCP can now accept one startup-only, strict, secret-free evaluation
   manifest bound to its data-plane identity. It exposes only hashed corpus
   provenance after validating the manifest; omitted, malformed, tampered, or
