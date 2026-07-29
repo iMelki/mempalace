@@ -6,14 +6,6 @@ This file is the durable local index for active `mempalace` issues.
 
 ## Active Issues
 
-- [#27 - Conversation miner cannot reconcile pending drawer-and-closet rewrite](https://github.com/iMelki/mempalace/issues/27)
-  - The live provider-chat retry exposed this after the scheduled writer was
-    stopped: a pending filesystem recovery named both managed collections,
-    while conversation mining supplied only drawers. The physical closet
-    collection existed; this was a caller binding defect, not data loss.
-  - Fixed on `dev` with optional `create=False` closet binding and a regression
-    test. The bounded live retry is the remaining acceptance proof.
-
 - [#26 - Report conversation palace-lock contention as a temporary failure](https://github.com/iMelki/mempalace/issues/26)
   - The naturally scheduled MemSys provider-chat run
     `provider-chat-ingestion-20260729T001002Z` overlapped the weekly knowledge
@@ -367,6 +359,13 @@ This file is the durable local index for active `mempalace` issues.
   - Added `scripts/check-markdown-links.ps1`, wired it into `.pre-commit-config.yaml`, and documented the docs check in `CONTRIBUTING.md`.
 - [#1 - Adopt projects-ops repo bootstrap governance baseline](https://github.com/iMelki/mempalace/issues/1)
   - Completed via [PR #2](https://github.com/iMelki/mempalace/pull/2).
+
+## Recently Closed
+
+- [#27 - Conversation miner cannot reconcile pending drawer-and-closet rewrite](https://github.com/iMelki/mempalace/issues/27)
+  - Closed 2026-07-29 after `69ea0d9` bound an existing closet collection
+    during conversation recovery and the memsys#89 bounded retry reconciled
+    the pending record with zero recovery files remaining.
 
 ## Supporting Docs
 
