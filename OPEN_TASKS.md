@@ -7,15 +7,24 @@ This file is the durable local index for active `mempalace` issues.
 ## Active Issues
 
 - [#31 - Bind immutable evaluation corpus identity for MemSys gold baselines](https://github.com/iMelki/mempalace/issues/31)
-  - The HTTP consumer is shipped. The producer now derives a secret-free manifest from a SQLite online-backup logical inventory and emits a separate attestation; remaining operational work is to generate it against the managed palace and restart the bridge with an exact startup receipt.
+  - The HTTP consumer is shipped. The producer now has a durable three-phase
+    snapshot / scan / finalize workflow: an integrity-checked SQLite online
+    backup is retained first, a resumable private id/hash scan runs only over
+    that immutable snapshot, and a public manifest remains unavailable until
+    the complete shard chain validates. This replaces the prior all-in-memory
+    inventory path that could lose a multi-gigabyte snapshot on timeout.
+  - The active managed-palace snapshot is a runtime artifact, not proof of a
+    complete identity yet. It must finish, scan to EOF, finalize the public
+    manifest and attestation, and then be bound on a separately attended bridge
+    restart before a gold run becomes comparable.
   - Implemented the startup-only manifest validation and authenticated identity
     surface. A complete identity needs a separately attested logical-inventory
     manifest bound to the running data plane; a status count, arbitrary
     environment digest, dynamic database scan, or path is not accepted.
-  - Remaining: create the bounded manifest producer/attestation workflow and
-    register it with the managed bridge before MemSys can publish a comparable
-    complete-identity gold baseline. Until then `corpusGeneration=unavailable`
-    remains the correct live state.
+  - Remaining: complete the staged managed-palace run and register its exact
+    manifest on an attended bridge restart before MemSys can publish a
+    comparable complete-identity gold baseline. Until then
+    `corpusGeneration=unavailable` remains the correct live state.
 
 - [#29 - Prevent Windows WFP timeout warnings from leaking out of the CLI test](https://github.com/iMelki/mempalace/issues/29)
   - The 2026-07-29 guarded full test lane passed, but
