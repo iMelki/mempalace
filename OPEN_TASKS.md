@@ -7,6 +7,7 @@ This file is the durable local index for active `mempalace` issues.
 ## Active Issues
 
 - [#31 - Bind immutable evaluation corpus identity for MemSys gold baselines](https://github.com/iMelki/mempalace/issues/31)
+  - The HTTP consumer is shipped. The producer now derives a secret-free manifest from a SQLite online-backup logical inventory and emits a separate attestation; remaining operational work is to generate it against the managed palace and restart the bridge with an exact startup receipt.
   - Implemented the startup-only manifest validation and authenticated identity
     surface. A complete identity needs a separately attested logical-inventory
     manifest bound to the running data plane; a status count, arbitrary
