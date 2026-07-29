@@ -447,8 +447,31 @@ def test_bm25_fallback_returns_retryable_receipt_when_metadata_read_is_locked(
     result = _bm25_only_via_sqlite("locked fallback", str(palace_with_drawers))
 
     assert result["error"] == "sqlite database is temporarily locked"
+    assert result["status"] == "degraded"
+    assert result["reason"] == "sqlite_locked"
     assert result["retryable"] is True
+    assert result["retryAfterMs"] == 250
     assert result["fallback"]["reason"] == "sqlite_locked"
+    assert result["diagnostics"]["operation"] == "metadata"
+    connection.close.assert_called_once()
+
+
+def test_bm25_fallback_returns_retryable_receipt_when_fts_read_is_locked(
+    palace_with_drawers, monkeypatch
+):
+    """A candidate-selection lock must not masquerade as no candidates."""
+    import mempalace.searcher as searcher
+
+    connection = MagicMock()
+    connection.execute.side_effect = sqlite3.OperationalError("database is busy")
+    monkeypatch.setattr(searcher.sqlite3, "connect", lambda *args, **kwargs: connection)
+
+    result = _bm25_only_via_sqlite("locked fallback", str(palace_with_drawers))
+
+    assert result["status"] == "degraded"
+    assert result["reason"] == "sqlite_locked"
+    assert result["retryable"] is True
+    assert result["diagnostics"]["operation"] == "fts_candidates"
     connection.close.assert_called_once()
 
 

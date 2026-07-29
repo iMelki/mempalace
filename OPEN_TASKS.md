@@ -10,13 +10,18 @@ This file is the durable local index for active `mempalace` issues.
   - Live bridge readiness on 2026-07-29 found a listener on `127.0.0.1:8787`
     but MemSys callers timed out because the read-only fallback raised
     `sqlite3.OperationalError: database is locked` during its metadata read.
-  - The fallback now returns a retryable structured degraded result for that
-    final `locked`/`busy` read instead of unwinding the MCP request. This does
-    not stop a process, remove a lock, change SQLite/WAL configuration, or
-    mutate the palace.
-  - Remaining proof: live Router/MCP must receive the bounded degraded receipt;
-    diagnose the actual writer only from owned process evidence before any
-    lifecycle action.
+  - The fallback now returns the same retryable structured degraded result for
+    `locked`/`busy` failures while opening the read-only connection, selecting
+    FTS/recency/id candidates, or reading metadata. The receipt exposes a
+    bounded `retryAfterMs`, a stable `sqlite_locked` reason, and a safe phase
+    diagnostic, rather than pretending that the palace has no candidates.
+    This does not stop a process, remove a lock, change SQLite/WAL
+    configuration, or mutate the palace.
+  - Router explicit-source proof completed on 2026-07-29: a normal MemPalace
+    read returned evidence in 21.1 seconds under the 30-second Router deadline.
+    Remaining proof is a future naturally contended Router/MCP read; diagnose
+    the actual writer only from owned process evidence before any lifecycle
+    action.
 
 - [#26 - Report conversation palace-lock contention as a temporary failure](https://github.com/iMelki/mempalace/issues/26)
   - The naturally scheduled MemSys provider-chat run
