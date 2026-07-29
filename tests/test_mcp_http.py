@@ -212,6 +212,33 @@ def test_authenticated_healthz_preserves_operator_probe_contract():
     assert healthy.json()["transport"] == "native-http"
 
 
+def test_authenticated_memsys_identity_is_startup_bound_and_fail_closed_for_corpus():
+    app = create_http_app(auth_token=AUTH_FIXTURE, tools=_registry(lambda _: {}))
+    with TestClient(app) as client:
+        missing = client.get("/__memsys/identity")
+        identity = client.get(
+            "/__memsys/identity", headers={"Authorization": f"Bearer {AUTH_FIXTURE}"}
+        )
+
+    assert missing.status_code == 401
+    assert identity.status_code == 200
+    payload = identity.json()
+    assert payload["schema"] == "memsys-stack-identity/v1"
+    assert payload["service"] == "mempalace"
+    assert payload["revision"].startswith("sha256:")
+    assert payload["serviceRevision"].startswith("version:")
+    assert payload["corpusGeneration"] == {
+        "schema": "mempalace-corpus-generation/v1",
+        "status": "unavailable",
+        "corpusRevision": None,
+        "scope": "none",
+        "capturedAtUtc": None,
+    }
+    serialized = json.dumps(payload)
+    assert AUTH_FIXTURE not in serialized
+    assert "mempalace\\" not in serialized.casefold()
+
+
 def test_http_catalog_matches_stdio_catalog():
     app = create_http_app(auth_token=AUTH_FIXTURE)
     from mempalace.mcp_server import TOOLS

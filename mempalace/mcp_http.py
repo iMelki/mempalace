@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import functools
+import hashlib
 import hmac
 import json
 import logging
@@ -16,6 +17,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, version as package_version
+from pathlib import Path
 from typing import Any
 
 try:
@@ -36,6 +38,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover - exercised without the o
 
 from .mcp_dispatch import ToolDispatchError, dispatch_tool, list_tool_specs
 from .version import __version__
+from .write_receipts import _package_source_digest
 
 logger = logging.getLogger("mempalace_mcp_http")
 
@@ -55,6 +58,7 @@ _LOOPBACK_ORIGIN_RE = re.compile(
     re.ASCII | re.IGNORECASE,
 )
 _BEARER_TOKEN_RE = re.compile(rb"[A-Za-z0-9\-._~+/]+=*", re.ASCII)
+_SHA256_ID_RE = re.compile(r"sha256:[0-9a-f]{64}\Z", re.ASCII)
 
 ToolRegistry = Mapping[str, Mapping[str, Any]]
 ToolRunner = Callable[[str, Mapping[str, Any] | None], Awaitable[Any]]
@@ -79,6 +83,13 @@ def _validated_auth_token(value: str) -> bytes:
     if len(encoded) > 4096 or _BEARER_TOKEN_RE.fullmatch(encoded) is None:
         raise ValueError("Bearer token must contain only ASCII token68 characters")
     return encoded
+
+
+def _opaque_sha256_environment(name: str) -> str | None:
+    """Return an explicitly supplied opaque identity, never a raw path/token."""
+
+    value = os.environ.get(name, "").strip().lower()
+    return value if _SHA256_ID_RE.fullmatch(value) else None
 
 
 class BearerTokenMiddleware:
@@ -635,6 +646,9 @@ def create_http_app(
 ) -> Starlette:
     """Create the authenticated `/mcp` ASGI app without opening a socket."""
     _require_supported_mcp_sdk()
+    package_digest = _package_source_digest(Path(__file__).resolve().parent)
+    instance_id = _opaque_sha256_environment("MEMSYS_MEMPALACE_INSTANCE_ID")
+    data_plane_id = _opaque_sha256_environment("MEMSYS_MEMPALACE_DATA_PLANE_ID")
     if session_idle_seconds is not None and (
         not math.isfinite(session_idle_seconds) or session_idle_seconds <= 0
     ):
@@ -683,9 +697,40 @@ def create_http_app(
             payload["drawerCount"] = drawers
         return JSONResponse(payload)
 
+    async def memsys_identity(_request: Any) -> JSONResponse:
+        """Expose startup-bound service provenance without paths or credentials.
+
+        A live palace's database cannot be called a complete corpus generation
+        until an immutable evaluation snapshot/manifest exists.  Reporting the
+        absence explicitly keeps downstream gold-set identity fail-closed.
+        """
+
+        return JSONResponse(
+            {
+                "schema": "memsys-stack-identity/v1",
+                "service": "mempalace",
+                "deploymentMode": "local-bare",
+                "runtimeProfile": "local-bare",
+                "launcherKind": "native-http",
+                "version": __version__,
+                "revision": package_digest,
+                "serviceRevision": f"version:{__version__};source-{package_digest}",
+                "instanceId": instance_id,
+                "dataPlaneId": data_plane_id,
+                "corpusGeneration": {
+                    "schema": "mempalace-corpus-generation/v1",
+                    "status": "unavailable",
+                    "corpusRevision": None,
+                    "scope": "none",
+                    "capturedAtUtc": None,
+                },
+            }
+        )
+
     app = Starlette(
         routes=[
             Route("/healthz", endpoint=healthz, methods=["GET"]),
+            Route("/__memsys/identity", endpoint=memsys_identity, methods=["GET"]),
             Route("/mcp", endpoint=_StreamableHttpEndpoint(manager)),
         ],
         middleware=[
