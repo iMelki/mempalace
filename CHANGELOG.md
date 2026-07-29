@@ -10,6 +10,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **Conversation recovery now binds both managed collections.** Conversation
+  mining can now reconcile a pending filesystem rewrite that spans drawers and
+  closets without creating a closet collection on a fresh conversation-only
+  palace. The prior drawers-only binding caused a safe fail-closed error even
+  when the live closet collection existed; regression coverage and the live
+  evidence are documented in
+  `docs/research/conversation-recovery-collection-binding-2026-07-29.md`.
+
 - **Conversation-mode palace-lock contention is a temporary failure (#26).**
   `mempalace mine --mode convos` now gives the CLI the same fail-closed lock
   contract as project mining: when another writer owns the palace lock, the

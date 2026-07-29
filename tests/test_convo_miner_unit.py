@@ -4,6 +4,7 @@ import contextlib
 
 from mempalace.convo_miner import (
     _file_chunks_locked,
+    _mine_convos_impl,
     chunk_exchanges,
     detect_convo_room,
     scan_convos,
@@ -147,3 +148,40 @@ class TestFileChunksLocked:
         assert dict(room_counts) == {}
         assert skipped is False
         assert col.batch_sizes == [2, 2, 1]
+
+
+def test_convo_miner_reconciles_both_managed_collections(tmp_path, monkeypatch):
+    """Conversation mining must recover a prior drawers+closets rewrite."""
+    import mempalace.convo_miner as convo_miner
+
+    drawers = object()
+    closets = object()
+    captured = {}
+
+    class FakeReceiptStore:
+        def __init__(self, _palace_path):
+            pass
+
+        def reconcile_pending_rewrites(self, collections):
+            captured["collections"] = collections
+
+        def create_run(self, **_kwargs):
+            return object()
+
+    monkeypatch.setattr(convo_miner, "get_collection", lambda *_args, **_kwargs: drawers)
+    monkeypatch.setattr(
+        convo_miner,
+        "get_closets_collection",
+        lambda *_args, **_kwargs: closets,
+    )
+    monkeypatch.setattr(convo_miner, "ReceiptStore", FakeReceiptStore)
+    monkeypatch.setattr(convo_miner, "mine_palace_lock", lambda _path: contextlib.nullcontext())
+
+    _mine_convos_impl(
+        convo_dir=str(tmp_path),
+        palace_path=str(tmp_path / "palace"),
+        wing="test",
+        dry_run=False,
+    )
+
+    assert captured["collections"] == {"drawers": drawers, "closets": closets}

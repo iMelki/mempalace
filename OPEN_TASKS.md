@@ -6,6 +6,14 @@ This file is the durable local index for active `mempalace` issues.
 
 ## Active Issues
 
+- [#27 - Conversation miner cannot reconcile pending drawer-and-closet rewrite](https://github.com/iMelki/mempalace/issues/27)
+  - The live provider-chat retry exposed this after the scheduled writer was
+    stopped: a pending filesystem recovery named both managed collections,
+    while conversation mining supplied only drawers. The physical closet
+    collection existed; this was a caller binding defect, not data loss.
+  - Fixed on `dev` with optional `create=False` closet binding and a regression
+    test. The bounded live retry is the remaining acceptance proof.
+
 - [#26 - Report conversation palace-lock contention as a temporary failure](https://github.com/iMelki/mempalace/issues/26)
   - The naturally scheduled MemSys provider-chat run
     `provider-chat-ingestion-20260729T001002Z` overlapped the weekly knowledge
@@ -18,6 +26,11 @@ This file is the durable local index for active `mempalace` issues.
   - The paired MemSys consumer change is tracked on
     [memsys#89](https://github.com/iMelki/memsys/issues/89) and classifies
     exit `75` as retryable without advancing source state.
+  - Follow-up found a second independent recovery-path defect: conversation
+    mining supplied only drawers to the palace-wide recovery reconciler while a
+    prior filesystem rewrite required drawers and closets. Fixed on `dev` with
+    optional `create=False` closet binding and regression coverage; one live
+    bounded retry remains to prove the pending recovery is reconciled.
 
 - [#25 - Expose deterministic mine manifests and resumable source progress](https://github.com/iMelki/mempalace/issues/25)
   - Implemented locally: normalized deterministic source ordering; immutable
