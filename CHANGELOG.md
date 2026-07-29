@@ -10,6 +10,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **SQLite-locked BM25 fallback completes as a degraded result (#28).** A
+  temporary `locked`/`busy` error from the final read-only metadata query no
+  longer escapes through the MCP HTTP request and consumes the caller's full
+  transport timeout. The result is explicit and retryable; it does not change
+  lock ownership, journal configuration, or stored data.
+
 - **Conversation recovery now binds both managed collections.** Conversation
   mining can now reconcile a pending filesystem rewrite that spans drawers and
   closets without creating a closet collection on a fresh conversation-only

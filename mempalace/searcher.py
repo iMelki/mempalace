@@ -523,14 +523,36 @@ def _bm25_only_via_sqlite(
             }
 
         placeholders = ",".join(["?"] * len(candidate_ids))
-        meta_rows = conn.execute(
-            f"""
-            SELECT id, key, string_value, int_value
-            FROM embedding_metadata
-            WHERE id IN ({placeholders})
-            """,
-            candidate_ids,
-        ).fetchall()
+        try:
+            meta_rows = conn.execute(
+                f"""
+                SELECT id, key, string_value, int_value
+                FROM embedding_metadata
+                WHERE id IN ({placeholders})
+                """,
+                candidate_ids,
+            ).fetchall()
+        except sqlite3.OperationalError as error:
+            # A concurrent Chroma writer can briefly hold a lock even though
+            # this fallback opens the database read-only.  Return an explicit
+            # degraded result so the MCP handler completes the request instead
+            # of unwinding through Streamable HTTP and making router callers
+            # wait for their whole transport timeout.
+            if "locked" in str(error).lower() or "busy" in str(error).lower():
+                logger.warning("BM25 sqlite fallback deferred by a database lock")
+                return {
+                    "query": query,
+                    "filters": {"wing": wing, "room": room},
+                    "total_before_filter": 0,
+                    "results": [],
+                    "error": "sqlite database is temporarily locked",
+                    "retryable": True,
+                    "fallback": {
+                        "mode": "bm25_only_via_sqlite",
+                        "reason": "sqlite_locked",
+                    },
+                }
+            raise
     finally:
         conn.close()
 

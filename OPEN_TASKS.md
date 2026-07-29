@@ -6,6 +6,18 @@ This file is the durable local index for active `mempalace` issues.
 
 ## Active Issues
 
+- [#28 - Return bounded degraded result when BM25 SQLite fallback is locked](https://github.com/iMelki/mempalace/issues/28)
+  - Live bridge readiness on 2026-07-29 found a listener on `127.0.0.1:8787`
+    but MemSys callers timed out because the read-only fallback raised
+    `sqlite3.OperationalError: database is locked` during its metadata read.
+  - The fallback now returns a retryable structured degraded result for that
+    final `locked`/`busy` read instead of unwinding the MCP request. This does
+    not stop a process, remove a lock, change SQLite/WAL configuration, or
+    mutate the palace.
+  - Remaining proof: live Router/MCP must receive the bounded degraded receipt;
+    diagnose the actual writer only from owned process evidence before any
+    lifecycle action.
+
 - [#26 - Report conversation palace-lock contention as a temporary failure](https://github.com/iMelki/mempalace/issues/26)
   - The naturally scheduled MemSys provider-chat run
     `provider-chat-ingestion-20260729T001002Z` overlapped the weekly knowledge
