@@ -487,6 +487,7 @@ def _maybe_run_mine_after_init(args, cfg) -> None:
 def cmd_mine(args):
     palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
     plan_out = getattr(args, "plan_out", None)
+    plan_progress_jsonl = getattr(args, "plan_progress_jsonl", None)
     manifest_path = getattr(args, "manifest", None)
     start_index = getattr(args, "start_index", None)
     progress_jsonl = getattr(args, "progress_jsonl", None)
@@ -506,7 +507,14 @@ def cmd_mine(args):
 
     if args.mode == "convos":
         if any(
-            value is not None for value in (plan_out, manifest_path, start_index, progress_jsonl)
+            value is not None
+            for value in (
+                plan_out,
+                plan_progress_jsonl,
+                manifest_path,
+                start_index,
+                progress_jsonl,
+            )
         ):
             print(
                 "  ERROR: deterministic source manifests currently support projects mode only",
@@ -549,6 +557,7 @@ def cmd_mine(args):
                 respect_gitignore=not args.no_gitignore,
                 include_ignored=include_ignored,
                 plan_out=plan_out,
+                plan_progress_jsonl=plan_progress_jsonl,
                 manifest_path=manifest_path,
                 start_index=start_index,
                 progress_jsonl=progress_jsonl,
@@ -1210,6 +1219,14 @@ def main():
         help=(
             "Create or reuse an immutable deterministic project-source manifest "
             "at this path before mining"
+        ),
+    )
+    p_mine.add_argument(
+        "--plan-progress-jsonl",
+        default=None,
+        help=(
+            "Persist a hash-chained directory/file cursor while building "
+            "--plan-out so a killed planner resumes at the next exact file"
         ),
     )
     p_mine.add_argument(

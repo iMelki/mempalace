@@ -21,6 +21,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Crash-resumable source-manifest planning (#25).** Added
+  `--plan-progress-jsonl` for project `--dry-run --plan-out` operations. The
+  fsynced, hash-chained journal checkpoints directory discovery and every
+  completed file descriptor, validates immutable planning identity, repairs
+  only a torn non-newline tail, and resumes at the exact next directory/file
+  without repeating already committed hashing. Normal append keeps a validated
+  in-memory prefix so planning remains linear. Focused progress proof now passes
+  `14` tests; the final repository gate passes `1,756` tests with `7` skipped
+  and `106` intentionally deselected in `203.30s`. The design and community
+  evidence are documented in
+  `docs/research/resumable-source-plan-contract-2026-07-29.md`.
+
 - **Crash-resumable deterministic project mining (#25).** Project sources are
   now ordered by normalized project-relative path and can be bound to an
   immutable `--plan-out` / `--manifest` source plan containing exact stat,

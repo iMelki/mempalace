@@ -13,6 +13,7 @@ import pytest
 from mempalace.cli import cmd_mine
 from mempalace.mine_progress import (
     MineManifestDrift,
+    MinePlanJournal,
     MinePlanError,
     MineProgressError,
     MineProgressJournal,
@@ -80,6 +81,7 @@ def _mine_args(**overrides):
         "include_ignored": [],
         "extract": "exchange",
         "plan_out": None,
+        "plan_progress_jsonl": None,
         "manifest": None,
         "start_index": None,
         "progress_jsonl": None,
@@ -87,6 +89,137 @@ def _mine_args(**overrides):
     }
     values.update(overrides)
     return argparse.Namespace(**values)
+
+
+def test_resumable_plan_continues_at_exact_next_file(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    _write_project(project, names=("c.md", "a.md", "b.md"))
+    plan = tmp_path / "plan.json"
+    progress = tmp_path / "plan-progress.jsonl"
+
+    from mempalace import miner as miner_module
+
+    original_descriptor = miner_module.source_descriptor
+    first_calls = []
+
+    def interrupt_on_second(**kwargs):
+        first_calls.append(kwargs["relative_path"])
+        if len(first_calls) == 2:
+            raise RuntimeError("fixture-plan-interrupt")
+        return original_descriptor(**kwargs)
+
+    with monkeypatch.context() as context:
+        context.setattr(miner_module, "source_descriptor", interrupt_on_second)
+        with pytest.raises(RuntimeError, match="fixture-plan-interrupt"):
+            mine(
+                str(project),
+                str(tmp_path / "unused-palace"),
+                dry_run=True,
+                plan_out=str(plan),
+                plan_progress_jsonl=str(progress),
+            )
+
+    described_before = [
+        record["relative_path"]
+        for record in (
+            json.loads(line) for line in progress.read_text(encoding="utf-8").splitlines()
+        )
+        if record["event"] == "file-described"
+    ]
+    assert described_before == first_calls[:1]
+
+    resumed_calls = []
+
+    def count_resumed(**kwargs):
+        resumed_calls.append(kwargs["relative_path"])
+        return original_descriptor(**kwargs)
+
+    with monkeypatch.context() as context:
+        context.setattr(miner_module, "source_descriptor", count_resumed)
+        context.setattr(
+            miner_module,
+            "_discover_plan_directory",
+            lambda **_kwargs: pytest.fail("a committed directory listing must not be rediscovered"),
+        )
+        mine(
+            str(project),
+            str(tmp_path / "unused-palace"),
+            dry_run=True,
+            plan_out=str(plan),
+            plan_progress_jsonl=str(progress),
+        )
+
+    manifest = load_source_manifest(plan)
+    assert described_before[0] not in resumed_calls
+    assert len(resumed_calls) == manifest["source_count"] - 1
+    assert (
+        len(
+            [
+                record
+                for record in (
+                    json.loads(line) for line in progress.read_text(encoding="utf-8").splitlines()
+                )
+                if record["event"] == "file-described"
+            ]
+        )
+        == manifest["source_count"]
+    )
+
+
+def test_plan_journal_recovers_only_torn_uncommitted_tail(tmp_path):
+    path = tmp_path / "plan-progress.jsonl"
+    identity = {"schema": "fixture/v1", "scope": "unit"}
+    journal = MinePlanJournal(path, identity=identity)
+    journal.append(
+        "directory-discovered",
+        {"relative_dir": "", "child_dirs": [], "files": []},
+    )
+    with path.open("ab") as handle:
+        handle.write(b'{"partial":')
+        handle.flush()
+        os.fsync(handle.fileno())
+
+    restarted = MinePlanJournal(path, identity=identity)
+    assert len(restarted.records()) == 1
+    assert restarted.recovered_torn_bytes == len(b'{"partial":')
+    assert path.read_bytes().endswith(b"\n")
+
+
+def test_plan_journal_rejects_semantically_divergent_complete_record(tmp_path):
+    from mempalace import mine_progress as progress_module
+
+    path = tmp_path / "plan-progress.jsonl"
+    identity = {"schema": "fixture/v1", "scope": "semantic"}
+    journal = MinePlanJournal(path, identity=identity)
+    journal.append(
+        "directory-discovered",
+        {"relative_dir": "", "child_dirs": [], "files": ["a.md"]},
+    )
+    journal.append(
+        "file-described",
+        {
+            "relative_dir": "",
+            "relative_path": "a.md",
+            "descriptor": {
+                "relative_path": "a.md",
+                "normalized_path": "a.md",
+                "size_bytes": 1,
+                "mtime_ns": 1,
+                "content_hash": "sha256:" + "a" * 64,
+            },
+        },
+    )
+    records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    records[1]["descriptor"]["normalized_path"] = "other.md"
+    records[1].pop("record_digest")
+    records[1]["record_digest"] = progress_module._digest(records[1])
+    path.write_text(
+        "\n".join(json.dumps(record, sort_keys=True) for record in records) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(MinePlanError, match="does not match its file cursor"):
+        MinePlanJournal(path, identity=identity).records()
 
 
 def _snapshot_outputs(palace_path: Path) -> dict:

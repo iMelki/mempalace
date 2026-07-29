@@ -34,12 +34,15 @@ from .palace import (
 from .receipt_verifier import ReceiptVerificationError, verify_receipt
 from .mine_progress import (
     MineManifestDrift,
+    MinePlanJournal,
     MinePlanError,
     MineProgressJournal,
     build_source_manifest,
+    build_source_manifest_from_descriptors,
     load_source_manifest,
     miner_revision,
     publish_source_manifest,
+    source_descriptor,
     source_path_for_item,
     validate_manifest_context,
     validate_source_bytes,
@@ -1598,6 +1601,187 @@ def scan_project(
     )
 
 
+def _plan_gitignore_matchers(
+    project_path: Path,
+    root_path: Path,
+    matcher_cache: dict,
+) -> list:
+    """Rebuild one directory's matcher chain without mutable traversal state."""
+    relative = root_path.relative_to(project_path)
+    directories = [project_path]
+    cursor = project_path
+    for part in relative.parts:
+        cursor = cursor / part
+        directories.append(cursor)
+    return [
+        matcher
+        for directory in directories
+        for matcher in [load_gitignore_matcher(directory, matcher_cache)]
+        if matcher is not None
+    ]
+
+
+def _discover_plan_directory(
+    *,
+    project_path: Path,
+    relative_dir: str,
+    respect_gitignore: bool,
+    include_paths: list,
+    excluded_artifacts: set[Path],
+    matcher_cache: dict,
+) -> tuple[list[str], list[str]]:
+    root_path = (project_path / relative_dir).resolve()
+    try:
+        root_path.relative_to(project_path)
+    except ValueError as exc:
+        raise MinePlanError("mine plan directory escapes the project root") from exc
+    active_matchers = (
+        _plan_gitignore_matchers(project_path, root_path, matcher_cache)
+        if respect_gitignore
+        else []
+    )
+    try:
+        entries = sorted(
+            list(os.scandir(root_path)),
+            key=lambda entry: (os.path.normcase(entry.name), entry.name),
+        )
+    except OSError as exc:
+        raise MineManifestDrift("source directory became unreadable during planning") from exc
+
+    child_dirs: list[str] = []
+    files: list[str] = []
+    for entry in entries:
+        path = Path(entry.path)
+        force_include = is_force_included(path, project_path, include_paths)
+        exact_force_include = is_exact_force_include(path, project_path, include_paths)
+        try:
+            is_directory = entry.is_dir(follow_symlinks=False)
+            is_file = entry.is_file(follow_symlinks=False)
+        except OSError as exc:
+            raise MineManifestDrift("source changed during plan discovery") from exc
+        if is_directory:
+            if not force_include and should_skip_dir(entry.name):
+                continue
+            if (
+                respect_gitignore
+                and active_matchers
+                and not force_include
+                and is_gitignored(path, active_matchers, is_dir=True)
+            ):
+                continue
+            child_dirs.append(path.relative_to(project_path).as_posix())
+            continue
+        if not is_file:
+            continue
+        if not force_include and entry.name in SKIP_FILENAMES:
+            continue
+        if path.suffix.lower() not in READABLE_EXTENSIONS and not exact_force_include:
+            continue
+        if (
+            respect_gitignore
+            and active_matchers
+            and not force_include
+            and is_gitignored(path, active_matchers, is_dir=False)
+        ):
+            continue
+        if path.resolve() in excluded_artifacts:
+            continue
+        try:
+            if path.stat().st_size > MAX_FILE_SIZE:
+                continue
+        except OSError as exc:
+            raise MineManifestDrift("source changed during plan discovery") from exc
+        files.append(path.relative_to(project_path).as_posix())
+    return child_dirs, files
+
+
+def build_resumable_source_manifest(
+    *,
+    project_path: Path,
+    contract: Mapping,
+    plan_progress_jsonl: str,
+    respect_gitignore: bool,
+    include_ignored: list,
+    excluded_artifacts: set[Path],
+    limit: int,
+) -> dict:
+    """Resume directory discovery and byte hashing from a fsynced per-file cursor."""
+    include_paths = normalize_include_paths(include_ignored)
+    identity = {
+        "schema": "mempalace-mine-plan-identity/v1",
+        "project_identity": sha256_bytes(os.path.normcase(str(project_path)).encode("utf-8")),
+        "contract": dict(contract),
+        "respect_gitignore": bool(respect_gitignore),
+        "include_ignored": sorted(include_paths),
+        "limit": int(limit),
+        "excluded_artifacts": sorted(
+            path.relative_to(project_path).as_posix()
+            for path in excluded_artifacts
+            if path == project_path or project_path in path.parents
+        ),
+    }
+    matcher_cache: dict = {}
+    with mine_lock(os.path.normcase(str(Path(plan_progress_jsonl).resolve()))):
+        journal = MinePlanJournal(plan_progress_jsonl, identity=identity)
+        state = journal.replay()
+        while state["pending_dirs"]:
+            relative_dir = state["pending_dirs"][0]
+            discovery = state["discovered"].get(relative_dir)
+            if discovery is None:
+                child_dirs, files = _discover_plan_directory(
+                    project_path=project_path,
+                    relative_dir=relative_dir,
+                    respect_gitignore=respect_gitignore,
+                    include_paths=include_paths,
+                    excluded_artifacts=excluded_artifacts,
+                    matcher_cache=matcher_cache,
+                )
+                journal.append(
+                    "directory-discovered",
+                    {
+                        "relative_dir": relative_dir,
+                        "child_dirs": child_dirs,
+                        "files": files,
+                    },
+                )
+                discovery = {"child_dirs": child_dirs, "files": files}
+                state["discovered"][relative_dir] = discovery
+            for relative_path in discovery["files"]:
+                if relative_path in state["described"]:
+                    continue
+                path = (project_path / relative_path).resolve()
+                descriptor = source_descriptor(
+                    path=path,
+                    relative_path=relative_path,
+                    normalized_path=os.path.normcase(relative_path).replace("\\", "/"),
+                )
+                journal.append(
+                    "file-described",
+                    {
+                        "relative_dir": relative_dir,
+                        "relative_path": relative_path,
+                        "descriptor": descriptor,
+                    },
+                )
+                state["described"][relative_path] = descriptor
+            journal.append("directory-complete", {"relative_dir": relative_dir})
+            state["completed"].add(relative_dir)
+            state["pending_dirs"].pop(0)
+            state["pending_dirs"].extend(discovery["child_dirs"])
+
+        descriptors = sorted(
+            state["described"].values(),
+            key=lambda item: (item["normalized_path"], item["relative_path"]),
+        )
+        if limit > 0:
+            descriptors = descriptors[:limit]
+        return build_source_manifest_from_descriptors(
+            project_path=project_path,
+            descriptors=descriptors,
+            contract=contract,
+        )
+
+
 # =============================================================================
 # MAIN: MINE
 # =============================================================================
@@ -1744,12 +1928,15 @@ def _prepare_mine_source_plan(
     include_ignored: list,
     files: Optional[list],
     plan_out: Optional[str],
+    plan_progress_jsonl: Optional[str],
     manifest_path: Optional[str],
     start_index: Optional[int],
     progress_jsonl: Optional[str],
 ) -> tuple[dict, list[Path], Optional[MineProgressJournal], int, int]:
     if plan_out and manifest_path:
         raise MinePlanError("--plan-out and --manifest are mutually exclusive")
+    if plan_progress_jsonl and not plan_out:
+        raise MinePlanError("--plan-progress-jsonl requires --plan-out")
     if start_index is not None and (
         not isinstance(start_index, int) or isinstance(start_index, bool) or start_index < 0
     ):
@@ -1767,37 +1954,50 @@ def _prepare_mine_source_plan(
         )
     else:
         discovered = files
-        if discovered is None:
-            discovered = scan_project(
-                project_dir,
+        excluded_artifacts = {
+            Path(path).expanduser().resolve()
+            for path in (plan_out, plan_progress_jsonl, progress_jsonl)
+            if path
+        }
+        if files is None and plan_progress_jsonl:
+            manifest = build_resumable_source_manifest(
+                project_path=project_path,
+                contract=plan_contract,
+                plan_progress_jsonl=plan_progress_jsonl,
                 respect_gitignore=respect_gitignore,
                 include_ignored=include_ignored,
+                excluded_artifacts=excluded_artifacts,
+                limit=limit,
             )
-        excluded_artifacts = {
-            Path(path).expanduser().resolve() for path in (plan_out, progress_jsonl) if path
-        }
-        discovered = [
-            Path(path).expanduser().resolve()
-            for path in discovered
-            if Path(path).expanduser().resolve() not in excluded_artifacts
-        ]
-        try:
-            discovered = sorted(
-                discovered,
-                key=lambda path: (
-                    os.path.normcase(path.relative_to(project_path).as_posix()),
-                    path.relative_to(project_path).as_posix(),
-                ),
+        else:
+            if discovered is None:
+                discovered = scan_project(
+                    project_dir,
+                    respect_gitignore=respect_gitignore,
+                    include_ignored=include_ignored,
+                )
+            discovered = [
+                Path(path).expanduser().resolve()
+                for path in discovered
+                if Path(path).expanduser().resolve() not in excluded_artifacts
+            ]
+            try:
+                discovered = sorted(
+                    discovered,
+                    key=lambda path: (
+                        os.path.normcase(path.relative_to(project_path).as_posix()),
+                        path.relative_to(project_path).as_posix(),
+                    ),
+                )
+            except ValueError as exc:
+                raise MinePlanError("source plan contains a path outside the project root") from exc
+            if limit > 0:
+                discovered = discovered[:limit]
+            manifest = build_source_manifest(
+                project_path=project_path,
+                files=discovered,
+                contract=plan_contract,
             )
-        except ValueError as exc:
-            raise MinePlanError("source plan contains a path outside the project root") from exc
-        if limit > 0:
-            discovered = discovered[:limit]
-        manifest = build_source_manifest(
-            project_path=project_path,
-            files=discovered,
-            contract=plan_contract,
-        )
         if plan_out:
             manifest = publish_source_manifest(plan_out, manifest)
 
@@ -1824,6 +2024,7 @@ def mine(
     include_ignored: list = None,
     files: list = None,
     plan_out: str = None,
+    plan_progress_jsonl: str = None,
     manifest_path: str = None,
     start_index: Optional[int] = None,
     progress_jsonl: str = None,
@@ -1850,6 +2051,7 @@ def mine(
             include_ignored=include_ignored,
             files=files,
             plan_out=plan_out,
+            plan_progress_jsonl=plan_progress_jsonl,
             manifest_path=manifest_path,
             start_index=start_index,
             progress_jsonl=progress_jsonl,
@@ -1868,6 +2070,7 @@ def mine(
                 include_ignored=include_ignored,
                 files=files,
                 plan_out=plan_out,
+                plan_progress_jsonl=plan_progress_jsonl,
                 manifest_path=manifest_path,
                 start_index=start_index,
                 progress_jsonl=progress_jsonl,
@@ -1893,6 +2096,7 @@ def _mine_impl(
     include_ignored: list = None,
     files: list = None,
     plan_out: str = None,
+    plan_progress_jsonl: str = None,
     manifest_path: str = None,
     start_index: Optional[int] = None,
     progress_jsonl: str = None,
@@ -1919,6 +2123,7 @@ def _mine_impl(
         include_ignored=include_ignored,
         files=files,
         plan_out=plan_out,
+        plan_progress_jsonl=plan_progress_jsonl,
         manifest_path=manifest_path,
         start_index=start_index,
         progress_jsonl=progress_jsonl,

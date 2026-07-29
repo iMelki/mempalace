@@ -26,6 +26,8 @@ MINE_MANIFEST_SCHEMA = "mempalace-mine-source-manifest/v1"
 MINE_PROGRESS_SCHEMA = "mempalace-mine-source-progress/v1"
 MINE_PROGRESS_EVENT = "source-represented"
 MINE_PROGRESS_REVISION = "1"
+MINE_PLAN_PROGRESS_SCHEMA = "mempalace-mine-plan-progress/v1"
+MINE_PLAN_PROGRESS_REVISION = "1"
 
 
 class MinePlanError(RuntimeError):
@@ -38,6 +40,10 @@ class MineManifestDrift(MinePlanError):
 
 class MineProgressError(MinePlanError):
     """Raised when progress cannot prove one contiguous verified prefix."""
+
+
+class MinePlanProgressError(MinePlanError):
+    """Raised when incremental source-plan progress cannot be resumed safely."""
 
 
 def utc_now() -> str:
@@ -75,16 +81,54 @@ def build_source_manifest(
             raise MinePlanError("source plan contains a duplicate normalized path")
         seen_paths.add(normalized_path)
         descriptors.append(
-            _source_descriptor(
+            source_descriptor(
                 path=path,
                 relative_path=relative_path,
                 normalized_path=normalized_path,
             )
         )
 
-    descriptors.sort(key=lambda item: (item["normalized_path"], item["relative_path"]))
+    return build_source_manifest_from_descriptors(
+        project_path=root,
+        descriptors=descriptors,
+        contract=contract,
+    )
+
+
+def build_source_manifest_from_descriptors(
+    *,
+    project_path: Union[str, os.PathLike],
+    descriptors: Iterable[Mapping[str, Any]],
+    contract: Mapping[str, Any],
+) -> dict:
+    """Build a manifest from already byte-verified, resumable descriptors."""
+    root = Path(project_path).expanduser().resolve()
+    normalized_descriptors = []
+    seen_paths: set[str] = set()
+    for raw_descriptor in descriptors:
+        descriptor = dict(raw_descriptor)
+        relative_path = descriptor.get("relative_path")
+        normalized_path = descriptor.get("normalized_path")
+        if not isinstance(relative_path, str) or not isinstance(normalized_path, str):
+            raise MinePlanError("source descriptor path identity is invalid")
+        try:
+            resolved = (root / relative_path).resolve()
+            resolved.relative_to(root)
+        except (OSError, ValueError) as exc:
+            raise MinePlanError("source descriptor escapes the project root") from exc
+        if normalized_path in seen_paths:
+            raise MinePlanError("source plan contains a duplicate normalized path")
+        seen_paths.add(normalized_path)
+        for key in ("size_bytes", "mtime_ns"):
+            if not isinstance(descriptor.get(key), int) or descriptor[key] < 0:
+                raise MinePlanError("source descriptor stat is invalid")
+        if not _is_tagged_hash(descriptor.get("content_hash")):
+            raise MinePlanError("source descriptor content hash is invalid")
+        normalized_descriptors.append(descriptor)
+
+    normalized_descriptors.sort(key=lambda item: (item["normalized_path"], item["relative_path"]))
     items = []
-    for index, descriptor in enumerate(descriptors):
+    for index, descriptor in enumerate(normalized_descriptors):
         unsigned = {"index": index, **descriptor}
         items.append({**unsigned, "item_digest": _digest(unsigned)})
 
@@ -100,6 +144,209 @@ def build_source_manifest(
         "manifest_digest": _digest(core),
         "created_at": utc_now(),
     }
+
+
+class MinePlanJournal:
+    """Fsynced, hash-chained discovery/hash cursor for one immutable plan."""
+
+    def __init__(
+        self,
+        path: Union[str, os.PathLike],
+        *,
+        identity: Mapping[str, Any],
+    ) -> None:
+        self.path = Path(path).expanduser().resolve()
+        self.identity = _jsonable_mapping(identity)
+        self.identity_digest = _digest(self.identity)
+        self.recovered_torn_bytes = 0
+        self._records_cache: list[dict] | None = None
+
+    def records(self) -> list[dict]:
+        if self._records_cache is not None:
+            return list(self._records_cache)
+        if not self.path.exists():
+            self._records_cache = []
+            return []
+        try:
+            raw = self.path.read_bytes()
+        except OSError as exc:
+            raise MinePlanProgressError("mine plan journal is unreadable") from exc
+        if raw and not raw.endswith(b"\n"):
+            committed_end = raw.rfind(b"\n") + 1
+            self.recovered_torn_bytes += len(raw) - committed_end
+            self._truncate_torn_tail(committed_end)
+            raw = raw[:committed_end]
+        records: list[dict] = []
+        previous_digest = "sha256:" + "0" * 64
+        for line_number, raw_line in enumerate(raw.splitlines(), 1):
+            try:
+                record = json.loads(raw_line.decode("utf-8"))
+            except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
+                raise MinePlanProgressError(
+                    f"mine plan record {line_number} is unreadable"
+                ) from exc
+            if not isinstance(record, dict):
+                raise MinePlanProgressError(f"mine plan record {line_number} is not an object")
+            if record.get("schema") != MINE_PLAN_PROGRESS_SCHEMA:
+                raise MinePlanProgressError("mine plan journal schema is unsupported")
+            if record.get("identity_digest") != self.identity_digest:
+                raise MinePlanProgressError(
+                    "mine plan journal belongs to different immutable inputs"
+                )
+            if record.get("sequence") != len(records):
+                raise MinePlanProgressError("mine plan journal sequence is not contiguous")
+            if record.get("previous_record_digest") != previous_digest:
+                raise MinePlanProgressError("mine plan journal hash chain is broken")
+            unsigned = {key: value for key, value in record.items() if key != "record_digest"}
+            if record.get("record_digest") != _digest(unsigned):
+                raise MinePlanProgressError("mine plan journal record digest is invalid")
+            event = record.get("event")
+            if event not in {
+                "directory-discovered",
+                "file-described",
+                "directory-complete",
+            }:
+                raise MinePlanProgressError("mine plan journal event is unsupported")
+            records.append(record)
+            previous_digest = record["record_digest"]
+        self._validate_replay(records)
+        self._records_cache = records
+        return list(records)
+
+    def append(self, event: str, payload: Mapping[str, Any]) -> dict:
+        if self._records_cache is None:
+            self.records()
+        records = self._records_cache
+        assert records is not None
+        previous_digest = records[-1]["record_digest"] if records else "sha256:" + "0" * 64
+        unsigned = {
+            "schema": MINE_PLAN_PROGRESS_SCHEMA,
+            "event": event,
+            "sequence": len(records),
+            "recorded_at": utc_now(),
+            "identity_digest": self.identity_digest,
+            "previous_record_digest": previous_digest,
+            **_jsonable_mapping(payload),
+        }
+        record = {**unsigned, "record_digest": _digest(unsigned)}
+        encoded = (
+            json.dumps(record, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n"
+        ).encode("utf-8")
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            descriptor = os.open(
+                str(self.path),
+                os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+                0o600,
+            )
+            try:
+                written = os.write(descriptor, encoded)
+                if written != len(encoded):
+                    raise OSError("short append")
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        except OSError as exc:
+            raise MinePlanProgressError("mine plan checkpoint could not be committed") from exc
+        records.append(record)
+        return record
+
+    def replay(self) -> dict[str, Any]:
+        records = self.records()
+        pending = [""]
+        discovered: dict[str, dict] = {}
+        described: dict[str, dict] = {}
+        described_counts: dict[str, int] = {}
+        completed: set[str] = set()
+        for record in records:
+            event = record["event"]
+            relative_dir = record.get("relative_dir")
+            if not pending or relative_dir != pending[0]:
+                raise MinePlanProgressError(
+                    "mine plan journal diverges from the deterministic directory cursor"
+                )
+            if event == "directory-discovered":
+                if relative_dir in discovered:
+                    raise MinePlanProgressError("mine plan directory was discovered twice")
+                discovered[relative_dir] = {
+                    "child_dirs": list(record.get("child_dirs", [])),
+                    "files": list(record.get("files", [])),
+                }
+            elif event == "file-described":
+                if relative_dir not in discovered:
+                    raise MinePlanProgressError(
+                        "mine plan described a file before directory discovery"
+                    )
+                relative_path = record.get("relative_path")
+                expected = discovered[relative_dir]["files"]
+                described_count = described_counts.get(relative_dir, 0)
+                if (
+                    not isinstance(relative_path, str)
+                    or described_count >= len(expected)
+                    or relative_path != expected[described_count]
+                    or relative_path in described
+                ):
+                    raise MinePlanProgressError("mine plan file cursor is not contiguous")
+                descriptor = record.get("descriptor")
+                if not isinstance(descriptor, dict):
+                    raise MinePlanProgressError("mine plan descriptor is invalid")
+                expected_normalized = os.path.normcase(relative_path).replace("\\", "/")
+                if (
+                    descriptor.get("relative_path") != relative_path
+                    or descriptor.get("normalized_path") != expected_normalized
+                ):
+                    raise MinePlanProgressError(
+                        "mine plan descriptor does not match its file cursor"
+                    )
+                described[relative_path] = descriptor
+                described_counts[relative_dir] = described_count + 1
+            else:
+                if relative_dir not in discovered or relative_dir in completed:
+                    raise MinePlanProgressError("mine plan directory completion is invalid")
+                expected = discovered[relative_dir]["files"]
+                if any(path not in described for path in expected):
+                    raise MinePlanProgressError(
+                        "mine plan directory completed before every file descriptor"
+                    )
+                completed.add(relative_dir)
+                pending.pop(0)
+                pending.extend(discovered[relative_dir]["child_dirs"])
+        return {
+            "pending_dirs": pending,
+            "discovered": discovered,
+            "described": described,
+            "completed": completed,
+            "record_count": len(records),
+            "last_record_digest": (
+                records[-1]["record_digest"] if records else "sha256:" + "0" * 64
+            ),
+        }
+
+    def _validate_replay(self, records: list[dict]) -> None:
+        # Replay is the semantic validator; discard its materialized result here.
+        if records:
+            cached = self._records_cache
+            self._records_cache = records
+            try:
+                self.replay()
+            finally:
+                self._records_cache = cached
+
+    def _truncate_torn_tail(self, length: int) -> None:
+        try:
+            descriptor = os.open(str(self.path), os.O_WRONLY)
+            try:
+                os.ftruncate(descriptor, length)
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        except OSError as exc:
+            raise MinePlanProgressError("torn mine plan tail could not be recovered") from exc
+
+
+def _relative_parent(relative_path: str) -> str:
+    parent = Path(relative_path).parent.as_posix()
+    return "" if parent == "." else parent
 
 
 def publish_source_manifest(
@@ -483,7 +730,7 @@ class MineProgressJournal:
             raise MineProgressError("mine progress timestamp is invalid")
 
 
-def _source_descriptor(*, path: Path, relative_path: str, normalized_path: str) -> dict:
+def source_descriptor(*, path: Path, relative_path: str, normalized_path: str) -> dict:
     try:
         before = path.stat()
         if not stat.S_ISREG(before.st_mode):

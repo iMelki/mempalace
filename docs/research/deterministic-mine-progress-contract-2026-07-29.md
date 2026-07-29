@@ -43,6 +43,13 @@ than treating a successful process return as durability:
 `--plan-out PATH` creates, or reuses only when identical, one immutable JSON
 manifest. `--manifest PATH` consumes it. Both apply to `projects` mode.
 
+For large trees, pair planning with `--plan-progress-jsonl PATH`. The separate
+fsynced, hash-chained planning journal checkpoints directory discovery and
+each completed file descriptor, then resumes at the exact next item after a
+kill or reboot. Its identity, torn-tail, concurrency, and bounded-state
+rationale is documented in
+[resumable-source-plan-contract-2026-07-29.md](resumable-source-plan-contract-2026-07-29.md).
+
 The plan is sorted by normalized project-relative path and binds:
 
 - zero-based source index and normalized relative path;

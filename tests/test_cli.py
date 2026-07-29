@@ -502,6 +502,7 @@ def test_cmd_mine_projects_mode(mock_config_cls):
             respect_gitignore=True,
             include_ignored=[],
             plan_out=None,
+            plan_progress_jsonl=None,
             manifest_path=None,
             start_index=None,
             progress_jsonl=None,

@@ -25,10 +25,19 @@ This file is the durable local index for active `mempalace` issues.
     hash-chained and fsynced sanitized progress; target-palace receipt readback;
     torn-tail recovery; drift/committed-corruption/cross-palace rejection; and
     CLI temporary-lock exit `75`.
+  - The follow-up planner contract adds `--plan-progress-jsonl`: directory
+    discovery and every completed file descriptor are fsynced into a compact,
+    hash-chained journal, so a killed source-tree walk resumes at the exact next
+    directory/file rather than repeating the full scan/hash pass. Only a torn
+    non-newline tail is repaired; complete corruption and identity drift fail
+    closed. Research and contract:
+    `docs/research/resumable-source-plan-contract-2026-07-29.md`.
+    The post-fix repository gate passes `1,756` tests with `7` skipped and
+    `106` intentionally deselected in `203.30s`.
   - Disposable focused proof covers hard exit/restart, lagging-prefix replay,
     output equality, idempotency, source drift, lock conflict, and no
     path/content leakage. The journal reuses an unchanged validated prefix so
-    repeated appends are linear rather than quadratic (`11` focused tests
+    repeated appends are linear rather than quadratic (`14` focused tests
     passed). The expanded miner, lock, receipt, CLI, and progress regression
     passes `223` tests in `63.98s`; Ruff and local Markdown-link checks pass.
     No configured palace was opened.
