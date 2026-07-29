@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import functools
-import hashlib
 import hmac
 import json
 import logging
@@ -37,6 +36,11 @@ except ModuleNotFoundError as exc:  # pragma: no cover - exercised without the o
     ) from exc
 
 from .mcp_dispatch import ToolDispatchError, dispatch_tool, list_tool_specs
+from .evaluation_identity import (
+    EvaluationCorpusManifestError,
+    load_evaluation_corpus_manifest,
+    validate_evaluation_corpus_manifest,
+)
 from .version import __version__
 from .write_receipts import _package_source_digest
 
@@ -643,12 +647,25 @@ def create_http_app(
     termination_retry_base_seconds: float = DEFAULT_TERMINATION_RETRY_BASE_SECONDS,
     termination_timeout_seconds: float = DEFAULT_TERMINATION_TIMEOUT_SECONDS,
     runner: ToolRunner | None = None,
+    evaluation_corpus_manifest: Mapping[str, Any] | None = None,
 ) -> Starlette:
     """Create the authenticated `/mcp` ASGI app without opening a socket."""
     _require_supported_mcp_sdk()
     package_digest = _package_source_digest(Path(__file__).resolve().parent)
     instance_id = _opaque_sha256_environment("MEMSYS_MEMPALACE_INSTANCE_ID")
     data_plane_id = _opaque_sha256_environment("MEMSYS_MEMPALACE_DATA_PLANE_ID")
+    corpus_generation: dict[str, object] = {
+        "schema": "mempalace-corpus-generation/v1",
+        "status": "unavailable",
+        "corpusRevision": None,
+        "scope": "none",
+        "capturedAtUtc": None,
+    }
+    if evaluation_corpus_manifest is not None:
+        corpus_generation = validate_evaluation_corpus_manifest(
+            evaluation_corpus_manifest,
+            expected_data_plane_id=data_plane_id,
+        )
     if session_idle_seconds is not None and (
         not math.isfinite(session_idle_seconds) or session_idle_seconds <= 0
     ):
@@ -717,13 +734,7 @@ def create_http_app(
                 "serviceRevision": f"version:{__version__};source-{package_digest}",
                 "instanceId": instance_id,
                 "dataPlaneId": data_plane_id,
-                "corpusGeneration": {
-                    "schema": "mempalace-corpus-generation/v1",
-                    "status": "unavailable",
-                    "corpusRevision": None,
-                    "scope": "none",
-                    "capturedAtUtc": None,
-                },
+                "corpusGeneration": corpus_generation,
             }
         )
 
@@ -780,6 +791,11 @@ def resolve_auth_token(environ: Mapping[str, str] | None = None) -> tuple[str, s
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="MemPalace native loopback HTTP MCP server")
     parser.add_argument("--palace", metavar="PATH", help="Path to a disposable or managed palace")
+    parser.add_argument(
+        "--evaluation-corpus-manifest",
+        metavar="PATH",
+        help="Startup-only immutable evaluation corpus manifest; omitted remains fail-closed",
+    )
     parser.add_argument("--host", choices=LOOPBACK_HOSTS, default=DEFAULT_HOST)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--max-concurrency", type=int, default=DEFAULT_MAX_CONCURRENCY)
@@ -826,6 +842,18 @@ def main(argv: list[str] | None = None) -> None:
 
     mcp_server._restore_stdout()
     mcp_server._refresh_vector_disabled_flag()
+    data_plane_id = _opaque_sha256_environment("MEMSYS_MEMPALACE_DATA_PLANE_ID")
+    try:
+        evaluation_corpus_manifest = (
+            load_evaluation_corpus_manifest(
+                Path(args.evaluation_corpus_manifest),
+                expected_data_plane_id=data_plane_id,
+            )
+            if args.evaluation_corpus_manifest
+            else None
+        )
+    except EvaluationCorpusManifestError as exc:
+        raise SystemExit(f"--evaluation-corpus-manifest is invalid: {exc}") from exc
     app = create_http_app(
         auth_token=token,
         tools=mcp_server.TOOLS,
@@ -833,6 +861,7 @@ def main(argv: list[str] | None = None) -> None:
         max_sessions=args.max_sessions,
         session_idle_seconds=args.session_idle_seconds,
         termination_timeout_seconds=args.termination_timeout_seconds,
+        evaluation_corpus_manifest=evaluation_corpus_manifest,
     )
 
     import uvicorn

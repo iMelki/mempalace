@@ -35,6 +35,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Immutable evaluation-corpus identity for MemSys gold baselines (#31).**
+  Native MCP can now accept one startup-only, strict, secret-free evaluation
+  manifest bound to its data-plane identity. It exposes only hashed corpus
+  provenance after validating the manifest; omitted, malformed, tampered, or
+  cross-palace manifests retain the existing fail-closed state or prevent
+  startup. This adds no live palace scan, memory mutation, or path disclosure.
+
 - **Crash-resumable source-manifest planning (#25).** Added
   `--plan-progress-jsonl` for project `--dry-run --plan-out` operations. The
   fsynced, hash-chained journal checkpoints directory discovery and every

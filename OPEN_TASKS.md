@@ -6,6 +6,16 @@ This file is the durable local index for active `mempalace` issues.
 
 ## Active Issues
 
+- [#31 - Bind immutable evaluation corpus identity for MemSys gold baselines](https://github.com/iMelki/mempalace/issues/31)
+  - Implemented the startup-only manifest validation and authenticated identity
+    surface. A complete identity needs a separately attested logical-inventory
+    manifest bound to the running data plane; a status count, arbitrary
+    environment digest, dynamic database scan, or path is not accepted.
+  - Remaining: create the bounded manifest producer/attestation workflow and
+    register it with the managed bridge before MemSys can publish a comparable
+    complete-identity gold baseline. Until then `corpusGeneration=unavailable`
+    remains the correct live state.
+
 - [#29 - Prevent Windows WFP timeout warnings from leaking out of the CLI test](https://github.com/iMelki/mempalace/issues/29)
   - The 2026-07-29 guarded full test lane passed, but
     `tests/test_cli.py::test_cmd_init_no_entities` emitted Windows

@@ -24,6 +24,10 @@ from mcp.client.streamable_http import streamable_http_client  # noqa: E402
 from starlette.testclient import TestClient  # noqa: E402
 
 import mempalace.mcp_http as mcp_http_module  # noqa: E402
+from mempalace.evaluation_identity import (  # noqa: E402
+    EVALUATION_CORPUS_MANIFEST_SCHEMA,
+    sha256_identity,
+)
 from mempalace.mcp_http import (  # noqa: E402
     DEFAULT_HOST,
     DEFAULT_MAX_CONCURRENCY,
@@ -54,6 +58,22 @@ def _registry(handler):
             },
             "handler": handler,
         }
+    }
+
+
+def _evaluation_manifest(data_plane_id: str) -> dict[str, object]:
+    material = {
+        "schema": EVALUATION_CORPUS_MANIFEST_SCHEMA,
+        "dataPlaneId": data_plane_id,
+        "inventorySha256": "sha256:" + "a" * 64,
+        "scopeSha256": "sha256:" + "b" * 64,
+        "sourceRevision": "sha256:" + "c" * 64,
+        "itemCount": 42,
+    }
+    return {
+        **material,
+        "capturedAtUtc": "2026-07-29T14:00:00Z",
+        "corpusRevision": sha256_identity(material),
     }
 
 
@@ -237,6 +257,50 @@ def test_authenticated_memsys_identity_is_startup_bound_and_fail_closed_for_corp
     serialized = json.dumps(payload)
     assert AUTH_FIXTURE not in serialized
     assert "mempalace\\" not in serialized.casefold()
+
+
+def test_authenticated_memsys_identity_exposes_only_validated_evaluation_manifest(monkeypatch):
+    data_plane_id = "sha256:" + "d" * 64
+    monkeypatch.setenv("MEMSYS_MEMPALACE_DATA_PLANE_ID", data_plane_id)
+    manifest = _evaluation_manifest(data_plane_id)
+    app = create_http_app(
+        auth_token=AUTH_FIXTURE,
+        tools=_registry(lambda _: {}),
+        evaluation_corpus_manifest=manifest,
+    )
+
+    with TestClient(app) as client:
+        payload = client.get(
+            "/__memsys/identity", headers={"Authorization": f"Bearer {AUTH_FIXTURE}"}
+        ).json()
+
+    assert payload["dataPlaneId"] == data_plane_id
+    assert payload["corpusGeneration"] == {
+        "schema": "mempalace-corpus-generation/v1",
+        "status": "complete",
+        "corpusRevision": manifest["corpusRevision"],
+        "scope": "evaluation-manifest",
+        "capturedAtUtc": "2026-07-29T14:00:00Z",
+        "itemCount": 42,
+        "inventorySha256": "sha256:" + "a" * 64,
+    }
+    serialized = json.dumps(payload)
+    assert AUTH_FIXTURE not in serialized
+    assert "sourceRevision" not in serialized
+
+
+def test_evaluation_manifest_data_plane_or_digest_mismatch_fails_startup(monkeypatch):
+    data_plane_id = "sha256:" + "d" * 64
+    monkeypatch.setenv("MEMSYS_MEMPALACE_DATA_PLANE_ID", data_plane_id)
+    manifest = _evaluation_manifest(data_plane_id)
+    manifest["itemCount"] = 43
+
+    with pytest.raises(ValueError, match="corpusRevision"):
+        create_http_app(
+            auth_token=AUTH_FIXTURE,
+            tools=_registry(lambda _: {}),
+            evaluation_corpus_manifest=manifest,
+        )
 
 
 def test_http_catalog_matches_stdio_catalog():
