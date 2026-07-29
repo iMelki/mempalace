@@ -1,10 +1,23 @@
 # MemPalace Open Tasks
 
-Last updated: 2026-07-15
+Last updated: 2026-07-29
 
 This file is the durable local index for active `mempalace` issues.
 
 ## Active Issues
+
+- [#26 - Report conversation palace-lock contention as a temporary failure](https://github.com/iMelki/mempalace/issues/26)
+  - The naturally scheduled MemSys provider-chat run
+    `provider-chat-ingestion-20260729T001002Z` overlapped the weekly knowledge
+    mine. Conversation mode swallowed `MineAlreadyRunning`, returned `0`, and
+    forced the receipt consumer to infer a terminal reconciliation failure.
+  - Implemented locally: the CLI requests lock-conflict propagation and returns
+    the existing temporary-failure code `75`; direct library callers preserve
+    their prior default. A live empty-source lock probe returned `75` and
+    selected no source files. The CLI regression suite passes `59` tests.
+  - The paired MemSys consumer change is tracked on
+    [memsys#89](https://github.com/iMelki/memsys/issues/89) and classifies
+    exit `75` as retryable without advancing source state.
 
 - [#25 - Expose deterministic mine manifests and resumable source progress](https://github.com/iMelki/mempalace/issues/25)
   - Implemented locally: normalized deterministic source ordering; immutable

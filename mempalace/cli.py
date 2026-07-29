@@ -514,16 +514,26 @@ def cmd_mine(args):
             )
             sys.exit(2)
         from .convo_miner import mine_convos
+        from .miner import MINE_LOCK_CONFLICT_EXIT_CODE
+        from .palace import MineAlreadyRunning
 
-        mine_convos(
-            convo_dir=args.dir,
-            palace_path=palace_path,
-            wing=args.wing,
-            agent=args.agent,
-            limit=args.limit,
-            dry_run=args.dry_run,
-            extract_mode=args.extract,
-        )
+        try:
+            mine_convos(
+                convo_dir=args.dir,
+                palace_path=palace_path,
+                wing=args.wing,
+                agent=args.agent,
+                limit=args.limit,
+                dry_run=args.dry_run,
+                extract_mode=args.extract,
+                raise_on_lock_conflict=True,
+            )
+        except MineAlreadyRunning:
+            print(
+                "mempalace: another mine already holds the requested palace; retry later.",
+                file=sys.stderr,
+            )
+            sys.exit(MINE_LOCK_CONFLICT_EXIT_CODE)
     else:
         from .miner import MINE_LOCK_CONFLICT_EXIT_CODE, mine
         from .palace import MineAlreadyRunning

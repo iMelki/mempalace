@@ -8,6 +8,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [3.3.5] — unreleased
 
+### Fixed
+
+- **Conversation-mode palace-lock contention is a temporary failure (#26).**
+  `mempalace mine --mode convos` now gives the CLI the same fail-closed lock
+  contract as project mining: when another writer owns the palace lock, the
+  command returns temporary-failure exit code `75` with a sanitized retry
+  message. Library callers retain the historical clean-return behavior unless
+  they explicitly request lock-conflict propagation. A live empty-source probe
+  against an active writer returned `75` with zero input files, and the CLI
+  regression suite passes `59` tests.
+
 ### Added
 
 - **Crash-resumable deterministic project mining (#25).** Project sources are

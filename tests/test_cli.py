@@ -534,7 +534,39 @@ def test_cmd_mine_convos_mode(mock_config_cls):
             limit=10,
             dry_run=True,
             extract_mode="general",
+            raise_on_lock_conflict=True,
         )
+
+
+@patch("mempalace.cli.MempalaceConfig")
+def test_cmd_mine_convos_lock_conflict_exits_tempfail(mock_config_cls, capsys):
+    from mempalace.miner import MINE_LOCK_CONFLICT_EXIT_CODE
+    from mempalace.palace import MineAlreadyRunning
+
+    mock_config_cls.return_value.palace_path = "/fake/palace"
+    args = argparse.Namespace(
+        dir="/chats",
+        palace=None,
+        mode="convos",
+        wing="mywing",
+        agent="me",
+        limit=1,
+        dry_run=False,
+        no_gitignore=False,
+        include_ignored=[],
+        extract="general",
+    )
+    with (
+        patch(
+            "mempalace.convo_miner.mine_convos",
+            side_effect=MineAlreadyRunning("busy"),
+        ),
+        pytest.raises(SystemExit) as exc_info,
+    ):
+        cmd_mine(args)
+
+    assert exc_info.value.code == MINE_LOCK_CONFLICT_EXIT_CODE
+    assert "retry later" in capsys.readouterr().err
 
 
 @patch("mempalace.cli.MempalaceConfig")

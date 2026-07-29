@@ -883,6 +883,7 @@ def mine_convos(
     limit: int = 0,
     dry_run: bool = False,
     extract_mode: str = "exchange",
+    raise_on_lock_conflict: bool = False,
 ):
     """Serialize every mutating conversation run against one palace."""
     kwargs = {
@@ -900,6 +901,8 @@ def mine_convos(
         with managed_write_scope(palace_path, lock_factory=mine_palace_lock):
             return _mine_convos_impl(**kwargs)
     except MineAlreadyRunning:
+        if raise_on_lock_conflict:
+            raise
         print(
             f"mempalace: another mine is already running against {palace_path} - exiting cleanly.",
             file=sys.stderr,
