@@ -106,14 +106,18 @@ def test_cmd_hook_calls_run_hook():
 @patch("mempalace.cli.MempalaceConfig")
 def test_cmd_init_no_entities(mock_config_cls, tmp_path):
     args = argparse.Namespace(dir=str(tmp_path), yes=True)
+    provider = MagicMock()
+    provider.check_available.return_value = (False, "unavailable in unit test")
     with (
         patch("mempalace.entity_detector.scan_for_detection", return_value=[]),
         patch("mempalace.room_detector_local.detect_rooms_local") as mock_rooms,
         patch("mempalace.cli._maybe_run_mine_after_init"),
+        patch("mempalace.cli.get_provider", return_value=provider),
     ):
         cmd_init(args)
         mock_rooms.assert_called_once_with(project_dir=str(tmp_path), yes=True)
         mock_config_cls.return_value.init.assert_called_once()
+        provider.check_available.assert_called_once()
 
 
 @patch("mempalace.cli.MempalaceConfig")
@@ -121,7 +125,7 @@ def test_cmd_init_with_entities(mock_config_cls, tmp_path):
     fake_files = [tmp_path / "a.txt"]
     detected = {"people": [{"name": "Alice"}], "projects": [], "uncertain": []}
     confirmed = {"people": ["Alice"], "projects": []}
-    args = argparse.Namespace(dir=str(tmp_path), yes=True)
+    args = argparse.Namespace(dir=str(tmp_path), yes=True, no_llm=True)
     with (
         patch("mempalace.entity_detector.scan_for_detection", return_value=fake_files),
         patch("mempalace.entity_detector.detect_entities", return_value=detected),
@@ -154,7 +158,7 @@ def test_cmd_init_normalizes_wing_name_for_topics_registry(mock_config_cls, tmp_
         "uncertain": [],
     }
     confirmed = {"people": ["Alice"], "projects": [], "topics": ["Bun"]}
-    args = argparse.Namespace(dir=str(project), yes=True)
+    args = argparse.Namespace(dir=str(project), yes=True, no_llm=True)
     with (
         patch("mempalace.entity_detector.scan_for_detection", return_value=fake_files),
         patch("mempalace.entity_detector.detect_entities", return_value=detected),
@@ -202,6 +206,7 @@ def test_cmd_init_honors_palace_flag(tmp_path, monkeypatch):
         palace=str(palace),
         yes=True,
         auto_mine=False,
+        no_llm=True,
     )
 
     captured = {}
@@ -235,7 +240,7 @@ def test_cmd_init_with_entities_zero_total(mock_config_cls, tmp_path, capsys):
     """When entities detected but total is 0, prints 'No entities' message."""
     fake_files = [tmp_path / "a.txt"]
     detected = {"people": [], "projects": [], "uncertain": []}
-    args = argparse.Namespace(dir=str(tmp_path), yes=False)
+    args = argparse.Namespace(dir=str(tmp_path), yes=False, no_llm=True)
     with (
         patch("mempalace.entity_detector.scan_for_detection", return_value=fake_files),
         patch("mempalace.entity_detector.detect_entities", return_value=detected),
