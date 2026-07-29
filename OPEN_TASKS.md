@@ -6,6 +6,15 @@ This file is the durable local index for active `mempalace` issues.
 
 ## Active Issues
 
+- [#29 - Prevent Windows WFP timeout warnings from leaking out of the CLI test](https://github.com/iMelki/mempalace/issues/29)
+  - The 2026-07-29 guarded full test lane passed, but
+    `tests/test_cli.py::test_cmd_init_no_entities` emitted Windows
+    `FWP_E_TIMEOUT` (`0x80320012`) while opening an LLM-availability request.
+    The output is warning-grade, not evidence of a retrieval failure.
+  - Prove this test makes no real DNS/HTTP call, then collect Windows
+    network-filter/provider evidence only if the isolated reproduction still
+    emits the warning. Do not weaken firewall or security policy to silence it.
+
 - [#28 - Return bounded degraded result when BM25 SQLite fallback is locked](https://github.com/iMelki/mempalace/issues/28)
   - Live bridge readiness on 2026-07-29 found a listener on `127.0.0.1:8787`
     but MemSys callers timed out because the read-only fallback raised
