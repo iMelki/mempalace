@@ -727,6 +727,91 @@ def cmd_repair_status(args):
     )
 
 
+def cmd_backup_snapshot(args):
+    """Clean-client lease + staged consistent snapshot + content identity (#33).
+
+    Recursively tarring a live palace is not crash-consistent: ``chroma.sqlite3``
+    is a multi-gigabyte live SQLite database and the HNSW segment files are
+    mutated as a group. This command is the safe replacement -- it holds the
+    exclusive palace lock every miner and MCP managed write already honors,
+    copies the catalog with SQLite's online backup API, copies only the segment
+    directories the snapshot's own catalog references, and emits a verifiable
+    content-identity receipt. It never mutates the palace.
+    """
+    import json
+
+    from .backup_snapshot import PalaceSnapshotError, stage_palace_snapshot, verify_snapshot_receipt
+
+    palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
+    as_json = getattr(args, "json", False)
+
+    try:
+        if getattr(args, "verify_receipt", None):
+            result = verify_snapshot_receipt(
+                args.verify_receipt,
+                staged_root=getattr(args, "staged_root", None) or None,
+                verify_hashes=not getattr(args, "skip_hash_verification", False),
+            )
+            if as_json:
+                print(json.dumps(result, ensure_ascii=True, separators=(",", ":"), sort_keys=True))
+            else:
+                print(f"MemPalace snapshot verification: valid={result['valid']}")
+                print(f"  Files: {result['fileCount']}  hashed={result['hashesVerified']}")
+                for problem in result["problems"]:
+                    print(f"  PROBLEM {problem}")
+            if not result["valid"]:
+                sys.exit(2)
+            return
+
+        if not getattr(args, "staging_dir", None):
+            print(
+                "backup-snapshot requires --staging-dir (an empty directory outside the palace)",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+
+        receipt = stage_palace_snapshot(
+            palace_path,
+            args.staging_dir,
+            use_maintenance_marker=not getattr(args, "no_maintenance_marker", False),
+            progress=getattr(args, "progress", False),
+        )
+    except PalaceSnapshotError as exc:
+        if as_json:
+            print(
+                json.dumps(
+                    {
+                        "schema": "mempalace-backup-snapshot-receipt/v1",
+                        "status": "error",
+                        "leaseProven": False,
+                        "snapshotConsistencyProven": False,
+                        "contentIdentityProven": False,
+                        "message": str(exc),
+                    },
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+            )
+        else:
+            print(f"MemPalace snapshot failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    if as_json:
+        print(json.dumps(receipt, ensure_ascii=True, separators=(",", ":"), sort_keys=True))
+        return
+    identity = receipt.get("contentIdentity", {})
+    print("MemPalace staged backup snapshot: complete")
+    print(f"  Staged root:  {receipt['stagedRoot']}")
+    print(f"  Receipt:      {receipt['receiptPath']}")
+    print(f"  Files staged: {identity.get('fileCount')}")
+    print(f"  Bytes staged: {identity.get('totalBytes'):,}")
+    for label, entry in sorted((identity.get("counts") or {}).items()):
+        print(f"  {label:<12} sqlite={entry.get('sqliteCount')} hnsw={entry.get('hnswCount')}")
+    print(f"  Identity:     {receipt['contentIdentityDigest']}")
+    print(f"  Duration:     {receipt['durationSeconds']}s")
+
+
 def cmd_warm(args):
     """Pre-warm the vector search stack (embedding model + HNSW + any pending
     post-mutation work), so the next reader pays seconds, not minutes.
@@ -1493,6 +1578,50 @@ def main():
         help="Emit a single machine-readable warm result JSON object to stdout",
     )
 
+    # backup-snapshot — clean-client lease + staged consistent snapshot (#33)
+    p_backup_snapshot = sub.add_parser(
+        "backup-snapshot",
+        help=(
+            "Stage a consistent, content-identity-proven palace snapshot under an "
+            "exclusive clean-client lease (SQLite online backup; never a live tar)"
+        ),
+    )
+    p_backup_snapshot.add_argument(
+        "--staging-dir",
+        default=None,
+        help="Empty directory outside the palace root that receives the staged restore set",
+    )
+    p_backup_snapshot.add_argument(
+        "--verify-receipt",
+        default=None,
+        help="Verify an existing backup-snapshot-receipt.json instead of creating a snapshot",
+    )
+    p_backup_snapshot.add_argument(
+        "--staged-root",
+        default=None,
+        help="Override the staged root recorded in the receipt during verification",
+    )
+    p_backup_snapshot.add_argument(
+        "--skip-hash-verification",
+        action="store_true",
+        help="Structural verification only (schema, proof flags, inventory, sizes, digest)",
+    )
+    p_backup_snapshot.add_argument(
+        "--no-maintenance-marker",
+        action="store_true",
+        help="Do not raise the shared MemSys maintenance pause marker for the lease window",
+    )
+    p_backup_snapshot.add_argument(
+        "--progress",
+        action="store_true",
+        help="Print SQLite online-backup progress to stderr",
+    )
+    p_backup_snapshot.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the machine-readable snapshot receipt or verification object to stdout",
+    )
+
     # mcp
     sub.add_parser(
         "mcp",
@@ -1550,6 +1679,7 @@ def main():
         "wake-up": cmd_wakeup,
         "repair": cmd_repair,
         "repair-status": cmd_repair_status,
+        "backup-snapshot": cmd_backup_snapshot,
         "warm": cmd_warm,
         "migrate": cmd_migrate,
         "status": cmd_status,
