@@ -57,7 +57,9 @@ import sqlite3
 import sys
 import time
 from contextlib import contextmanager
-from datetime import UTC, datetime
+
+# datetime.UTC is a 3.11+ alias; CI runs 3.9, where only timezone.utc exists.
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -92,7 +94,7 @@ class PalaceSnapshotError(RuntimeError):
 
 
 def _utc_now() -> str:
-    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _is_link_or_reparse(path: Path) -> bool:

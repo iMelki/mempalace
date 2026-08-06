@@ -16,7 +16,9 @@ import json
 import os
 import sqlite3
 import tempfile
-from datetime import UTC, datetime
+
+# datetime.UTC is a 3.11+ alias; CI runs 3.9, where only timezone.utc exists.
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -41,11 +43,13 @@ SHARD_SCHEMA = "mempalace-evaluation-inventory-shard/v1"
 def _canonical_bytes(value: object) -> bytes:
     """Return the exact bytes used by :func:`sha256_identity`."""
 
-    return json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode(
+        "utf-8"
+    )
 
 
 def _utc_now() -> str:
-    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _sha256_file(path: Path) -> str:
@@ -83,9 +87,13 @@ def _sqlite_integrity_check(snapshot: Path) -> None:
         finally:
             connection.close()
     except sqlite3.Error as exc:
-        raise EvaluationCorpusManifestError("MemPalace SQLite snapshot integrity check failed") from exc
+        raise EvaluationCorpusManifestError(
+            "MemPalace SQLite snapshot integrity check failed"
+        ) from exc
     if result != ("ok",):
-        raise EvaluationCorpusManifestError("MemPalace SQLite snapshot integrity check did not return ok")
+        raise EvaluationCorpusManifestError(
+            "MemPalace SQLite snapshot integrity check did not return ok"
+        )
 
 
 def _canonical_row(record: Mapping[str, Any]) -> dict[str, object]:
@@ -95,14 +103,18 @@ def _canonical_row(record: Mapping[str, Any]) -> dict[str, object]:
     if not isinstance(identifier, str) or not identifier:
         raise EvaluationCorpusManifestError("MemPalace inventory contains an invalid drawer id")
     if not isinstance(document, str) or not document:
-        raise EvaluationCorpusManifestError("MemPalace inventory contains an invalid drawer document")
+        raise EvaluationCorpusManifestError(
+            "MemPalace inventory contains an invalid drawer document"
+        )
     if not isinstance(metadata, Mapping):
         raise EvaluationCorpusManifestError("MemPalace inventory contains invalid drawer metadata")
     try:
         # This both verifies JSON-safe metadata and normalizes mapping order.
         normalized_metadata = json.loads(json.dumps(metadata, ensure_ascii=True, sort_keys=True))
     except (TypeError, ValueError) as exc:
-        raise EvaluationCorpusManifestError("MemPalace inventory metadata is not JSON-safe") from exc
+        raise EvaluationCorpusManifestError(
+            "MemPalace inventory metadata is not JSON-safe"
+        ) from exc
     return {"id": identifier, "document": document, "metadata": normalized_metadata}
 
 
@@ -213,10 +225,14 @@ def _load_stage(
     if checkpoint.get("schema") != SCAN_CHECKPOINT_SCHEMA:
         raise EvaluationCorpusManifestError("evaluation inventory checkpoint schema is unsupported")
     if not snapshot.is_file() or _sha256_file(snapshot) != receipt.get("snapshotSha256"):
-        raise EvaluationCorpusManifestError("evaluation snapshot is missing or does not match its receipt")
+        raise EvaluationCorpusManifestError(
+            "evaluation snapshot is missing or does not match its receipt"
+        )
     required = ("snapshotSha256", "dataPlaneId", "collection", "sourceRevision")
     if any(receipt.get(key) != checkpoint.get(key) for key in required):
-        raise EvaluationCorpusManifestError("evaluation scan checkpoint is not bound to the snapshot receipt")
+        raise EvaluationCorpusManifestError(
+            "evaluation scan checkpoint is not bound to the snapshot receipt"
+        )
     if receipt.get("dataPlaneId") != data_plane_id:
         raise EvaluationCorpusManifestError("evaluation snapshot dataPlaneId is unbound")
     if collection_name is not None and receipt.get("collection") != collection_name:
@@ -287,15 +303,22 @@ def _iter_drawer_batches_after(
                     record["document"] = value if isinstance(value, str) else ""
                 elif not key.startswith("chroma:") and value is not None:
                     record["metadata"][key] = value
-            yield row_ids[-1], [
-                record for record in records.values() if isinstance(record.get("document"), str) and record["document"]
-            ]
+            yield (
+                row_ids[-1],
+                [
+                    record
+                    for record in records.values()
+                    if isinstance(record.get("document"), str) and record["document"]
+                ],
+            )
             last_row_id = row_ids[-1]
     finally:
         connection.close()
 
 
-def _write_shard(staging: Path, *, number: int, rows: list[dict[str, str]], checkpoint: Mapping[str, object]) -> str:
+def _write_shard(
+    staging: Path, *, number: int, rows: list[dict[str, str]], checkpoint: Mapping[str, object]
+) -> str:
     rows.sort(key=lambda value: value["id"])
     if any(left["id"] == right["id"] for left, right in zip(rows, rows[1:])):
         raise EvaluationCorpusManifestError("MemPalace inventory contains duplicate drawer ids")
@@ -340,12 +363,16 @@ def scan_evaluation_snapshot(
     recorded_processing_revision = checkpoint.get("processingSourceRevision")
     if recorded_processing_revision is None:
         checkpoint = {**checkpoint, "processingSourceRevision": processing_source_revision}
-        _replace_checkpoint(staging_dir.expanduser().resolve() / "inventory-checkpoint.json", checkpoint)
+        _replace_checkpoint(
+            staging_dir.expanduser().resolve() / "inventory-checkpoint.json", checkpoint
+        )
     elif recorded_processing_revision != processing_source_revision:
         raise EvaluationCorpusManifestError("evaluation scan processing source revision is stale")
     recorded_batch_size = checkpoint.get("batchSize")
     if recorded_batch_size not in (None, batch_size):
-        raise EvaluationCorpusManifestError("evaluation inventory batch size cannot change during resume")
+        raise EvaluationCorpusManifestError(
+            "evaluation inventory batch size cannot change during resume"
+        )
     staging = staging_dir.expanduser().resolve()
     current_rows: list[dict[str, str]] = []
     processed = 0
@@ -363,9 +390,17 @@ def scan_evaluation_snapshot(
             continue
         if current_rows:
             shard_sha256 = _write_shard(
-                staging, number=int(checkpoint["nextShard"]), rows=current_rows, checkpoint=checkpoint
+                staging,
+                number=int(checkpoint["nextShard"]),
+                rows=current_rows,
+                checkpoint=checkpoint,
             )
-            checkpoint = {**checkpoint, "previousShardSha256": shard_sha256, "nextShard": int(checkpoint["nextShard"]) + 1, "itemCount": int(checkpoint["itemCount"]) + len(current_rows)}
+            checkpoint = {
+                **checkpoint,
+                "previousShardSha256": shard_sha256,
+                "nextShard": int(checkpoint["nextShard"]) + 1,
+                "itemCount": int(checkpoint["itemCount"]) + len(current_rows),
+            }
             current_rows = []
         checkpoint = {**checkpoint, "batchSize": batch_size, "lastSourceRowId": last_cursor}
         _replace_checkpoint(staging / "inventory-checkpoint.json", checkpoint)
@@ -375,8 +410,18 @@ def scan_evaluation_snapshot(
         shard_sha256 = _write_shard(
             staging, number=int(checkpoint["nextShard"]), rows=current_rows, checkpoint=checkpoint
         )
-        checkpoint = {**checkpoint, "previousShardSha256": shard_sha256, "nextShard": int(checkpoint["nextShard"]) + 1, "itemCount": int(checkpoint["itemCount"]) + len(current_rows)}
-    checkpoint = {**checkpoint, "batchSize": batch_size, "lastSourceRowId": last_cursor, "status": "complete"}
+        checkpoint = {
+            **checkpoint,
+            "previousShardSha256": shard_sha256,
+            "nextShard": int(checkpoint["nextShard"]) + 1,
+            "itemCount": int(checkpoint["itemCount"]) + len(current_rows),
+        }
+    checkpoint = {
+        **checkpoint,
+        "batchSize": batch_size,
+        "lastSourceRowId": last_cursor,
+        "status": "complete",
+    }
     _replace_checkpoint(staging / "inventory-checkpoint.json", checkpoint)
     return checkpoint
 
@@ -385,7 +430,9 @@ def _iter_sorted_shard_rows(staging: Path, checkpoint: Mapping[str, object]):
     previous: object = None
     iterators = []
     for number in range(1, int(checkpoint["nextShard"])):
-        shard = _read_json(staging / "shards" / f"shard-{number:06d}.json", label="evaluation inventory shard")
+        shard = _read_json(
+            staging / "shards" / f"shard-{number:06d}.json", label="evaluation inventory shard"
+        )
         if shard.get("schema") != SHARD_SCHEMA or shard.get("number") != number:
             raise EvaluationCorpusManifestError("evaluation inventory shard is invalid")
         if shard.get("previousShardSha256") != previous:
@@ -396,7 +443,9 @@ def _iter_sorted_shard_rows(staging: Path, checkpoint: Mapping[str, object]):
         previous = sha256_identity(shard)
         iterators.append(iter(rows))
     if previous != checkpoint.get("previousShardSha256"):
-        raise EvaluationCorpusManifestError("evaluation inventory shard chain does not match checkpoint")
+        raise EvaluationCorpusManifestError(
+            "evaluation inventory shard chain does not match checkpoint"
+        )
     for row in heapq.merge(*iterators, key=lambda value: value["id"]):
         identifier = row.get("id")
         row_sha256 = row.get("rowSha256")
@@ -405,9 +454,20 @@ def _iter_sorted_shard_rows(staging: Path, checkpoint: Mapping[str, object]):
         yield {"id": identifier, "rowSha256": row_sha256}
 
 
-def _stream_inventory_identity(staging: Path, checkpoint: Mapping[str, object], *, collection_name: str) -> tuple[str, int]:
+def _stream_inventory_identity(
+    staging: Path, checkpoint: Mapping[str, object], *, collection_name: str
+) -> tuple[str, int]:
     digest = hashlib.sha256()
-    digest.update(_canonical_bytes({"backend": "chroma-sqlite", "collection": collection_name, "eligibility": "metadata-segment with non-empty chroma:document", "rows": []})[:-2])
+    digest.update(
+        _canonical_bytes(
+            {
+                "backend": "chroma-sqlite",
+                "collection": collection_name,
+                "eligibility": "metadata-segment with non-empty chroma:document",
+                "rows": [],
+            }
+        )[:-2]
+    )
     # The preceding canonical object ends in ``[]}``; turn the empty array into
     # a streamed array while retaining byte-for-byte compatibility with
     # ``sha256_identity`` over the historical inventory object.
@@ -423,7 +483,9 @@ def _stream_inventory_identity(staging: Path, checkpoint: Mapping[str, object], 
         count += 1
     digest.update(b'],"schema":"' + INVENTORY_SCHEMA.encode("ascii") + b'"}')
     if count != checkpoint.get("itemCount"):
-        raise EvaluationCorpusManifestError("evaluation inventory item count does not match checkpoint")
+        raise EvaluationCorpusManifestError(
+            "evaluation inventory item count does not match checkpoint"
+        )
     return f"sha256:{digest.hexdigest()}", count
 
 
@@ -443,7 +505,9 @@ def finalize_evaluation_corpus_manifest(
         raise EvaluationCorpusManifestError("evaluation inventory scan is incomplete")
     processing_source_revision = _package_source_digest(Path(__file__).resolve().parent)
     if checkpoint.get("processingSourceRevision") != processing_source_revision:
-        raise EvaluationCorpusManifestError("evaluation finalization processing source revision is stale")
+        raise EvaluationCorpusManifestError(
+            "evaluation finalization processing source revision is stale"
+        )
     staging = staging_dir.expanduser().resolve()
     inventory_sha256, item_count = _stream_inventory_identity(
         staging, checkpoint, collection_name=collection_name
@@ -558,7 +622,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=1000)
     parser.add_argument("--staging-dir", metavar="PATH")
     parser.add_argument(
-        "--phase", choices=("all", "snapshot", "scan", "finalize"), default="all",
+        "--phase",
+        choices=("all", "snapshot", "scan", "finalize"),
+        default="all",
         help="Use snapshot/scan/finalize to resume a durable staging directory.",
     )
     return parser.parse_args(argv)
@@ -571,25 +637,44 @@ def main(argv: list[str] | None = None) -> None:
     if args.phase in ("snapshot", "scan", "finalize") and not args.staging_dir:
         raise SystemExit(f"--phase {args.phase} requires --staging-dir")
     if args.phase in ("all", "finalize") and (not args.manifest_out or not args.attestation_out):
-        raise SystemExit("--manifest-out and --attestation-out are required for manifest publication")
+        raise SystemExit(
+            "--manifest-out and --attestation-out are required for manifest publication"
+        )
     manifest_path = Path(args.manifest_out).expanduser().resolve() if args.manifest_out else None
-    attestation_path = Path(args.attestation_out).expanduser().resolve() if args.attestation_out else None
+    attestation_path = (
+        Path(args.attestation_out).expanduser().resolve() if args.attestation_out else None
+    )
     if manifest_path is not None and manifest_path == attestation_path:
         raise SystemExit("--manifest-out and --attestation-out must differ")
     try:
         staging = Path(args.staging_dir) if args.staging_dir else None
         if args.phase == "snapshot":
             receipt = prepare_evaluation_snapshot(
-                Path(args.palace), staging_dir=staging, data_plane_id=args.data_plane_id,
+                Path(args.palace),
+                staging_dir=staging,
+                data_plane_id=args.data_plane_id,
                 collection_name=args.collection,
             )
-            print(json.dumps({"status": "snapshot-complete", "snapshotSha256": receipt["snapshotSha256"]}, sort_keys=True))
+            print(
+                json.dumps(
+                    {"status": "snapshot-complete", "snapshotSha256": receipt["snapshotSha256"]},
+                    sort_keys=True,
+                )
+            )
             return
         if args.phase == "scan":
             checkpoint = scan_evaluation_snapshot(
-                staging, data_plane_id=args.data_plane_id, collection_name=args.collection, batch_size=args.batch_size
+                staging,
+                data_plane_id=args.data_plane_id,
+                collection_name=args.collection,
+                batch_size=args.batch_size,
             )
-            print(json.dumps({"status": checkpoint["status"], "itemCount": checkpoint["itemCount"]}, sort_keys=True))
+            print(
+                json.dumps(
+                    {"status": checkpoint["status"], "itemCount": checkpoint["itemCount"]},
+                    sort_keys=True,
+                )
+            )
             return
         if args.phase == "finalize":
             manifest, attestation = finalize_evaluation_corpus_manifest(
