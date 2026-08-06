@@ -10,6 +10,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **`dedup --stats` no longer dies on drawer text a cp1252 console cannot
+  encode.** A live cross-source audit aborted with `UnicodeEncodeError` while
+  printing a CSS chunk containing CJK font names, after the scan had already
+  completed — losing the report. Printed source paths and text previews are now
+  rendered through the active stdout encoding with replacement; returned data
+  keeps the original text. The top-15 source listing had the same latent
+  failure and is covered too.
+
 - **SQLite-locked BM25 fallback completes as a degraded result (#28).** A
   temporary `locked`/`busy` error from the final read-only metadata query no
   longer escapes through the MCP HTTP request and consumes the caller's full
@@ -34,6 +42,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   regression suite passes `59` tests.
 
 ### Added
+
+- **Read-only cross-source exact-duplicate audit for dedup (#19).**
+  `python -m mempalace.dedup --stats --cross-source-duplicates` (alias
+  `--cross-source`) hashes drawer text across the whole scoped set and groups by
+  content hash *regardless of* `source_file`, then reports duplicate-set count,
+  total redundant drawers (`N-1` per set), and the contributing source paths for
+  each set. The existing `--exact-duplicates` mode groups within a single
+  `source_file` and is therefore structurally blind to this palace's dominant
+  duplication mode — the same project mined from several on-disk copies, each
+  with its own source path. Measured on `--wing coding` (41,934 drawers, 102s):
+  8,416 duplicate sets and 22,300 redundant drawers, of which 22,227 span 2+
+  distinct source paths (21,017 of those in sets whose paths all share one
+  filename, i.e. one file mined from several trees) and only 73 sit inside one
+  path; the intra-source mode reports 83 redundant drawers over the same wing
+  (0.21%). Each set also reports its distinct-filename count, separating a
+  copied directory from different files that share a chunk (CSS boilerplate) —
+  same byte-identical storage cost, very different deletion policy. The two
+  figures are
+  related but not interchangeable: intra-source redundancy that also appears in
+  another source merges into one cross-path set instead of staying in the
+  single-path bucket. Scoping now includes sources below `min_count`, because
+  five copies of one file can be one drawer each. The mode is read-only: it
+  never deletes, is rejected outside `--stats`, and deliberately does **not**
+  choose a canonical copy — `redundant` is `N-1`, but which copy to keep is an
+  operator policy decision, not a tool output. Document text is read in
+  500-row batches and released, so the corpus is never resident and nothing
+  spills to disk. `--progress` and `--max-sets` bound the output.
 
 - **Immutable evaluation-corpus identity for MemSys gold baselines (#31).**
   - Added the read-only manifest producer. It snapshots `chroma.sqlite3` through SQLite's online backup API, hashes sorted logical drawer rows, validates the strict startup contract, and emits a separate provenance attestation without source rows, paths, or credentials. The producer now persists a completed, integrity-checked snapshot before scanning; the scan writes a source-revision- and snapshot-bound private id/hash shard chain that resumes safely after interruption. Finalization externally merges the shards and streams the historical canonical inventory hash, so incomplete/tampered work cannot publish a public identity and the full logical inventory is never retained in memory.

@@ -289,21 +289,40 @@ This file is the durable local index for active `mempalace` issues.
 - [#19 - Audit likely duplicate drawers surfaced by #13 probe](https://github.com/iMelki/mempalace/issues/19)
   - Status: open go/no-go decision. This is a duplicate-drawer audit and
     dedupe safety lane, not a live deletion approval.
-  - Evidence: `python -m mempalace.dedup --stats` completed read-only on
-    2026-07-07 against the current 825,422-drawer palace. It found 10,945
-    sources with 5+ drawers, 791,410 drawers in those source groups, and a
-    heuristic remaining duplicate estimate of about 292,998 drawers.
-  - Interpretation: the 292,998 number is a coarse estimate (`40%` of drawers
-    in source groups larger than 20), not a reviewed deletion list. Top
-    offenders are mostly bulk repo digests and export staging trees where
-    near-identical chunks can be legitimate.
-  - Safety state: bare `python -m mempalace.dedup` is now dry-run by default;
-    live mutation requires `--apply`. `dedup --apply` auto-runs
-    `mempalace warm` after deletions so the post-mutation cold-open cost is
-    paid during the approved mutation window.
-  - Decision needed: approve or reject a supervised dedup pass. Recommended
-    shape if approved is source-scoped top-10 dry-run first, then `--apply`
-    per source only with fresh backup, artifact logging, and operator sign-off.
+  - Retracted evidence: the old `--stats` "estimated duplicates" figure
+    (292,998, later 367,462) was `count * 0.4` over large source groups with no
+    content comparison at all. It measured nothing and must not be cited. Fixed
+    and removed in #33 (`3788ae6`).
+  - Real evidence, intra-source (`--exact-duplicates`, 2026-08-06): the
+    correctly-scoped coding wing (986 sources / 39,461 drawers) holds 20
+    byte-identical sets and 83 redundant drawers — 0.21%. Essentially nil,
+    because per-`source_file` grouping cannot see the actual duplication.
+  - Real evidence, cross-source (`--cross-source-duplicates`, 2026-08-06):
+    `--wing coding` (41,934 drawers in 2,311 sources, 102s, exit 0) holds 8,416
+    duplicate sets and 22,300 redundant drawers, 22,227 of them spanning 2+
+    distinct source paths and only 73 confined to one path. Of the cross-path
+    sets, 8,145 (21,017 redundant drawers) have paths that all share one
+    filename — one file mined from several trees, the copied-directory
+    signature; the remaining 256 sets are different files sharing a chunk.
+    Narrowed to `--source Repeater_System` (24,587 drawers): 5,382 sets /
+    18,746 redundant, 18,683 cross-path. Cause: five on-disk copies of one project
+    (`repeater-system`, `-mobile-fixes`, `-all-ui-alpha-ver`, `_backup_250522`,
+    plus a `files\CLOUD NMS installation package` tree) were each mined under a
+    distinct `source_file`.
+  - Interpretation: duplication is real but cross-source, an order of magnitude
+    smaller than the retracted estimate, and concentrated in project copies and
+    generated files (`pnpm-lock.yaml` across project variants). Prevention at
+    mine time is tracked separately as #36.
+  - Safety state: bare `python -m mempalace.dedup` is dry-run by default; live
+    mutation requires `--apply`. `dedup --apply` auto-runs `mempalace warm`
+    after deletions. The cross-source audit mode is read-only, rejected outside
+    `--stats`, and reports sets without choosing a canonical copy.
+  - Blocker for any `--apply`: no offsite backup exists. Local archives report
+    `knownGood: 0` and offsite copy is fail-closed behind agent-settings#457
+    (with agent-settings#538 for the unreachable palace compress/upload step).
+  - Decision needed: approve or reject a supervised dedup pass, and separately
+    decide the canonical-copy policy per duplicate set (the audit deliberately
+    does not pick winners).
 
 - [#16 - SQLite replay lacks bounded window, checkpoint, and structured repair artifacts](https://github.com/iMelki/mempalace/issues/16)
   - Goal: add operator-grade controls before replaying the full 851,964-row

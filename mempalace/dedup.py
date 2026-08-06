@@ -23,6 +23,13 @@ Usage (standalone):
     # text, so pair it with --progress on a large palace):
     python -m mempalace.dedup --stats --wing coding --exact-duplicates --progress
 
+    # --exact-duplicates groups WITHIN each source_file. When the same content
+    # was mined from several on-disk copies of one project, every copy has a
+    # distinct source_file and that grouping cannot see it. Use the read-only
+    # cross-source mode, which groups by content hash regardless of source_file
+    # and names the contributing source paths (iMelki/mempalace#19):
+    python -m mempalace.dedup --stats --wing coding --cross-source-duplicates --progress
+
 Usage (from CLI):
     mempalace dedup [--apply] [--threshold 0.15] [--stats]
 
@@ -33,8 +40,9 @@ an operator-approved window — see iMelki/mempalace#19.
 
 import argparse
 import os
+import sys
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 from .backends.chroma import ChromaBackend
 
@@ -45,6 +53,16 @@ COLLECTION_NAME = "mempalace_drawers"
 # For looser dedup of paraphrased content, try 0.3–0.4.
 DEFAULT_THRESHOLD = 0.15
 MIN_DRAWERS_TO_CHECK = 5
+# Document text is read in batches of this size and released; a hash scan never
+# holds the whole corpus in memory (and never spills to disk — see the
+# count_cross_source_duplicates() memory note).
+HASH_BATCH_SIZE = 500
+# How many duplicate SETS the cross-source report prints. Counts always cover
+# every set; this bounds output only.
+CROSS_SOURCE_MAX_SETS = 20
+# How many contributing source paths to print per set before summarising.
+CROSS_SOURCE_MAX_PATHS = 8
+CROSS_SOURCE_SNIPPET_CHARS = 100
 
 
 def _get_palace_path():
@@ -192,8 +210,8 @@ def count_exact_duplicates(col, groups, progress=False):
 
     for ids in groups.values():
         seen = defaultdict(int)
-        for i in range(0, len(ids), 500):
-            chunk = ids[i : i + 500]
+        for i in range(0, len(ids), HASH_BATCH_SIZE):
+            chunk = ids[i : i + HASH_BATCH_SIZE]
             data = col.get(ids=chunk, include=["documents"])
             for doc in data["documents"]:
                 if not doc:
@@ -212,13 +230,261 @@ def count_exact_duplicates(col, groups, progress=False):
     return dup_groups, redundant
 
 
+def _doc_snippet(doc, limit=CROSS_SOURCE_SNIPPET_CHARS):
+    """One-line, whitespace-collapsed preview of a document, for operator review."""
+    text = " ".join((doc or "").split())
+    return text[:limit] + ("..." if len(text) > limit else "")
+
+
+def _basename(path):
+    """Final path segment, for BOTH separators.
+
+    os.path.basename() does not split on backslashes when running on Linux, so a
+    mined Windows path would come back whole and every set would look like it
+    spanned distinct filenames on CI while looking correct locally.
+    """
+    return path.replace("\\", "/").rsplit("/", 1)[-1]
+
+
+def _printable(text):
+    """Render text safely on the active stdout encoding.
+
+    Drawer text and mined file paths are arbitrary user content; a Windows
+    console defaults to cp1252, which cannot encode CJK or many symbols. A live
+    run of the cross-source report died with UnicodeEncodeError mid-report on a
+    CSS chunk containing CJK font names. A read-only audit must never crash on
+    the content it is auditing, so unencodable characters are replaced. Only the
+    printed form is sanitized: returned data keeps the original text.
+    """
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    try:
+        return text.encode(encoding, "replace").decode(encoding, "replace")
+    except (LookupError, UnicodeError, TypeError):
+        return text.encode("ascii", "replace").decode("ascii")
+
+
+def count_cross_source_duplicates(
+    col, groups, progress=False, max_sets=CROSS_SOURCE_MAX_SETS, batch_size=HASH_BATCH_SIZE
+):
+    """Count EXACT duplicate drawers by content hash ACROSS source_file groups.
+
+    This is the measurement iMelki/mempalace#19 asks for. It is READ-ONLY: it
+    never deletes, and it is deliberately not reachable from any --apply path.
+
+    Why a separate mode from count_exact_duplicates():
+        count_exact_duplicates() hashes within each source_file group and does
+        not merge across groups (asserted by
+        test_count_exact_duplicates_does_not_merge_across_source_groups). That
+        scoping is correct for "was one file mined into redundant chunks?" but
+        structurally blind to this palace's dominant duplication mode: five
+        on-disk copies of one project, each with its own source_file path.
+        Measured on wing=coding (39,461 drawers): intra-source found 20 sets /
+        83 redundant drawers (0.21%), while the top source groups were five
+        near-identical copies of S:\\source\\EMTS\\Repeater_System at
+        1,674-1,676 drawers each.
+
+    What "redundant" means here, stated explicitly:
+        A duplicate SET is >=2 drawers whose document text is byte-identical,
+        grouped regardless of source_file. A set of N drawers contributes N-1
+        redundant drawers, because exactly one copy must survive to preserve the
+        content. WHICH copy is canonical is a policy question this function
+        refuses to answer: no winner is selected, no deletion candidate list is
+        produced, and contributing source paths are reported symmetrically
+        (path + drawer count) so an operator decides. Picking a canonical copy
+        implicitly is how a "safe audit" turns into an unreviewed deletion plan.
+
+    Two buckets are reported because they mean different things:
+        - sets spanning 2+ distinct source paths: the same content mined from
+          multiple locations (project copies, backup dirs, generated lockfiles).
+          This is the actionable, cross-source redundancy.
+        - sets confined to a single source path: identical chunks inside one
+          source, i.e. the kind of redundancy the intra-source mode looks for.
+
+    The single-path bucket is NOT simply the intra-source number. When text
+    repeats inside source A *and* also appears in source B, the intra-source
+    mode reports two separate sets while this mode merges them into one set and
+    classifies it as cross-path. So intra-source redundancy that is also
+    cross-source redundancy migrates out of the single-path bucket, and the
+    single-path figure can be lower than the intra-source figure over the same
+    drawers. Measured on wing=coding: intra-source 20 sets / 83 redundant, while
+    the cross-source pass over a superset (41,934 drawers) reports 8,416 sets /
+    22,300 redundant with only 15 sets / 73 redundant confined to one path.
+
+    Memory: document text is read `batch_size` rows at a time and released, so
+    the corpus is never resident and nothing spills to disk (host C: has ~2%
+    free). The one unavoidable resident structure is a hash index over drawers
+    in scope, which is inherent to grouping across source_file. Singleton
+    hashes store a single shared source-index int (not a list), so a scan of
+    ~1M drawers costs roughly a couple of hundred MB rather than gigabytes.
+
+    Returns a dict:
+        drawers_scanned, sets, redundant,
+        cross_path_sets, cross_path_redundant,
+        single_path_sets, single_path_redundant,
+        top_sets: [{drawers, redundant, distinct_sources, sources, snippet}]
+    """
+    import hashlib
+
+    source_names = []
+    source_index = {}
+    # digest -> source-index int while only one drawer carries that text,
+    # promoted to list[int] on the second occurrence. Keeping singletons as a
+    # shared int is what makes a full-palace scan affordable.
+    seen = {}
+    snippets = {}
+
+    total = sum(len(ids) for ids in groups.values())
+    scanned = 0
+
+    for src, ids in groups.items():
+        idx = source_index.get(src)
+        if idx is None:
+            idx = len(source_names)
+            source_index[src] = idx
+            source_names.append(src)
+
+        for i in range(0, len(ids), batch_size):
+            chunk = ids[i : i + batch_size]
+            data = col.get(ids=chunk, include=["documents"])
+            for doc in data["documents"]:
+                if not doc:
+                    continue
+                digest = hashlib.sha256(doc.encode("utf-8", "replace")).digest()
+                prev = seen.get(digest)
+                if prev is None:
+                    seen[digest] = idx
+                elif isinstance(prev, list):
+                    prev.append(idx)
+                else:
+                    seen[digest] = [prev, idx]
+                    # Only duplicates get a stored snippet: the text is
+                    # byte-identical by definition, so the second occurrence
+                    # carries the same preview as the first.
+                    snippets[digest] = _doc_snippet(doc)
+            scanned += len(chunk)
+            if progress and total:
+                print(f"\r  cross-source duplicate scan: {scanned * 100.0 / total:5.1f}%", end="")
+
+    if progress:
+        print()
+
+    sets_total = 0
+    redundant_total = 0
+    cross_path_sets = 0
+    cross_path_redundant = 0
+    same_name_sets = 0
+    same_name_redundant = 0
+    ranked = []
+
+    for digest, val in seen.items():
+        if not isinstance(val, list):
+            continue
+        n = len(val)
+        sets_total += 1
+        redundant_total += n - 1
+        distinct = set(val)
+        if len(distinct) > 1:
+            cross_path_sets += 1
+            cross_path_redundant += n - 1
+            # Two very different situations both land in the cross-path bucket:
+            # one file present in several trees (all paths share a filename), and
+            # different files that happen to contain an identical chunk (shared
+            # boilerplate, e.g. 50 sibling CSS skins). Their deletion policy is
+            # not the same, so the split is reported as fact, not judged here.
+            if len({_basename(source_names[i]) for i in distinct}) == 1:
+                same_name_sets += 1
+                same_name_redundant += n - 1
+        ranked.append((n, digest, val))
+
+    # Ordering is for legibility only and carries NO canonicality signal.
+    ranked.sort(key=lambda item: (-item[0], sorted(source_names[i] for i in set(item[2]))))
+
+    top_sets = []
+    for n, digest, indices in ranked[:max_sets]:
+        counts = Counter(source_names[i] for i in indices)
+        top_sets.append(
+            {
+                "drawers": n,
+                "redundant": n - 1,
+                "distinct_sources": len(counts),
+                "distinct_filenames": len({_basename(p) for p in counts}),
+                "sources": sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])),
+                "snippet": snippets.get(digest, ""),
+            }
+        )
+
+    return {
+        "drawers_scanned": scanned,
+        "sets": sets_total,
+        "redundant": redundant_total,
+        "cross_path_sets": cross_path_sets,
+        "cross_path_redundant": cross_path_redundant,
+        "single_path_sets": sets_total - cross_path_sets,
+        "single_path_redundant": redundant_total - cross_path_redundant,
+        "same_filename_sets": same_name_sets,
+        "same_filename_redundant": same_name_redundant,
+        "top_sets": top_sets,
+    }
+
+
+def print_cross_source_report(result, max_paths=CROSS_SOURCE_MAX_PATHS):
+    """Print a cross-source duplicate report: counts, then contributing paths.
+
+    A bare count is not actionable. "These 4 paths hold identical content" is.
+    """
+    sets = f"{result['sets']:,}"
+    redundant = f"{result['redundant']:,}"
+    print(f"\n  Cross-source exact-duplicate sets (grouped across source_file): {sets}")
+    print(f"  Redundant drawers in those sets (N-1 per set):                  {redundant}")
+    print(
+        f"    sets spanning 2+ distinct source paths: {result['cross_path_sets']:,}"
+        f"  ({result['cross_path_redundant']:,} redundant)"
+    )
+    print(
+        f"      of those, sets whose paths all share one filename: "
+        f"{result['same_filename_sets']:,}"
+        f"  ({result['same_filename_redundant']:,} redundant)"
+    )
+    print(
+        f"    sets confined to a single source path:  {result['single_path_sets']:,}"
+        f"  ({result['single_path_redundant']:,} redundant)"
+    )
+    print(f"  Drawers hashed: {result['drawers_scanned']:,}")
+
+    if result["top_sets"]:
+        print(f"\n  Largest duplicate sets (top {len(result['top_sets'])}) and their source paths:")
+        for i, dup in enumerate(result["top_sets"], 1):
+            print(
+                f"    [{i}] {dup['drawers']} identical drawers across "
+                f"{dup['distinct_sources']} source path(s) "
+                f"({dup['distinct_filenames']} distinct filename(s)) "
+                f"-> {dup['redundant']} redundant"
+            )
+            if dup["snippet"]:
+                print('        text: "' + _printable(dup["snippet"]) + '"')
+            for path, count in dup["sources"][:max_paths]:
+                print(f"        {count:5d}  {_printable(path)}")
+            hidden = len(dup["sources"]) - max_paths
+            if hidden > 0:
+                print(f"        ... +{hidden} more source path(s)")
+
+    print("\n  NOTE: exact byte-identical matches only. Near-duplicates need an embedding pass.")
+    print("  NOTE: read-only audit. No canonical copy is chosen and no deletion is proposed;")
+    print("        'redundant' is N-1 per set, but WHICH copy to keep is an operator decision.")
+    print("  NOTE: 1 distinct filename across many paths = one file mined from several trees.")
+    print("        Several filenames = different files sharing a chunk (e.g. CSS boilerplate);")
+    print("        that is still stored N times, but it is not a copied-directory artifact.")
+
+
 def show_stats(
     palace_path=None,
     wing=None,
     source_pattern=None,
     min_count=MIN_DRAWERS_TO_CHECK,
     exact_duplicates=False,
+    cross_source_duplicates=False,
     progress=False,
+    max_sets=CROSS_SOURCE_MAX_SETS,
 ):
     """Show duplication statistics without making changes."""
     palace_path = palace_path or _get_palace_path()
@@ -228,21 +494,43 @@ def show_stats(
     # wing/source arguments at all, so `--wing X --stats` silently scanned the
     # whole palace and reported cross-wing sources as if they were in scope
     # (iMelki/mempalace#33).
-    print(f"\n  Palace: {palace_path}")
+    print(f"\n  Palace: {_printable(str(palace_path))}")
     print(
         f"  Scope:  wing={wing or 'ALL'}  source={source_pattern or 'ALL'}  min_count={min_count}"
     )
 
-    groups = get_source_groups(col, min_count=min_count, source_pattern=source_pattern, wing=wing)
+    scoped_groups = None
+    if cross_source_duplicates:
+        # Cross-source hashing must cover the WHOLE scoped set. min_count exists
+        # to skip sources too small to contain intra-source duplication, but
+        # five copies of one file can be one drawer each — filtering them out
+        # would hide exactly the duplication this mode looks for. One metadata
+        # pass serves both views.
+        scoped_groups = get_source_groups(
+            col, min_count=1, source_pattern=source_pattern, wing=wing
+        )
+        groups = {src: ids for src, ids in scoped_groups.items() if len(ids) >= min_count}
+    else:
+        groups = get_source_groups(
+            col, min_count=min_count, source_pattern=source_pattern, wing=wing
+        )
 
     total_drawers = sum(len(ids) for ids in groups.values())
     print(f"\n  Sources with {min_count}+ drawers: {len(groups)}")
     print(f"  Total drawers in those sources: {total_drawers:,}")
+    if scoped_groups is not None:
+        print(
+            f"  Drawers in scope incl. sources under min_count: "
+            f"{sum(len(ids) for ids in scoped_groups.values()):,} "
+            f"across {len(scoped_groups)} sources"
+        )
 
     print("\n  Top 15 by drawer count:")
     sorted_groups = sorted(groups.items(), key=lambda x: len(x[1]), reverse=True)
     for src, ids in sorted_groups[:15]:
-        print(f"    {len(ids):5d}  {src[:65]}")
+        # Mined paths are arbitrary content and can be unencodable on a cp1252
+        # console; the listing must not abort the audit (see _printable).
+        print(f"    {len(ids):5d}  {_printable(src[:65])}")
 
     # A large drawer count for one source is NOT duplication: chunking one big
     # document into many verbatim drawers is the intended design. This used to
@@ -254,9 +542,20 @@ def show_stats(
         print(f"\n  Exact-duplicate sets (byte-identical documents): {dup_groups:,}")
         print(f"  Redundant drawers in those sets:                 {redundant:,}")
         print("  NOTE: exact matches only. Near-duplicates need an embedding pass.")
-    else:
+        print("  NOTE: grouped WITHIN each source_file. Content mined from several")
+        print("        on-disk copies of one project is invisible here — use")
+        print("        --cross-source-duplicates for that (iMelki/mempalace#19).")
+
+    if cross_source_duplicates:
+        result = count_cross_source_duplicates(
+            col, scoped_groups, progress=progress, max_sets=max_sets
+        )
+        print_cross_source_report(result)
+
+    if not exact_duplicates and not cross_source_duplicates:
         print("\n  Duplicate counts not computed (metadata-only pass).")
         print("  Re-run with --exact-duplicates for a real byte-identical count,")
+        print("  --cross-source-duplicates to group identical text across source paths,")
         print("  or run without --stats for the embedding-distance dry-run preview.")
 
 
@@ -374,6 +673,23 @@ if __name__ == "__main__":
         "(reads document text, so it is slower than the metadata-only pass)",
     )
     parser.add_argument(
+        "--cross-source-duplicates",
+        "--cross-source",
+        dest="cross_source_duplicates",
+        action="store_true",
+        help="With --stats, compute a byte-identical duplicate count that groups "
+        "ACROSS source_file (the mode iMelki/mempalace#19 asks for) and report the "
+        "contributing source paths per set. Read-only: it never deletes and is not "
+        "reachable from --apply. `--cross-source` is accepted as an alias.",
+    )
+    parser.add_argument(
+        "--max-sets",
+        type=int,
+        default=CROSS_SOURCE_MAX_SETS,
+        help=f"How many duplicate sets --cross-source-duplicates prints "
+        f"(default: {CROSS_SOURCE_MAX_SETS}). Counts always cover every set.",
+    )
+    parser.add_argument(
         "--progress",
         action="store_true",
         help="Print incremental progress during long scans",
@@ -388,13 +704,21 @@ if __name__ == "__main__":
     if args.exact_duplicates and not args.stats:
         parser.error("--exact-duplicates only applies to --stats")
 
+    # Cross-source is a read-only measurement mode. Refusing it outside --stats
+    # keeps it structurally unable to sit on the deletion path: dedup_palace()
+    # never sees the flag (iMelki/mempalace#19).
+    if args.cross_source_duplicates and not args.stats:
+        parser.error("--cross-source-duplicates only applies to --stats")
+
     if args.stats:
         show_stats(
             palace_path=path,
             wing=args.wing,
             source_pattern=args.source,
             exact_duplicates=args.exact_duplicates,
+            cross_source_duplicates=args.cross_source_duplicates,
             progress=args.progress,
+            max_sets=args.max_sets,
         )
     else:
         # Safety default (2026-07-05 incident, iMelki/mempalace#19): a bare

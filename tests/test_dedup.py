@@ -1,5 +1,6 @@
 """Tests for mempalace.dedup — near-duplicate drawer detection and removal."""
 
+import sys
 from unittest.mock import MagicMock, patch
 
 
@@ -318,6 +319,561 @@ def test_count_exact_duplicates_does_not_merge_across_source_groups():
     col.get.return_value = {"documents": ["same"]}
     dup_groups, redundant = dedup.count_exact_duplicates(col, {"a": ["1"], "b": ["2"]})
     assert (dup_groups, redundant) == (0, 0)
+
+
+# ── count_cross_source_duplicates (iMelki/mempalace#19) ───────────────
+
+
+def _docs_by_id(mapping):
+    """col.get(ids=...) stub that returns the documents for the requested ids."""
+
+    def _get(ids=None, include=None, **kwargs):
+        return {"ids": list(ids), "documents": [mapping[i] for i in ids]}
+
+    return _get
+
+
+def test_count_cross_source_duplicates_merges_across_source_groups():
+    """The whole point: identical text under different source_file paths is one set."""
+    col = MagicMock()
+    col.get.side_effect = _docs_by_id({"1": "same text", "2": "same text"})
+
+    res = dedup.count_cross_source_duplicates(col, {"a.txt": ["1"], "b.txt": ["2"]})
+
+    assert res["sets"] == 1
+    assert res["redundant"] == 1
+    assert res["cross_path_sets"] == 1
+    assert res["cross_path_redundant"] == 1
+    assert res["single_path_sets"] == 0
+
+
+def test_count_cross_source_duplicates_reports_contributing_source_paths():
+    """Five on-disk copies of one project: the operator must see WHICH paths."""
+    paths = [
+        r"S:\source\EMTS\Repeater_System\repeater-system\assets\js\bui.js",
+        r"S:\source\EMTS\Repeater_System\repeater-system-mobile-fixes\assets\js\bui.js",
+        r"S:\source\EMTS\Repeater_System\repeater-system-all-ui-alpha-ver\assets\js\bui.js",
+        r"S:\source\EMTS\Repeater_System\repeater-system_backup_250522\assets\js\bui.js",
+        r"S:\source\EMTS\Repeater_System\files\bui.js",
+    ]
+    groups = {p: [f"d{i}"] for i, p in enumerate(paths)}
+    col = MagicMock()
+    col.get.side_effect = _docs_by_id({f"d{i}": "identical asset body" for i in range(len(paths))})
+
+    res = dedup.count_cross_source_duplicates(col, groups)
+
+    assert (res["sets"], res["redundant"]) == (1, 4)
+    top = res["top_sets"][0]
+    assert top["drawers"] == 5
+    assert top["distinct_sources"] == 5
+    assert [p for p, _ in top["sources"]] == sorted(paths)
+    assert all(count == 1 for _, count in top["sources"])
+    assert top["snippet"] == "identical asset body"
+
+
+def test_count_cross_source_duplicates_separates_single_path_repeats():
+    """Repeats inside ONE source are counted but bucketed apart from cross-path ones."""
+    col = MagicMock()
+    col.get.side_effect = _docs_by_id({"1": "dup", "2": "dup", "3": "solo"})
+
+    res = dedup.count_cross_source_duplicates(col, {"a.txt": ["1", "2", "3"]})
+
+    assert (res["sets"], res["redundant"]) == (1, 1)
+    assert (res["cross_path_sets"], res["cross_path_redundant"]) == (0, 0)
+    assert (res["single_path_sets"], res["single_path_redundant"]) == (1, 1)
+
+
+def test_cross_source_absorbs_intra_source_sets_that_also_span_paths():
+    """The single-path bucket is NOT the intra-source number.
+
+    Text repeated inside A that also appears in B is ONE merged set classified
+    as cross-path, not an intra-source set plus a cross-source set. This is why
+    the single-path figure can be lower than the intra-source figure over the
+    same drawers (measured: 73 vs 83 on wing=coding).
+    """
+    docs = {"a1": "X", "a2": "X", "a3": "X", "b1": "X", "b2": "X"}
+    groups = {"A": ["a1", "a2", "a3"], "B": ["b1", "b2"]}
+
+    intra_col = MagicMock()
+    intra_col.get.side_effect = _docs_by_id(docs)
+    assert dedup.count_exact_duplicates(intra_col, groups) == (2, 3)
+
+    cross_col = MagicMock()
+    cross_col.get.side_effect = _docs_by_id(docs)
+    res = dedup.count_cross_source_duplicates(cross_col, groups)
+
+    assert (res["sets"], res["redundant"]) == (1, 4)
+    assert (res["cross_path_sets"], res["cross_path_redundant"]) == (1, 4)
+    assert (res["single_path_sets"], res["single_path_redundant"]) == (0, 0)
+    # the merged set names both paths with their per-path drawer counts
+    assert res["top_sets"][0]["sources"] == [("A", 3), ("B", 2)]
+
+
+def test_count_cross_source_duplicates_ignores_unique_and_empty_docs():
+    col = MagicMock()
+    col.get.side_effect = _docs_by_id({"1": "a", "2": "b", "3": None, "4": ""})
+
+    res = dedup.count_cross_source_duplicates(col, {"a.txt": ["1", "2"], "b.txt": ["3", "4"]})
+
+    assert (res["sets"], res["redundant"]) == (0, 0)
+    assert res["top_sets"] == []
+    assert res["drawers_scanned"] == 4
+
+
+def test_count_cross_source_duplicates_batches_and_never_reads_whole_corpus():
+    """Host C: has ~2% free: batch, do not slurp and do not spill to disk."""
+    ids = [f"d{i}" for i in range(1200)]
+    col = MagicMock()
+    col.get.side_effect = _docs_by_id({i: f"body-{i}" for i in ids})
+
+    res = dedup.count_cross_source_duplicates(col, {"big.txt": ids})
+
+    sizes = [len(call.kwargs["ids"]) for call in col.get.call_args_list]
+    assert sizes == [500, 500, 200]
+    assert max(sizes) <= dedup.HASH_BATCH_SIZE
+    assert res["drawers_scanned"] == 1200
+
+
+def test_count_cross_source_duplicates_honours_custom_batch_size():
+    ids = [f"d{i}" for i in range(7)]
+    col = MagicMock()
+    col.get.side_effect = _docs_by_id({i: f"body-{i}" for i in ids})
+
+    dedup.count_cross_source_duplicates(col, {"s": ids}, batch_size=3)
+
+    assert [len(call.kwargs["ids"]) for call in col.get.call_args_list] == [3, 3, 1]
+
+
+def test_count_cross_source_duplicates_emits_progress(capsys):
+    col = MagicMock()
+    col.get.side_effect = _docs_by_id({"1": "x", "2": "x"})
+
+    dedup.count_cross_source_duplicates(col, {"a": ["1"], "b": ["2"]}, progress=True)
+    out = capsys.readouterr().out
+
+    assert "cross-source duplicate scan:" in out
+    assert "100.0%" in out
+
+
+def test_count_cross_source_duplicates_max_sets_bounds_output_not_counts():
+    docs = {}
+    groups = {}
+    for s in range(5):  # 5 distinct duplicate sets, 2 drawers each
+        groups[f"src{s}"] = [f"d{s}a", f"d{s}b"]
+        docs[f"d{s}a"] = f"text-{s}"
+        docs[f"d{s}b"] = f"text-{s}"
+    col = MagicMock()
+    col.get.side_effect = _docs_by_id(docs)
+
+    res = dedup.count_cross_source_duplicates(col, groups, max_sets=2)
+
+    assert (res["sets"], res["redundant"]) == (5, 5)
+    assert len(res["top_sets"]) == 2
+
+
+def test_count_cross_source_duplicates_ranks_largest_set_first():
+    docs = {"a1": "big", "a2": "big", "a3": "big", "b1": "small", "b2": "small"}
+    col = MagicMock()
+    col.get.side_effect = _docs_by_id(docs)
+
+    res = dedup.count_cross_source_duplicates(
+        col, {"a.txt": ["a1", "a2", "a3"], "b.txt": ["b1", "b2"]}
+    )
+
+    assert [s["drawers"] for s in res["top_sets"]] == [3, 2]
+
+
+def test_count_cross_source_duplicates_does_not_pick_a_canonical_copy():
+    """Redundant is N-1, but no winner/loser is named: that is operator policy."""
+    col = MagicMock()
+    col.get.side_effect = _docs_by_id({"1": "same", "2": "same", "3": "same"})
+
+    res = dedup.count_cross_source_duplicates(col, {"a": ["1"], "b": ["2"], "c": ["3"]})
+
+    assert res["redundant"] == 2  # N-1, not "delete these 2 ids"
+    assert set(res) == {
+        "drawers_scanned",
+        "sets",
+        "redundant",
+        "cross_path_sets",
+        "cross_path_redundant",
+        "single_path_sets",
+        "single_path_redundant",
+        "same_filename_sets",
+        "same_filename_redundant",
+        "top_sets",
+    }
+    for key in ("keep", "canonical", "delete", "to_delete", "winner", "ids"):
+        assert key not in res
+        assert key not in res["top_sets"][0]
+    # contributing paths are reported symmetrically — path + count only
+    assert all(
+        set(k)
+        == {
+            "drawers",
+            "redundant",
+            "distinct_sources",
+            "distinct_filenames",
+            "sources",
+            "snippet",
+        }
+        for k in res["top_sets"]
+    )
+
+
+def test_cross_source_splits_copied_file_from_shared_boilerplate():
+    """One filename in many trees is a copied directory; many filenames is not.
+
+    Both are byte-identical content stored N times, but only the first is the
+    "five copies of one project" artifact #19 is about, and their deletion
+    policies differ sharply. The split is reported, not judged.
+    """
+    docs = {
+        # same file, three project copies
+        "c1": "COPIED",
+        "c2": "COPIED",
+        "c3": "COPIED",
+        # different files sharing one chunk (CSS skins)
+        "s1": "SHARED",
+        "s2": "SHARED",
+    }
+    groups = {
+        r"S:\proj\Css\bootstrap.css": ["c1"],
+        r"S:\proj-backup\Css\bootstrap.css": ["c2"],
+        r"S:\proj-mobile-fixes\Css\bootstrap.css": ["c3"],
+        r"S:\proj\skins\aero.css": ["s1"],
+        r"S:\proj\skins\black.css": ["s2"],
+    }
+    col = MagicMock()
+    col.get.side_effect = _docs_by_id(docs)
+
+    res = dedup.count_cross_source_duplicates(col, groups)
+
+    assert (res["cross_path_sets"], res["cross_path_redundant"]) == (2, 3)
+    # only the bootstrap.css set has a single filename across its paths
+    assert (res["same_filename_sets"], res["same_filename_redundant"]) == (1, 2)
+    by_size = {s["drawers"]: s for s in res["top_sets"]}
+    assert by_size[3]["distinct_filenames"] == 1
+    assert by_size[2]["distinct_filenames"] == 2
+
+
+def test_basename_splits_both_separators():
+    """os.path.basename() would return a Windows path whole on Linux CI."""
+    assert dedup._basename(r"S:\a\b\c.css") == "c.css"
+    assert dedup._basename("/srv/a/b/c.css") == "c.css"
+    assert dedup._basename("c.css") == "c.css"
+
+
+def test_count_cross_source_duplicates_never_deletes():
+    col = MagicMock()
+    col.get.side_effect = _docs_by_id({"1": "same", "2": "same"})
+
+    dedup.count_cross_source_duplicates(col, {"a": ["1"], "b": ["2"]})
+
+    col.delete.assert_not_called()
+    col.update.assert_not_called()
+    col.upsert.assert_not_called()
+
+
+def test_cross_source_mode_is_not_reachable_from_any_mutation_path():
+    """Read-only by construction: the deletion path must not know this mode."""
+    import inspect
+
+    assert "cross_source" not in inspect.getsource(dedup.dedup_palace)
+    assert "cross_source" not in inspect.getsource(dedup.dedup_source_group)
+    for fn in (dedup.count_cross_source_duplicates, dedup.print_cross_source_report):
+        src = inspect.getsource(fn)
+        assert ".delete(" not in src
+        assert ".upsert(" not in src
+
+
+def _cross_result(**overrides):
+    """A complete cross-source result, so printer fixtures cannot drift from the
+    real shape when a field is added (the key set itself is asserted by
+    test_count_cross_source_duplicates_does_not_pick_a_canonical_copy)."""
+    base = {
+        "drawers_scanned": 0,
+        "sets": 0,
+        "redundant": 0,
+        "cross_path_sets": 0,
+        "cross_path_redundant": 0,
+        "single_path_sets": 0,
+        "single_path_redundant": 0,
+        "same_filename_sets": 0,
+        "same_filename_redundant": 0,
+        "top_sets": [],
+    }
+    base.update(overrides)
+    return base
+
+
+def _top_set(**overrides):
+    base = {
+        "drawers": 2,
+        "redundant": 1,
+        "distinct_sources": 2,
+        "distinct_filenames": 1,
+        "sources": [("a", 1), ("b", 1)],
+        "snippet": "x",
+    }
+    base.update(overrides)
+    return base
+
+
+def test_print_cross_source_report_shows_counts_paths_and_no_winner(capsys):
+    result = _cross_result(
+        drawers_scanned=10,
+        sets=2,
+        redundant=6,
+        cross_path_sets=1,
+        cross_path_redundant=4,
+        single_path_sets=1,
+        single_path_redundant=2,
+        same_filename_sets=1,
+        same_filename_redundant=4,
+        top_sets=[
+            _top_set(
+                drawers=5,
+                redundant=4,
+                sources=[(r"S:\a\bui.js", 3), (r"S:\b\bui.js", 2)],
+                snippet="asset body",
+            )
+        ],
+    )
+
+    dedup.print_cross_source_report(result)
+    out = capsys.readouterr().out
+
+    assert "Cross-source exact-duplicate sets (grouped across source_file): 2" in out
+    assert "6" in out
+    assert "of those, sets whose paths all share one filename: 1  (4 redundant)" in out
+    assert r"S:\a\bui.js" in out and r"S:\b\bui.js" in out
+    assert "No canonical copy is chosen" in out
+
+
+def test_print_cross_source_report_truncates_long_path_lists(capsys):
+    sources = [(f"S:/p{i}/f.js", 1) for i in range(12)]
+    result = _cross_result(
+        drawers_scanned=12,
+        sets=1,
+        redundant=11,
+        cross_path_sets=1,
+        cross_path_redundant=11,
+        top_sets=[
+            _top_set(drawers=12, redundant=11, distinct_sources=12, sources=sources),
+        ],
+    )
+
+    dedup.print_cross_source_report(result, max_paths=8)
+    out = capsys.readouterr().out
+
+    assert "S:/p7/f.js" in out
+    assert "S:/p8/f.js" not in out
+    assert "+4 more source path(s)" in out
+
+
+def test_doc_snippet_collapses_whitespace_and_truncates():
+    assert dedup._doc_snippet("  a\n\tb   c ") == "a b c"
+    assert dedup._doc_snippet("x" * 200, limit=10) == "x" * 10 + "..."
+    assert dedup._doc_snippet(None) == ""
+
+
+# ── console-encoding safety (live crash on cp1252, 2026-08-06) ─────────
+
+
+def _cp1252_stdout(monkeypatch):
+    """A strict cp1252 stdout, i.e. a default Windows console."""
+    import io
+
+    buf = io.BytesIO()
+    stream = io.TextIOWrapper(buf, encoding="cp1252", errors="strict", newline="")
+    monkeypatch.setattr(sys, "stdout", stream)
+    return buf, stream
+
+
+def test_printable_replaces_characters_the_console_cannot_encode(monkeypatch):
+    _cp1252_stdout(monkeypatch)
+    assert dedup._printable("Tahoma, STHeiti 字体") == "Tahoma, STHeiti ??"
+    assert dedup._printable("plain ascii") == "plain ascii"
+
+
+def test_printable_falls_back_when_stdout_encoding_is_unusable(monkeypatch):
+    class _NoEncoding:
+        encoding = "not-a-real-codec"
+
+    monkeypatch.setattr(sys, "stdout", _NoEncoding())
+    assert dedup._printable("字体") == "??"
+
+
+def test_print_cross_source_report_survives_cp1252_console(monkeypatch):
+    """Regression: a CJK font name in a CSS chunk killed the report mid-print.
+
+    Built from the real scan output, not a hand-written dict, so this exercises
+    the same path the live run took.
+    """
+    css = "font-family: Tahoma, Arial, Helvetica, STHeiti 字体;"
+    col = MagicMock()
+    col.get.side_effect = _docs_by_id({"d1": css, "d2": css})
+    result = dedup.count_cross_source_duplicates(
+        col, {"S:/项目/a.css": ["d1"], "S:/copy/a.css": ["d2"]}
+    )
+
+    buf, stream = _cp1252_stdout(monkeypatch)
+    dedup.print_cross_source_report(result)  # must not raise UnicodeEncodeError
+    stream.flush()
+    out = buf.getvalue().decode("cp1252")
+
+    assert "Cross-source exact-duplicate sets" in out
+    assert "S:/copy/a.css" in out
+    assert "?" in out  # unencodable characters were replaced, not fatal
+    assert "No canonical copy is chosen" in out
+
+
+@patch("mempalace.dedup.get_source_groups")
+@patch("mempalace.dedup.ChromaBackend")
+def test_show_stats_source_listing_survives_cp1252_console(
+    mock_backend_cls, mock_get_groups, monkeypatch, tmp_path
+):
+    """The top-15 listing prints mined paths, which are arbitrary content too."""
+    buf, stream = _cp1252_stdout(monkeypatch)
+    _install_mock_backend(mock_backend_cls, MagicMock())
+    mock_get_groups.return_value = {"S:/项目/f.txt": ["d1", "d2"]}
+
+    dedup.show_stats(palace_path=str(tmp_path))  # must not raise
+    stream.flush()
+    out = buf.getvalue().decode("cp1252")
+
+    assert "Top 15 by drawer count" in out
+    assert "S:/??/f.txt" in out
+
+
+# ── show_stats cross-source wiring ────────────────────────────────────
+
+
+@patch("mempalace.dedup.ChromaBackend")
+def test_show_stats_cross_source_reports_sets_redundant_and_paths(
+    mock_backend_cls, tmp_path, capsys
+):
+    """#19 requires BOTH figures plus the contributing paths."""
+    mock_col = MagicMock()
+    mock_col.get.side_effect = _docs_by_id({"d1": "same body", "d2": "same body"})
+    _install_mock_backend(mock_backend_cls, mock_col)
+
+    groups = {r"S:\copy-one\f.js": ["d1"], r"S:\copy-two\f.js": ["d2"]}
+    with patch.object(dedup, "get_source_groups", return_value=groups):
+        dedup.show_stats(palace_path=str(tmp_path), cross_source_duplicates=True)
+
+    out = capsys.readouterr().out
+    assert "Cross-source exact-duplicate sets (grouped across source_file): 1" in out
+    assert "Redundant drawers in those sets (N-1 per set):" in out
+    assert r"S:\copy-one\f.js" in out
+    assert r"S:\copy-two\f.js" in out
+    mock_col.delete.assert_not_called()
+
+
+@patch("mempalace.dedup.get_source_groups")
+@patch("mempalace.dedup.ChromaBackend")
+def test_show_stats_cross_source_scans_sources_below_min_count(
+    mock_backend_cls, mock_get_groups, tmp_path, capsys
+):
+    """Five copies of one file are 1 drawer each — min_count would hide them."""
+    mock_col = MagicMock()
+    mock_col.get.side_effect = _docs_by_id({"d1": "same", "d2": "same"})
+    _install_mock_backend(mock_backend_cls, mock_col)
+    mock_get_groups.return_value = {"a.txt": ["d1"], "b.txt": ["d2"]}
+
+    dedup.show_stats(palace_path=str(tmp_path), cross_source_duplicates=True, wing="coding")
+
+    # one metadata pass, unfiltered, still honouring the wing scope
+    assert mock_get_groups.call_count == 1
+    kwargs = mock_get_groups.call_args.kwargs
+    assert kwargs["min_count"] == 1
+    assert kwargs["wing"] == "coding"
+
+    out = capsys.readouterr().out
+    assert "Sources with 5+ drawers: 0" in out  # the min_count view is still filtered
+    assert "Drawers in scope incl. sources under min_count: 2 across 2 sources" in out
+    assert "Cross-source exact-duplicate sets (grouped across source_file): 1" in out
+
+
+@patch("mempalace.dedup.ChromaBackend")
+def test_show_stats_reports_both_modes_separately(mock_backend_cls, tmp_path, capsys):
+    """Intra-source and cross-source numbers must reconcile, not replace each other."""
+    docs = {"d1": "same", "d2": "same", "d3": "same"}
+    mock_col = MagicMock()
+    mock_col.get.side_effect = _docs_by_id(docs)
+    _install_mock_backend(mock_backend_cls, mock_col)
+
+    # a.txt holds 2 identical drawers (intra-source visible), b.txt holds a third
+    groups = {"a.txt": ["d1", "d2"], "b.txt": ["d3"]}
+    with patch.object(dedup, "get_source_groups", return_value=groups):
+        dedup.show_stats(
+            palace_path=str(tmp_path),
+            min_count=2,
+            exact_duplicates=True,
+            cross_source_duplicates=True,
+        )
+
+    out = capsys.readouterr().out
+    # intra-source sees only a.txt's pair
+    assert "Exact-duplicate sets (byte-identical documents): 1" in out
+    assert "Redundant drawers in those sets:                 1" in out
+    # cross-source merges all three
+    assert "Cross-source exact-duplicate sets (grouped across source_file): 1" in out
+    assert "sets spanning 2+ distinct source paths: 1  (2 redundant)" in out
+    assert "not computed" not in out
+
+
+@patch("mempalace.dedup.get_source_groups")
+@patch("mempalace.dedup.ChromaBackend")
+def test_show_stats_exact_duplicates_points_at_the_cross_source_blind_spot(
+    mock_backend_cls, mock_get_groups, tmp_path, capsys
+):
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"documents": ["a", "b"]}
+    _install_mock_backend(mock_backend_cls, mock_col)
+    mock_get_groups.return_value = {"a.txt": ["d1", "d2"]}
+
+    dedup.show_stats(palace_path=str(tmp_path), exact_duplicates=True)
+    out = capsys.readouterr().out
+
+    assert "--cross-source-duplicates" in out
+    assert mock_get_groups.call_args.kwargs["min_count"] == dedup.MIN_DRAWERS_TO_CHECK
+
+
+@patch("mempalace.dedup.get_source_groups")
+@patch("mempalace.dedup.ChromaBackend")
+def test_show_stats_default_pass_still_computes_nothing(
+    mock_backend_cls, mock_get_groups, tmp_path, capsys
+):
+    """The metadata-only default must stay cheap and must not run a hash pass."""
+    mock_col = MagicMock()
+    _install_mock_backend(mock_backend_cls, mock_col)
+    mock_get_groups.return_value = {"a.txt": ["d1", "d2"]}
+
+    dedup.show_stats(palace_path=str(tmp_path))
+    out = capsys.readouterr().out
+
+    assert "not computed" in out
+    assert "Cross-source" not in out
+    mock_col.get.assert_not_called()
+
+
+def test_cli_cross_source_requires_stats_and_accepts_alias():
+    """--cross-source(-duplicates) is a --stats-only read mode, alias included."""
+    import subprocess
+    import sys
+
+    for flag in ("--cross-source-duplicates", "--cross-source"):
+        res = subprocess.run(
+            [sys.executable, "-m", "mempalace.dedup", flag],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert res.returncode == 2, res.stderr
+        assert "--cross-source-duplicates only applies to --stats" in res.stderr
+        assert "unrecognized" not in res.stderr  # proves the alias parsed
 
 
 # ── get_cpu_usage never shells out by bare name (projects-ops#115) ─────
