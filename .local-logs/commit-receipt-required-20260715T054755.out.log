@@ -1,3 +1,0 @@
-[dev 8eb8b78] refactor(receipts): require managed core miner runs
- 11 files changed, 361 insertions(+), 55 deletions(-)
- create mode 100644 docs/research/core-miner-receipt-required-contract-2026-07-15.md
