@@ -15,8 +15,13 @@ Usage (standalone):
     python -m mempalace.dedup --threshold 0.10         # stricter (near-identical only)
     python -m mempalace.dedup --threshold 0.35         # looser (catches paraphrased content)
     python -m mempalace.dedup --wing my_project        # scope to one wing
-    python -m mempalace.dedup --stats                  # stats only
+    python -m mempalace.dedup --stats                  # stats only (metadata pass)
     python -m mempalace.dedup --source "my_project"    # filter by source
+
+    # --stats honours --wing/--source and prints the active scope. For a real
+    # byte-identical duplicate count add --exact-duplicates (reads document
+    # text, so pair it with --progress on a large palace):
+    python -m mempalace.dedup --stats --wing coding --exact-duplicates --progress
 
 Usage (from CLI):
     mempalace dedup [--apply] [--threshold 0.15] [--stats]
@@ -81,15 +86,32 @@ def get_source_groups(col, min_count=MIN_DRAWERS_TO_CHECK, source_pattern=None, 
 
 
 def get_cpu_usage():
+    """Best-effort CPU load percentage, or None if unavailable.
+
+    Prefers psutil. Falls back to an absolute-path WMIC call: `wmic` is
+    deprecated/absent on current Windows builds, and on this workspace's host
+    PATH lacks System32 entirely, so a bare-name invocation silently fails for
+    every process (iMelki/projects-ops#115). Never shell out by bare name here.
+    """
+    try:
+        import psutil
+
+        return int(psutil.cpu_percent(interval=0.1))
+    except Exception:
+        pass
+
     try:
         import subprocess
 
+        wmic = os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "System32", "wbem", "WMIC.exe")
+        if not os.path.isfile(wmic):
+            return None
         res = subprocess.run(
-            ["wmic", "cpu", "get", "loadpercentage"], capture_output=True, text=True, timeout=2
+            [wmic, "cpu", "get", "loadpercentage"], capture_output=True, text=True, timeout=2
         )
-        lines = res.stdout.strip().split("\n")
+        lines = [line.strip() for line in res.stdout.strip().splitlines() if line.strip()]
         if len(lines) > 1:
-            return int(lines[1].strip())
+            return int(lines[1])
     except Exception:
         pass
     return None
@@ -150,24 +172,92 @@ def dedup_source_group(col, drawer_ids, threshold=DEFAULT_THRESHOLD, dry_run=Tru
     return [k[0] for k in kept], to_delete
 
 
-def show_stats(palace_path=None):
+def count_exact_duplicates(col, groups, progress=False):
+    """Count EXACT duplicate drawers by content hash, within each source group.
+
+    Returns (duplicate_group_count, redundant_drawer_count).
+
+    "Redundant" means drawers beyond the first in a set of byte-identical
+    documents: a set of N identical drawers contributes N-1. This is an exact
+    measurement, not an estimate, and it deliberately does NOT detect
+    near-duplicates -- that requires embedding distance, which is what
+    dedup_source_group() does at DEFAULT_THRESHOLD.
+    """
+    import hashlib
+
+    dup_groups = 0
+    redundant = 0
+    scanned = 0
+    total = sum(len(ids) for ids in groups.values())
+
+    for ids in groups.values():
+        seen = defaultdict(int)
+        for i in range(0, len(ids), 500):
+            chunk = ids[i : i + 500]
+            data = col.get(ids=chunk, include=["documents"])
+            for doc in data["documents"]:
+                if not doc:
+                    continue
+                seen[hashlib.sha256(doc.encode("utf-8", "replace")).hexdigest()] += 1
+            scanned += len(chunk)
+            if progress and total:
+                print(f"\r  exact-duplicate scan: {scanned * 100.0 / total:5.1f}%", end="")
+        for count in seen.values():
+            if count > 1:
+                dup_groups += 1
+                redundant += count - 1
+
+    if progress:
+        print()
+    return dup_groups, redundant
+
+
+def show_stats(
+    palace_path=None,
+    wing=None,
+    source_pattern=None,
+    min_count=MIN_DRAWERS_TO_CHECK,
+    exact_duplicates=False,
+    progress=False,
+):
     """Show duplication statistics without making changes."""
     palace_path = palace_path or _get_palace_path()
     col = ChromaBackend().get_collection(palace_path, COLLECTION_NAME)
 
-    groups = get_source_groups(col)
+    # Scope must be both applied AND printed. Previously this function took no
+    # wing/source arguments at all, so `--wing X --stats` silently scanned the
+    # whole palace and reported cross-wing sources as if they were in scope
+    # (iMelki/mempalace#33).
+    print(f"\n  Palace: {palace_path}")
+    print(
+        f"  Scope:  wing={wing or 'ALL'}  source={source_pattern or 'ALL'}  min_count={min_count}"
+    )
+
+    groups = get_source_groups(col, min_count=min_count, source_pattern=source_pattern, wing=wing)
 
     total_drawers = sum(len(ids) for ids in groups.values())
-    print(f"\n  Sources with {MIN_DRAWERS_TO_CHECK}+ drawers: {len(groups)}")
+    print(f"\n  Sources with {min_count}+ drawers: {len(groups)}")
     print(f"  Total drawers in those sources: {total_drawers:,}")
 
     print("\n  Top 15 by drawer count:")
     sorted_groups = sorted(groups.items(), key=lambda x: len(x[1]), reverse=True)
     for src, ids in sorted_groups[:15]:
-        print(f"    {len(ids):4d}  {src[:65]}")
+        print(f"    {len(ids):5d}  {src[:65]}")
 
-    estimated_dups = sum(int(len(ids) * 0.4) for ids in groups.values() if len(ids) > 20)
-    print(f"\n  Estimated duplicates (groups > 20): ~{estimated_dups:,}")
+    # A large drawer count for one source is NOT duplication: chunking one big
+    # document into many verbatim drawers is the intended design. This used to
+    # print `sum(len(ids) * 0.4)` for groups > 20 as "estimated duplicates",
+    # which measured nothing and implied ~36% of the palace was redundant
+    # (iMelki/mempalace#33). Report a real number or none at all.
+    if exact_duplicates:
+        dup_groups, redundant = count_exact_duplicates(col, groups, progress=progress)
+        print(f"\n  Exact-duplicate sets (byte-identical documents): {dup_groups:,}")
+        print(f"  Redundant drawers in those sets:                 {redundant:,}")
+        print("  NOTE: exact matches only. Near-duplicates need an embedding pass.")
+    else:
+        print("\n  Duplicate counts not computed (metadata-only pass).")
+        print("  Re-run with --exact-duplicates for a real byte-identical count,")
+        print("  or run without --stats for the embedding-distance dry-run preview.")
 
 
 def dedup_palace(
@@ -277,6 +367,17 @@ if __name__ == "__main__":
     parser.add_argument("--stats", action="store_true", help="Show stats only")
     parser.add_argument("--wing", default=None, help="Scope dedup to a single wing")
     parser.add_argument("--source", default=None, help="Filter by source file pattern")
+    parser.add_argument(
+        "--exact-duplicates",
+        action="store_true",
+        help="With --stats, compute a real byte-identical duplicate count "
+        "(reads document text, so it is slower than the metadata-only pass)",
+    )
+    parser.add_argument(
+        "--progress",
+        action="store_true",
+        help="Print incremental progress during long scans",
+    )
     args = parser.parse_args()
 
     path = os.path.expanduser(args.palace) if args.palace else None
@@ -284,8 +385,17 @@ if __name__ == "__main__":
     if args.apply and args.dry_run:
         parser.error("--apply and --dry-run are mutually exclusive")
 
+    if args.exact_duplicates and not args.stats:
+        parser.error("--exact-duplicates only applies to --stats")
+
     if args.stats:
-        show_stats(palace_path=path)
+        show_stats(
+            palace_path=path,
+            wing=args.wing,
+            source_pattern=args.source,
+            exact_duplicates=args.exact_duplicates,
+            progress=args.progress,
+        )
     else:
         # Safety default (2026-07-05 incident, iMelki/mempalace#19): a bare
         # invocation used to run LIVE deletions; 42,606 drawers were deleted
