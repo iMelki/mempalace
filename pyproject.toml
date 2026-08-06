@@ -55,7 +55,7 @@ chroma = "mempalace.backends.chroma:ChromaBackend"
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
-    "ruff>=0.4.0",
+    "ruff>=0.15.9,<0.16",
     "psutil>=5.9",
     "mcp==1.28.1; python_version >= '3.10'",
 ]
@@ -74,7 +74,7 @@ coreml = ["onnxruntime>=1.16"]
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
-    "ruff>=0.4.0",
+    "ruff>=0.15.9,<0.16",
     "psutil>=5.9",
     "mcp==1.28.1; python_version >= '3.10'",
 ]

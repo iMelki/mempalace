@@ -1,9 +1,11 @@
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    # Keep in lock-step with the ruff version pinned in .github/workflows/ci.yml
-    # (>=0.4.0,<0.5). Using a newer rev here produces a different formatter
-    # output than CI and breaks `ruff format --check` in the lint job.
-    rev: v0.4.10
+    # Keep in lock-step with the ruff range pinned in BOTH
+    # .github/workflows/ci.yml and pyproject.toml's dev/lint extras
+    # (>=0.15.9,<0.16). There are THREE pin sites; a mismatched rev here
+    # silently re-reformats staged files mid-commit and aborts the commit
+    # (mempalace#37).
+    rev: v0.15.9
     hooks:
       - id: ruff
         args: [--fix]

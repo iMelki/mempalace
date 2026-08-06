@@ -127,7 +127,9 @@ def test_durable_snapshot_scan_resumes_and_matches_one_shot_manifest(tmp_path: P
     )
     assert manifest == expected_manifest
     assert attestation["itemCount"] == 3
-    assert not any("document" in path.read_text(encoding="utf-8") for path in (stage / "shards").glob("*.json"))
+    assert not any(
+        "document" in path.read_text(encoding="utf-8") for path in (stage / "shards").glob("*.json")
+    )
 
 
 def test_staging_fails_closed_when_snapshot_or_checkpoint_binding_changes(tmp_path: Path):
@@ -136,26 +138,37 @@ def test_staging_fails_closed_when_snapshot_or_checkpoint_binding_changes(tmp_pa
     stage = tmp_path / "stage"
     prepare_evaluation_snapshot(palace, staging_dir=stage, data_plane_id=DATA_PLANE_ID)
     checkpoint = stage / "inventory-checkpoint.json"
-    checkpoint.write_text(checkpoint.read_text(encoding="utf-8").replace(DATA_PLANE_ID, "sha256:" + "e" * 64), encoding="utf-8")
+    checkpoint.write_text(
+        checkpoint.read_text(encoding="utf-8").replace(DATA_PLANE_ID, "sha256:" + "e" * 64),
+        encoding="utf-8",
+    )
     with pytest.raises(EvaluationCorpusManifestError, match="not bound"):
         scan_evaluation_snapshot(stage, data_plane_id=DATA_PLANE_ID)
 
 
-def test_snapshot_creator_revision_and_scan_processor_revision_are_separately_bound(tmp_path: Path, monkeypatch):
+def test_snapshot_creator_revision_and_scan_processor_revision_are_separately_bound(
+    tmp_path: Path, monkeypatch
+):
     palace = tmp_path / "palace"
     _seed_palace(palace, [("drawer-a", "First", {})])
     stage = tmp_path / "stage"
     import mempalace.evaluation_manifest as manifest_module
 
-    monkeypatch.setattr(manifest_module, "_package_source_digest", lambda _path: "sha256:" + "a" * 64)
+    monkeypatch.setattr(
+        manifest_module, "_package_source_digest", lambda _path: "sha256:" + "a" * 64
+    )
     prepare_evaluation_snapshot(palace, staging_dir=stage, data_plane_id=DATA_PLANE_ID)
-    monkeypatch.setattr(manifest_module, "_package_source_digest", lambda _path: "sha256:" + "b" * 64)
+    monkeypatch.setattr(
+        manifest_module, "_package_source_digest", lambda _path: "sha256:" + "b" * 64
+    )
     scan_evaluation_snapshot(stage, data_plane_id=DATA_PLANE_ID, batch_size=1)
     manifest, attestation = finalize_evaluation_corpus_manifest(stage, data_plane_id=DATA_PLANE_ID)
     assert manifest["sourceRevision"] == "sha256:" + "a" * 64
     assert manifest["processingSourceRevision"] == "sha256:" + "b" * 64
     assert attestation["processingSourceRevision"] == "sha256:" + "b" * 64
-    monkeypatch.setattr(manifest_module, "_package_source_digest", lambda _path: "sha256:" + "c" * 64)
+    monkeypatch.setattr(
+        manifest_module, "_package_source_digest", lambda _path: "sha256:" + "c" * 64
+    )
     with pytest.raises(EvaluationCorpusManifestError, match="processing source revision is stale"):
         finalize_evaluation_corpus_manifest(stage, data_plane_id=DATA_PLANE_ID)
 
@@ -168,8 +181,14 @@ def test_streamed_inventory_hash_is_historical_canonical_inventory_hash(tmp_path
     scan_evaluation_snapshot(stage, data_plane_id=DATA_PLANE_ID, batch_size=1)
     manifest, _ = finalize_evaluation_corpus_manifest(stage, data_plane_id=DATA_PLANE_ID)
     rows = [
-        {"id": "drawer-a", "rowSha256": sha256_identity({"id": "drawer-a", "document": "First", "metadata": {}})},
-        {"id": "drawer-b", "rowSha256": sha256_identity({"id": "drawer-b", "document": "Second", "metadata": {}})},
+        {
+            "id": "drawer-a",
+            "rowSha256": sha256_identity({"id": "drawer-a", "document": "First", "metadata": {}}),
+        },
+        {
+            "id": "drawer-b",
+            "rowSha256": sha256_identity({"id": "drawer-b", "document": "Second", "metadata": {}}),
+        },
     ]
     assert manifest["inventorySha256"] == sha256_identity(
         {

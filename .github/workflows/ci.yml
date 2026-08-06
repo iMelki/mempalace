@@ -55,6 +55,6 @@ jobs:
         with:
           python-version: "3.11"
           cache: 'pip'
-      - run: pip install "ruff>=0.4.0,<0.5"
+      - run: pip install "ruff>=0.15.9,<0.16"
       - run: ruff check .
       - run: ruff format --check .
