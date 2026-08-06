@@ -1,6 +1,6 @@
 # MemPalace Open Tasks
 
-Last updated: 2026-07-29
+Last updated: 2026-08-06
 
 This file is the durable local index for active `mempalace` issues.
 
@@ -285,6 +285,35 @@ This file is the durable local index for active `mempalace` issues.
     enforcement/readback remains unproven. Diary files that disappear or are
     renamed are not auto-pruned: absence remains visible as stale convenience
     state until #22 defines an explicit, reviewable deletion policy.
+
+- [#36 - Root cause: mining ingests backup/variant copies and generated lockfiles](https://github.com/iMelki/mempalace/issues/36)
+  - Mechanism shipped. `mempalace/mine_exclusions.py` turns the two previously
+    hardcoded sets (`palace.SKIP_DIRS`, `miner.SKIP_FILENAMES`) into one
+    configurable, documented policy seeded from the old sets, and extends the
+    defaults with the dependency lockfiles of 12 ecosystems plus `obj/`, `bin/`,
+    `out/`, `vendor/`, and 16 more build/cache trees. `.gitignore` respect is
+    untouched — it never covered lockfiles, which is why they reached the palace.
+  - Verified on a fixture tree carrying the issue's own shapes: the pre-change
+    scan took 4 files (`pnpm-lock.yaml`, `obj/Debug/m.json`, plus 2 real
+    sources); the post-change scan takes 2. Adding
+    `exclude: {allow_files: [pnpm-lock.yaml]}` re-admits the lockfile on the
+    next mine while the already-filed sources are correctly skipped, proving
+    both reversibility and that existing receipts survive a policy change.
+  - Backup/variant directories are reported, never auto-excluded
+    (`mempalace variants DIR [--json]`, plus a header advisory during
+    `mempalace mine`). A directory named `backup` can hold the only surviving
+    copy of something, so no config switch makes exclusion automatic; content
+    inside a flagged directory is still mined, and there is a regression test
+    asserting exactly that.
+  - **Open operator decision (not decided here): should lockfiles be excluded
+    outright, or is there a recall case for dependency-resolution history?**
+    The default is exclusion because a lockfile's recall value is close to zero,
+    not because the recall case was ruled out. Reversal is one config line.
+  - Remaining from the issue: item 3, the mine-time content-hash duplicate check
+    against existing drawers (`mempalace_check_duplicate` exists as an MCP tool
+    but the mining paths may not all route through it). Not implemented here.
+  - Nothing already in the palace was deleted or modified. Cleanup of existing
+    duplicates stays under #19 and remains gated on a real offsite backup.
 
 - [#19 - Audit likely duplicate drawers surfaced by #13 probe](https://github.com/iMelki/mempalace/issues/19)
   - Status: open go/no-go decision. This is a duplicate-drawer audit and

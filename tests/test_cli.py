@@ -512,7 +512,30 @@ def test_cmd_mine_projects_mode(mock_config_cls):
             start_index=None,
             progress_jsonl=None,
             raise_on_lock_conflict=True,
+            report_variants=True,
         )
+
+
+@patch("mempalace.cli.MempalaceConfig")
+def test_cmd_mine_suppresses_the_variant_report_on_request(mock_config_cls):
+    """`--no-variant-report` silences the report-only advisory (#36)."""
+    mock_config_cls.return_value.palace_path = "/fake/palace"
+    args = argparse.Namespace(
+        dir="/src",
+        palace=None,
+        mode="projects",
+        wing=None,
+        agent="mempalace",
+        limit=0,
+        dry_run=False,
+        no_gitignore=False,
+        include_ignored=[],
+        extract="exchange",
+        no_variant_report=True,
+    )
+    with patch("mempalace.miner.mine") as mock_mine:
+        cmd_mine(args)
+    assert mock_mine.call_args.kwargs["report_variants"] is False
 
 
 @patch("mempalace.cli.MempalaceConfig")

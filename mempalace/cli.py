@@ -27,6 +27,7 @@ Examples:
     mempalace search "pricing discussion" --wing my_app --room costs
 """
 
+import json
 import os
 import sys
 import shlex
@@ -562,6 +563,7 @@ def cmd_mine(args):
                 start_index=start_index,
                 progress_jsonl=progress_jsonl,
                 raise_on_lock_conflict=True,
+                report_variants=not getattr(args, "no_variant_report", False),
             )
         except MineAlreadyRunning:
             print(
@@ -569,6 +571,116 @@ def cmd_mine(args):
                 file=sys.stderr,
             )
             sys.exit(MINE_LOCK_CONFLICT_EXIT_CODE)
+
+
+def cmd_variants(args):
+    """Report backup/variant directory candidates for operator confirmation.
+
+    Read-only and report-only by design (#36): this command never excludes,
+    deletes, or mines anything. A directory named ``backup`` can hold the
+    only surviving copy of something, so the decision stays with the
+    operator — confirmed names go into ``exclude.dirs`` in ``mempalace.yaml``.
+    """
+    from .mine_exclusions import (
+        detect_variant_directories,
+        format_variant_report,
+        load_variant_settings,
+        read_project_config,
+        resolve_exclusion_policy,
+    )
+    from .miner import SKIP_FILENAMES
+
+    target = os.path.expanduser(args.dir)
+    if not os.path.isdir(target):
+        print(f"ERROR: Directory not found: {target}", file=sys.stderr)
+        sys.exit(2)
+
+    config = read_project_config(target)
+    settings = load_variant_settings(config)
+    max_depth = args.max_depth if args.max_depth is not None else settings["max_depth"]
+    if max_depth < 1:
+        print("ERROR: --max-depth must be at least 1", file=sys.stderr)
+        sys.exit(2)
+
+    candidates = detect_variant_directories(
+        target,
+        max_depth=max_depth,
+        policy=resolve_exclusion_policy(target, artifact_files=SKIP_FILENAMES),
+        globs=settings["globs"],
+    )
+
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "schema": "mempalace-variant-candidates/v1",
+                    "root": os.path.abspath(target),
+                    "max_depth": max_depth,
+                    "applied": False,
+                    "candidate_count": len(candidates),
+                    "candidates": [candidate.to_dict() for candidate in candidates],
+                },
+                indent=2,
+            )
+        )
+        return
+
+    for line in format_variant_report(candidates):
+        print(line)
+
+
+def cmd_exclusions(args):
+    """Print the effective mine-time exclusion policy for a directory."""
+    from .mine_exclusions import read_project_config
+    from .miner import resolve_mine_exclusion_policy
+
+    target = os.path.expanduser(args.dir)
+    if not os.path.isdir(target):
+        print(f"ERROR: Directory not found: {target}", file=sys.stderr)
+        sys.exit(2)
+
+    config = read_project_config(target)
+    policy = resolve_mine_exclusion_policy(target, config)
+    effective = policy.as_dict()
+
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "root": os.path.abspath(target),
+                    "configured": bool(config.get("exclude")),
+                    "digest": policy.digest(),
+                    "policy": effective,
+                },
+                indent=2,
+            )
+        )
+        return
+
+    print(f"\n  Effective mine exclusions for {os.path.abspath(target)}")
+    print(f"  Source: {'mempalace.yaml exclude: block' if config.get('exclude') else 'defaults'}")
+    print(f"  Digest: {policy.digest()}")
+    for key in (
+        "generated_files",
+        "generated_file_globs",
+        "generated_dirs",
+        "generated_dir_globs",
+        "extra_files",
+        "extra_file_globs",
+        "extra_dirs",
+        "extra_dir_globs",
+        "allow_files",
+        "allow_dirs",
+        "artifact_files",
+    ):
+        values = effective.get(key) or []
+        if values:
+            print(f"\n  {key} ({len(values)}):")
+            print(f"    {', '.join(values)}")
+    print(
+        "\n  Reverse any default in mempalace.yaml — set `exclude.generated_files: false`\n"
+        "  or list individual names under `exclude.allow_files` / `exclude.allow_dirs`.\n"
+    )
 
 
 def cmd_sweep(args):
@@ -1337,6 +1449,14 @@ def main():
         ),
     )
     p_mine.add_argument(
+        "--no-variant-report",
+        action="store_true",
+        help=(
+            "Suppress the report-only backup/variant directory advisory in the "
+            "mine header. The advisory never excludes anything (#36)"
+        ),
+    )
+    p_mine.add_argument(
         "--redetect-origin",
         action="store_true",
         help=(
@@ -1622,6 +1742,36 @@ def main():
         help="Emit the machine-readable snapshot receipt or verification object to stdout",
     )
 
+    # variants
+    p_variants = sub.add_parser(
+        "variants",
+        help="Report backup/variant directory candidates (read-only, excludes nothing)",
+    )
+    p_variants.add_argument("dir", help="Directory to inspect")
+    p_variants.add_argument(
+        "--max-depth",
+        type=int,
+        default=None,
+        help="Directory depth to inspect (default: 3, or `variants.max_depth` in mempalace.yaml)",
+    )
+    p_variants.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the machine-readable candidate list to stdout",
+    )
+
+    # exclusions
+    p_exclusions = sub.add_parser(
+        "exclusions",
+        help="Show the effective mine-time exclusion policy for a directory",
+    )
+    p_exclusions.add_argument("dir", nargs="?", default=".", help="Project directory (default: .)")
+    p_exclusions.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the machine-readable effective policy to stdout",
+    )
+
     # mcp
     sub.add_parser(
         "mcp",
@@ -1683,6 +1833,8 @@ def main():
         "warm": cmd_warm,
         "migrate": cmd_migrate,
         "status": cmd_status,
+        "variants": cmd_variants,
+        "exclusions": cmd_exclusions,
     }
     dispatch[args.command](args)
 

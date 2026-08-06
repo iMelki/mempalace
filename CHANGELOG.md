@@ -8,6 +8,46 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [3.3.5] — unreleased
 
+### Added
+
+- **Mining declines generated and vendored content, and reports backup/variant
+  directory candidates (#36).** A `wing=coding` audit found ~6,900+ drawers of
+  machine-generated `pnpm-lock.yaml` chunks and one project ingested from five
+  on-disk copies. Deduplicating afterwards is the bandaid; declining to ingest
+  is the durable and safe direction, because deletion is irreversible in a
+  store whose requirement is verbatim 100% recall while not ingesting costs
+  nothing.
+
+  This extends the mechanisms that already existed rather than adding a fourth
+  one. `.gitignore` respect is untouched (it never covered lockfiles — those
+  are committed on purpose, which is why they reached the palace); the
+  previously hardcoded `palace.SKIP_DIRS` and `miner.SKIP_FILENAMES` sets are
+  now one configurable, documented policy in `mempalace/mine_exclusions.py`,
+  seeded from the old sets so nothing that was skipped before becomes mineable
+  now, and extended with the ecosystems that were missing — most importantly
+  `obj/` and `bin/` (a single `CategoriesAPI.Tests/obj` tree contributed 418
+  drawers) plus the dependency lockfiles of 12 ecosystems.
+
+  Every default is reversible from the project's `mempalace.yaml` without a
+  code change (`exclude.generated_files: false`, or individual names under
+  `exclude.allow_files` / `exclude.allow_dirs`), and `--include-ignored` still
+  overrides per path. **Whether lockfiles should be excluded at all is the
+  operator's policy call** — exclusion is the default because a lockfile's
+  recall value is close to zero, not because the recall case was ruled out.
+
+  Backup/variant directories (`*_backup_250522`, `backend-backup-git_broke`,
+  `*-alpha-ver`, and directories that are suffixed forms of a sibling) are
+  **reported and never auto-excluded**: a directory named `backup` can hold
+  the only surviving copy of something, which is exactly why blanket
+  exclusion is unsafe. New `mempalace variants DIR [--json]` and
+  `mempalace exclusions DIR [--json]` surfaces, plus a report-only advisory in
+  the `mempalace mine` header (`--no-variant-report` silences it).
+
+  Nothing already in the palace is deleted or modified — this is purely about
+  future ingest. Cleanup of existing duplicates stays under #19 and remains
+  gated on a verified offsite backup. Documented in
+  [`docs/MINE_EXCLUSIONS.md`](docs/MINE_EXCLUSIONS.md).
+
 ### Fixed
 
 - **`dedup --stats` no longer dies on drawer text a cp1252 console cannot

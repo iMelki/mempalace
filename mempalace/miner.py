@@ -20,7 +20,6 @@ from typing import Mapping, Optional
 
 from .palace import (
     NORMALIZE_VERSION,
-    SKIP_DIRS,
     MineAlreadyRunning,
     build_closet_lines,
     file_already_mined,
@@ -30,6 +29,14 @@ from .palace import (
     mine_palace_lock,
     purge_file_closets,
     upsert_closet_lines,
+)
+from .mine_exclusions import (
+    ExclusionPolicy,
+    detect_variant_directories,
+    format_variant_report,
+    load_exclusion_policy,
+    load_variant_settings,
+    read_project_config,
 )
 from .receipt_verifier import ReceiptVerificationError, verify_receipt
 from .mine_progress import (
@@ -98,6 +105,10 @@ SKIP_FILENAMES = {
     ".gitignore",
     "package-lock.json",
 }
+# MemPalace's own per-project artifacts. Generated/vendored content is NOT
+# listed here — that policy lives in `mempalace/mine_exclusions.py`, is
+# configurable per project via the `exclude:` block of mempalace.yaml, and
+# is seeded with this set so the miner keeps one decision point (#36).
 
 CHUNK_SIZE = 800  # chars per drawer
 CHUNK_OVERLAP = 100  # overlap between chunks
@@ -252,9 +263,50 @@ def is_gitignored(path: Path, matchers: list, is_dir: bool = False) -> bool:
     return ignored
 
 
-def should_skip_dir(dirname: str) -> bool:
-    """Skip known generated/cache directories before gitignore matching."""
-    return dirname in SKIP_DIRS or dirname.endswith(".egg-info")
+_DEFAULT_POLICY_CACHE: Optional[ExclusionPolicy] = None
+
+
+def default_exclusion_policy() -> ExclusionPolicy:
+    """The built-in policy, seeded with MemPalace's own project artifacts.
+
+    Cached: the walk consults it once per directory entry, and the pattern
+    split is pure work over constant data.
+    """
+    global _DEFAULT_POLICY_CACHE
+    if _DEFAULT_POLICY_CACHE is None:
+        _DEFAULT_POLICY_CACHE = load_exclusion_policy(None, artifact_files=SKIP_FILENAMES)
+    return _DEFAULT_POLICY_CACHE
+
+
+def resolve_mine_exclusion_policy(
+    project_dir: str,
+    config: Optional[Mapping] = None,
+) -> ExclusionPolicy:
+    """Resolve the effective exclusion policy for one project directory.
+
+    ``config`` may be an already-parsed ``mempalace.yaml`` mapping (the mine
+    path has one in hand); otherwise the file is re-read quietly.
+    """
+    parsed = config if isinstance(config, Mapping) else read_project_config(project_dir)
+    return load_exclusion_policy(parsed, artifact_files=SKIP_FILENAMES)
+
+
+def should_skip_dir(dirname: str, policy: Optional[ExclusionPolicy] = None) -> bool:
+    """Skip known generated/cache directories before gitignore matching.
+
+    The membership test now lives in the configurable exclusion policy
+    (``mempalace/mine_exclusions.py``); ``SKIP_DIRS`` seeds its default set,
+    so behaviour with no project config is a strict superset of the previous
+    hardcoded check.
+    """
+    active = policy if policy is not None else default_exclusion_policy()
+    return active.excludes_dir(dirname)
+
+
+def should_skip_file(filename: str, policy: Optional[ExclusionPolicy] = None) -> bool:
+    """Return True when a filename must not be ingested."""
+    active = policy if policy is not None else default_exclusion_policy()
+    return active.excludes_file(filename)
 
 
 def normalize_include_paths(include_ignored: list) -> set:
@@ -1526,9 +1578,17 @@ def scan_project(
     project_dir: str,
     respect_gitignore: bool = True,
     include_ignored: list = None,
+    policy: Optional[ExclusionPolicy] = None,
 ) -> list:
-    """Return list of all readable file paths."""
+    """Return list of all readable file paths.
+
+    ``policy`` is the resolved mine-time exclusion policy. When omitted the
+    project's own ``mempalace.yaml`` ``exclude:`` block is read, falling back
+    to the documented defaults — so a caller that only knows the directory
+    still gets the same file set the mine will use.
+    """
     project_path = Path(project_dir).expanduser().resolve()
+    active_policy = policy if policy is not None else resolve_mine_exclusion_policy(project_dir)
     files = []
     active_matchers = []
     matcher_cache = {}
@@ -1552,7 +1612,7 @@ def scan_project(
                 d
                 for d in dirs
                 if is_force_included(root_path / d, project_path, include_paths)
-                or not should_skip_dir(d)
+                or not active_policy.excludes_dir(d)
             ],
             key=lambda value: (os.path.normcase(value), value),
         )
@@ -1575,7 +1635,7 @@ def scan_project(
             force_include = is_force_included(filepath, project_path, include_paths)
             exact_force_include = is_exact_force_include(filepath, project_path, include_paths)
 
-            if not force_include and filename in SKIP_FILENAMES:
+            if not force_include and active_policy.excludes_file(filename):
                 continue
             if filepath.suffix.lower() not in READABLE_EXTENSIONS and not exact_force_include:
                 continue
@@ -1629,6 +1689,7 @@ def _discover_plan_directory(
     include_paths: list,
     excluded_artifacts: set[Path],
     matcher_cache: dict,
+    policy: ExclusionPolicy,
 ) -> tuple[list[str], list[str]]:
     root_path = (project_path / relative_dir).resolve()
     try:
@@ -1660,7 +1721,7 @@ def _discover_plan_directory(
         except OSError as exc:
             raise MineManifestDrift("source changed during plan discovery") from exc
         if is_directory:
-            if not force_include and should_skip_dir(entry.name):
+            if not force_include and policy.excludes_dir(entry.name):
                 continue
             if (
                 respect_gitignore
@@ -1673,7 +1734,7 @@ def _discover_plan_directory(
             continue
         if not is_file:
             continue
-        if not force_include and entry.name in SKIP_FILENAMES:
+        if not force_include and policy.excludes_file(entry.name):
             continue
         if path.suffix.lower() not in READABLE_EXTENSIONS and not exact_force_include:
             continue
@@ -1704,9 +1765,16 @@ def build_resumable_source_manifest(
     include_ignored: list,
     excluded_artifacts: set[Path],
     limit: int,
+    policy: Optional[ExclusionPolicy] = None,
 ) -> dict:
-    """Resume directory discovery and byte hashing from a fsynced per-file cursor."""
+    """Resume directory discovery and byte hashing from a fsynced per-file cursor.
+
+    The active exclusion policy is bound through ``contract`` (which carries
+    its digest), so a plan discovered under one policy can never be resumed
+    under another.
+    """
     include_paths = normalize_include_paths(include_ignored)
+    active_policy = policy if policy is not None else default_exclusion_policy()
     identity = {
         "schema": "mempalace-mine-plan-identity/v1",
         "project_identity": sha256_bytes(os.path.normcase(str(project_path)).encode("utf-8")),
@@ -1735,6 +1803,7 @@ def build_resumable_source_manifest(
                     include_paths=include_paths,
                     excluded_artifacts=excluded_artifacts,
                     matcher_cache=matcher_cache,
+                    policy=active_policy,
                 )
                 journal.append(
                     "directory-discovered",
@@ -1809,12 +1878,28 @@ def _project_run_config(
     }
 
 
-def _source_plan_contract(run_config: Mapping) -> dict:
+def _source_plan_contract(
+    run_config: Mapping,
+    *,
+    exclusion_policy: Optional[ExclusionPolicy] = None,
+) -> dict:
+    """Bind a source plan to the exact configuration that produced it.
+
+    The exclusion policy is bound here (plan contract) rather than in
+    ``run_config`` (receipt config digest) on purpose. Exclusions only ever
+    *remove* future sources; they never change how an already-ingested
+    source was chunked or stored. Binding here makes a manifest built under
+    one policy unusable under another — the safety property we want —
+    without invalidating every existing per-source write receipt and forcing
+    a palace-wide re-mine of content that is already correct (#36).
+    """
+    policy = exclusion_policy if exclusion_policy is not None else default_exclusion_policy()
     return {
         "mode": "project",
         "parser": "filesystem",
         "receipt_config_digest": config_hash(run_config),
         "miner_revision": miner_revision(__file__),
+        "exclusion_policy_digest": policy.digest(),
     }
 
 
@@ -1932,6 +2017,7 @@ def _prepare_mine_source_plan(
     manifest_path: Optional[str],
     start_index: Optional[int],
     progress_jsonl: Optional[str],
+    policy: Optional[ExclusionPolicy] = None,
 ) -> tuple[dict, list[Path], Optional[MineProgressJournal], int, int]:
     if plan_out and manifest_path:
         raise MinePlanError("--plan-out and --manifest are mutually exclusive")
@@ -1944,7 +2030,8 @@ def _prepare_mine_source_plan(
     if progress_jsonl and dry_run:
         raise MinePlanError("--progress-jsonl requires a managed non-dry mine")
 
-    plan_contract = _source_plan_contract(run_config)
+    active_policy = policy if policy is not None else resolve_mine_exclusion_policy(project_dir)
+    plan_contract = _source_plan_contract(run_config, exclusion_policy=active_policy)
     if manifest_path:
         manifest = load_source_manifest(manifest_path)
         validate_manifest_context(
@@ -1968,6 +2055,7 @@ def _prepare_mine_source_plan(
                 include_ignored=include_ignored,
                 excluded_artifacts=excluded_artifacts,
                 limit=limit,
+                policy=active_policy,
             )
         else:
             if discovered is None:
@@ -1975,6 +2063,7 @@ def _prepare_mine_source_plan(
                     project_dir,
                     respect_gitignore=respect_gitignore,
                     include_ignored=include_ignored,
+                    policy=active_policy,
                 )
             discovered = [
                 Path(path).expanduser().resolve()
@@ -2029,6 +2118,7 @@ def mine(
     start_index: Optional[int] = None,
     progress_jsonl: str = None,
     raise_on_lock_conflict: bool = False,
+    report_variants: bool = True,
 ):
     """Mine a project directory into the palace.
 
@@ -2055,6 +2145,7 @@ def mine(
             manifest_path=manifest_path,
             start_index=start_index,
             progress_jsonl=progress_jsonl,
+            report_variants=report_variants,
         )
 
     try:
@@ -2074,6 +2165,7 @@ def mine(
                 manifest_path=manifest_path,
                 start_index=start_index,
                 progress_jsonl=progress_jsonl,
+                report_variants=report_variants,
             )
     except MineAlreadyRunning:
         if raise_on_lock_conflict:
@@ -2083,6 +2175,42 @@ def mine(
             file=sys.stderr,
         )
         return
+
+
+#: How many variant candidates the inline mine advisory prints before
+#: truncating. The full list is available from ``mempalace variants``.
+VARIANT_ADVISORY_LIMIT = 8
+
+
+def _variant_advisory_lines(
+    project_dir: str,
+    config: Optional[Mapping] = None,
+    *,
+    enabled: bool = True,
+) -> list:
+    """Build the report-only backup/variant advisory for the mine header.
+
+    Nothing here changes what gets mined. Detection is read-only and must
+    never fail a mine, so every error degrades to silence — an advisory that
+    could abort an ingest would be worse than no advisory.
+    """
+    if not enabled:
+        return []
+    try:
+        settings = load_variant_settings(config)
+        if not settings["enabled"]:
+            return []
+        candidates = detect_variant_directories(
+            project_dir,
+            max_depth=settings["max_depth"],
+            policy=resolve_mine_exclusion_policy(project_dir, config),
+            globs=settings["globs"],
+        )
+        if not candidates:
+            return []
+        return format_variant_report(candidates, limit=VARIANT_ADVISORY_LIMIT)
+    except Exception:
+        return []
 
 
 def _mine_impl(
@@ -2100,12 +2228,14 @@ def _mine_impl(
     manifest_path: str = None,
     start_index: Optional[int] = None,
     progress_jsonl: str = None,
+    report_variants: bool = True,
 ):
     project_path = Path(project_dir).expanduser().resolve()
     config = load_config(project_dir)
 
     wing = wing_override or config["wing"]
     rooms = config.get("rooms", [{"name": "general", "description": "All project files"}])
+    policy = resolve_mine_exclusion_policy(project_dir, config)
     run_config = _project_run_config(
         wing=wing,
         rooms=rooms,
@@ -2127,6 +2257,7 @@ def _mine_impl(
         manifest_path=manifest_path,
         start_index=start_index,
         progress_jsonl=progress_jsonl,
+        policy=policy,
     )
     manifest_items = manifest["items"]
 
@@ -2151,6 +2282,9 @@ def _mine_impl(
         print("  .gitignore: DISABLED")
     if include_ignored:
         print(f"  Include: {', '.join(sorted(normalize_include_paths(include_ignored)))}")
+    print(f"  Exclude: {policy.summary()}")
+    for line in _variant_advisory_lines(project_dir, config, enabled=report_variants):
+        print(line)
     print(f"{'-' * 55}\n")
 
     if not dry_run:
