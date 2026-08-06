@@ -29,15 +29,6 @@ This file is the durable local index for active `mempalace` issues.
     comparable complete-identity gold baseline. Until then
     `corpusGeneration=unavailable` remains the correct live state.
 
-- [#29 - Prevent Windows WFP timeout warnings from leaking out of the CLI test](https://github.com/iMelki/mempalace/issues/29)
-  - The 2026-07-29 guarded full test lane passed, but
-    `tests/test_cli.py::test_cmd_init_no_entities` emitted Windows
-    `FWP_E_TIMEOUT` (`0x80320012`) while opening an LLM-availability request.
-    The output was warning-grade, not evidence of a retrieval failure.
-  - Fixed locally: the default-LLM unit path now injects a non-network provider,
-    while neighboring init tests opt out of LLM explicitly. Three repeated CLI
-    suites passed (`59` each) without the fatal WFP output. The next full suite
-    is the final confirmation; do not weaken firewall or security policy.
 
 - [#30 - Stabilize the official MCP client loopback integration test](https://github.com/iMelki/mempalace/issues/30)
   - A second 2026-07-29 guarded run timed out at the five-second MCP
@@ -397,6 +388,17 @@ This file is the durable local index for active `mempalace` issues.
   - Status: Open (preserved branch `agent/codex/mempalace-search-mcp-wip`).
 
 ## Recently Completed
+
+<!-- Cured 2026-08-06 via the workspace issue-state audit (projects-ops#101/#73): issue closed while listed active. -->
+- [#29 - Prevent Windows WFP timeout warnings from leaking out of the CLI test](https://github.com/iMelki/mempalace/issues/29)
+  - The 2026-07-29 guarded full test lane passed, but
+    `tests/test_cli.py::test_cmd_init_no_entities` emitted Windows
+    `FWP_E_TIMEOUT` (`0x80320012`) while opening an LLM-availability request.
+    The output was warning-grade, not evidence of a retrieval failure.
+  - Fixed locally: the default-LLM unit path now injects a non-network provider,
+    while neighboring init tests opt out of LLM explicitly. Three repeated CLI
+    suites passed (`59` each) without the fatal WFP output. The next full suite
+    is the final confirmation; do not weaken firewall or security policy.
 
 - [#13 - Restore real vector search in the MemPalace wrapper](https://github.com/iMelki/mempalace/issues/13)
   - 2026-07-07: closed after isolated current-pin proof, a 201-query
