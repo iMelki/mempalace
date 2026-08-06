@@ -30,6 +30,11 @@ Usage (standalone):
     # and names the contributing source paths (iMelki/mempalace#19):
     python -m mempalace.dedup --stats --wing coding --cross-source-duplicates --progress
 
+    # --progress covers every long pass, including the metadata page loop and
+    # the embedding-distance dry-run below (iMelki/mempalace#32). It writes to
+    # stderr only, so stdout stays a clean report channel; off by default.
+    python -m mempalace.dedup --wing coding --progress
+
 Usage (from CLI):
     mempalace dedup [--apply] [--threshold 0.15] [--stats]
 
@@ -63,6 +68,14 @@ CROSS_SOURCE_MAX_SETS = 20
 # How many contributing source paths to print per set before summarising.
 CROSS_SOURCE_MAX_PATHS = 8
 CROSS_SOURCE_SNIPPET_CHARS = 100
+# The module's OWN decoration must be ASCII. _printable() protects the arbitrary
+# user content this module prints, but the horizontal rules and arrows here were
+# literal U+2500/U+2192 and are not routed through it -- so redirecting a run
+# (`... --progress > run.log`) on a Windows host, where the redirected stream
+# defaults to cp1252, died with UnicodeEncodeError before printing a single
+# result or completion metric. A report must not depend on the console's codepage
+# to survive (iMelki/mempalace#32).
+RULE = "-" * 55
 
 
 def _get_palace_path():
@@ -75,16 +88,70 @@ def _get_palace_path():
         return os.path.join(os.path.expanduser("~"), ".mempalace", "palace")
 
 
-def get_source_groups(col, min_count=MIN_DRAWERS_TO_CHECK, source_pattern=None, wing=None):
+def _progress_tick(label, done, total):
+    """Overwrite one in-place percentage line for a long-running pass.
+
+    Progress is written to STDERR, never stdout. stdout carries the report an
+    operator (or a machine) consumes, and a percentage heartbeat interleaved
+    into it would corrupt a structured document the moment any path emits one.
+    backup_snapshot.py established this shape and stream ("Print SQLite
+    online-backup progress to stderr"); the two scans added in
+    iMelki/mempalace#33 wrote the same shape to stdout, corrected here
+    (iMelki/mempalace#32). flush=True matters: an unflushed \\r line does not
+    appear until the buffer fills, which is exactly when progress is useless.
+
+    The percentage is clamped because a denominator can legitimately exceed the
+    rows actually read -- see get_source_groups(), where a wing filter means far
+    fewer rows come back than col.count() reports.
+    """
+    if not total:
+        return
+    pct = min(100.0, done * 100.0 / total)
+    print(f"\r  {label}: {pct:5.1f}%", end="", file=sys.stderr, flush=True)
+
+
+def _progress_end(label, done, note=""):
+    """Close a progress line with the absolute count actually processed.
+
+    A trailing percentage can mislead: a wing-scoped metadata pass stops as soon
+    as Chroma runs out of matching rows, which is well below 100% of the
+    collection. The closing line states the real number, and is longer than the
+    tick it overwrites so no residue is left on a terminal.
+    """
+    suffix = f"  ({note})" if note else ""
+    print(f"\r  {label}: done, {done:,} processed{suffix}", file=sys.stderr, flush=True)
+
+
+def _format_metrics(metrics):
+    """Render a completion-metrics dict as one grep-friendly key=value line.
+
+    On-demand runs in this workspace are expected to end with duration,
+    processed/changed counts and an outcome/status rather than leaving an
+    operator to infer them from the narrative above (iMelki/mempalace#32).
+    A None value means "this pass did not run", printed as not-computed so the
+    line never implies a zero was measured.
+    """
+    return "  ".join(
+        f"{key}={'not-computed' if value is None else value}" for key, value in metrics.items()
+    )
+
+
+def get_source_groups(
+    col, min_count=MIN_DRAWERS_TO_CHECK, source_pattern=None, wing=None, progress=False
+):
     """Group drawers by source_file, return groups with min_count+ entries.
 
     If wing is specified, only considers drawers in that wing. This catches
     cross-wing duplicates when the same source was mined into multiple wings.
+
+    On a ~1M-drawer palace this page loop is itself the slow part, before any
+    duplicate work starts, so it takes `progress` too (iMelki/mempalace#32).
     """
     total = col.count()
     groups = defaultdict(list)
 
     offset = 0
+    scanned = 0
     batch_size = 1000
     while offset < total:
         kwargs = {"limit": batch_size, "offset": offset, "include": ["metadatas"]}
@@ -99,8 +166,18 @@ def get_source_groups(col, min_count=MIN_DRAWERS_TO_CHECK, source_pattern=None, 
                 continue
             groups[src].append(did)
         offset += len(batch["ids"])
+        scanned += len(batch["ids"])
+        if progress:
+            _progress_tick("metadata scan", scanned, total)
 
-    return {src: ids for src, ids in groups.items() if len(ids) >= min_count}
+    result = {src: ids for src, ids in groups.items() if len(ids) >= min_count}
+    if progress:
+        _progress_end(
+            "metadata scan",
+            scanned,
+            note=f"{len(result):,} sources with {min_count}+ drawers",
+        )
+    return result
 
 
 def get_cpu_usage():
@@ -135,11 +212,19 @@ def get_cpu_usage():
     return None
 
 
-def dedup_source_group(col, drawer_ids, threshold=DEFAULT_THRESHOLD, dry_run=True):
+def dedup_source_group(
+    col, drawer_ids, threshold=DEFAULT_THRESHOLD, dry_run=True, progress_cb=None
+):
     """Dedup drawers within one source_file group.
 
     Greedy: sort by doc length (longest first), keep if not too similar
     to any already-kept drawer. Returns (kept_ids, deleted_ids).
+
+    progress_cb, if given, is called with the number of drawers just classified
+    (always 1). The unit of work in this loop is one throttled col.query per
+    drawer, so per-drawer is the only granularity that gives an operator real
+    visibility -- a single large source can dominate an entire run, and
+    per-source reporting would sit silent through it (iMelki/mempalace#32).
     """
     data = col.get(ids=drawer_ids, include=["documents", "metadatas"])
     items = list(zip(data["ids"], data["documents"], data["metadatas"]))
@@ -149,39 +234,45 @@ def dedup_source_group(col, drawer_ids, threshold=DEFAULT_THRESHOLD, dry_run=Tru
     to_delete = []
 
     for did, doc, meta in items:
-        if not doc or len(doc) < 20:
-            to_delete.append(did)
-            continue
-
-        if not kept:
-            kept.append((did, doc))
-            continue
-
-        # Throttling to prevent CPU hogging during inner queries
-        if len(kept) % 10 == 0:
-            time.sleep(0.01)
-
+        # try/finally so the early-out branches below (empty/short documents)
+        # still report, otherwise a group of short drawers would look stalled.
         try:
-            results = col.query(
-                query_texts=[doc],
-                n_results=min(len(kept), 5),
-                include=["distances"],
-            )
-            dists = results["distances"][0] if results["distances"] else []
-            kept_ids_set = {k[0] for k in kept}
-
-            is_dup = False
-            for rid, dist in zip(results["ids"][0], dists):
-                if rid in kept_ids_set and dist < threshold:
-                    is_dup = True
-                    break
-
-            if is_dup:
+            if not doc or len(doc) < 20:
                 to_delete.append(did)
-            else:
+                continue
+
+            if not kept:
                 kept.append((did, doc))
-        except Exception:
-            kept.append((did, doc))
+                continue
+
+            # Throttling to prevent CPU hogging during inner queries
+            if len(kept) % 10 == 0:
+                time.sleep(0.01)
+
+            try:
+                results = col.query(
+                    query_texts=[doc],
+                    n_results=min(len(kept), 5),
+                    include=["distances"],
+                )
+                dists = results["distances"][0] if results["distances"] else []
+                kept_ids_set = {k[0] for k in kept}
+
+                is_dup = False
+                for rid, dist in zip(results["ids"][0], dists):
+                    if rid in kept_ids_set and dist < threshold:
+                        is_dup = True
+                        break
+
+                if is_dup:
+                    to_delete.append(did)
+                else:
+                    kept.append((did, doc))
+            except Exception:
+                kept.append((did, doc))
+        finally:
+            if progress_cb is not None:
+                progress_cb(1)
 
     if to_delete and not dry_run:
         for i in range(0, len(to_delete), 500):
@@ -218,15 +309,15 @@ def count_exact_duplicates(col, groups, progress=False):
                     continue
                 seen[hashlib.sha256(doc.encode("utf-8", "replace")).hexdigest()] += 1
             scanned += len(chunk)
-            if progress and total:
-                print(f"\r  exact-duplicate scan: {scanned * 100.0 / total:5.1f}%", end="")
+            if progress:
+                _progress_tick("exact-duplicate scan", scanned, total)
         for count in seen.values():
             if count > 1:
                 dup_groups += 1
                 redundant += count - 1
 
     if progress:
-        print()
+        _progress_end("exact-duplicate scan", scanned)
     return dup_groups, redundant
 
 
@@ -362,11 +453,11 @@ def count_cross_source_duplicates(
                     # carries the same preview as the first.
                     snippets[digest] = _doc_snippet(doc)
             scanned += len(chunk)
-            if progress and total:
-                print(f"\r  cross-source duplicate scan: {scanned * 100.0 / total:5.1f}%", end="")
+            if progress:
+                _progress_tick("cross-source duplicate scan", scanned, total)
 
     if progress:
-        print()
+        _progress_end("cross-source duplicate scan", scanned)
 
     sets_total = 0
     redundant_total = 0
@@ -486,7 +577,11 @@ def show_stats(
     progress=False,
     max_sets=CROSS_SOURCE_MAX_SETS,
 ):
-    """Show duplication statistics without making changes."""
+    """Show duplication statistics without making changes.
+
+    Returns the completion-metrics dict it also prints (see _format_metrics).
+    """
+    started = time.monotonic()
     palace_path = palace_path or _get_palace_path()
     col = ChromaBackend().get_collection(palace_path, COLLECTION_NAME)
 
@@ -507,12 +602,12 @@ def show_stats(
         # would hide exactly the duplication this mode looks for. One metadata
         # pass serves both views.
         scoped_groups = get_source_groups(
-            col, min_count=1, source_pattern=source_pattern, wing=wing
+            col, min_count=1, source_pattern=source_pattern, wing=wing, progress=progress
         )
         groups = {src: ids for src, ids in scoped_groups.items() if len(ids) >= min_count}
     else:
         groups = get_source_groups(
-            col, min_count=min_count, source_pattern=source_pattern, wing=wing
+            col, min_count=min_count, source_pattern=source_pattern, wing=wing, progress=progress
         )
 
     total_drawers = sum(len(ids) for ids in groups.values())
@@ -537,26 +632,57 @@ def show_stats(
     # print `sum(len(ids) * 0.4)` for groups > 20 as "estimated duplicates",
     # which measured nothing and implied ~36% of the palace was redundant
     # (iMelki/mempalace#33). Report a real number or none at all.
+    passes = []
+    drawers_hashed = 0
+    exact_sets = exact_redundant = None
+    cross_sets = cross_redundant = None
+
     if exact_duplicates:
-        dup_groups, redundant = count_exact_duplicates(col, groups, progress=progress)
-        print(f"\n  Exact-duplicate sets (byte-identical documents): {dup_groups:,}")
-        print(f"  Redundant drawers in those sets:                 {redundant:,}")
+        passes.append("exact")
+        exact_sets, exact_redundant = count_exact_duplicates(col, groups, progress=progress)
+        # This pass reads the document text of every drawer in `groups`.
+        drawers_hashed += total_drawers
+        print(f"\n  Exact-duplicate sets (byte-identical documents): {exact_sets:,}")
+        print(f"  Redundant drawers in those sets:                 {exact_redundant:,}")
         print("  NOTE: exact matches only. Near-duplicates need an embedding pass.")
         print("  NOTE: grouped WITHIN each source_file. Content mined from several")
-        print("        on-disk copies of one project is invisible here — use")
+        print("        on-disk copies of one project is invisible here -- use")
         print("        --cross-source-duplicates for that (iMelki/mempalace#19).")
 
     if cross_source_duplicates:
+        passes.append("cross-source")
         result = count_cross_source_duplicates(
             col, scoped_groups, progress=progress, max_sets=max_sets
         )
+        cross_sets = result["sets"]
+        cross_redundant = result["redundant"]
+        drawers_hashed += result["drawers_scanned"]
         print_cross_source_report(result)
 
-    if not exact_duplicates and not cross_source_duplicates:
+    if not passes:
         print("\n  Duplicate counts not computed (metadata-only pass).")
         print("  Re-run with --exact-duplicates for a real byte-identical count,")
         print("  --cross-source-duplicates to group identical text across source paths,")
         print("  or run without --stats for the embedding-distance dry-run preview.")
+
+    # Completion metrics for an on-demand run: duration, what was processed, and
+    # an explicit status naming which passes actually ran (iMelki/mempalace#32).
+    # Counts a pass did not compute stay None rather than 0 -- see _format_metrics.
+    metrics = {
+        "operation": "dedup-stats",
+        "outcome": "ok",
+        "status": "+".join(passes) if passes else "metadata-only",
+        "duration_seconds": round(time.monotonic() - started, 3),
+        "sources_in_scope": len(groups),
+        "drawers_in_scope": total_drawers,
+        "drawers_hashed": drawers_hashed,
+        "exact_duplicate_sets": exact_sets,
+        "exact_redundant_drawers": exact_redundant,
+        "cross_source_duplicate_sets": cross_sets,
+        "cross_source_redundant_drawers": cross_redundant,
+    }
+    print(f"\n  Metrics: {_format_metrics(metrics)}")
+    return metrics
 
 
 def dedup_palace(
@@ -566,8 +692,15 @@ def dedup_palace(
     source_pattern=None,
     min_count=MIN_DRAWERS_TO_CHECK,
     wing=None,
+    progress=False,
 ):
-    """Main entry point: deduplicate near-identical drawers across the palace."""
+    """Main entry point: deduplicate near-identical drawers across the palace.
+
+    This is the long pass: one throttled col.query per drawer. `progress` emits
+    a per-drawer heartbeat on stderr, and the run always ends with completion
+    metrics (iMelki/mempalace#32). Returns the metrics dict it also prints.
+    """
+    started = time.monotonic()
     palace_path = palace_path or _get_palace_path()
 
     print(f"\n{'=' * 55}")
@@ -580,16 +713,27 @@ def dedup_palace(
     print(f"  Drawers: {col.count():,}")
     print(f"  Threshold: {threshold}")
     print(f"  Mode: {'DRY RUN' if dry_run else 'LIVE'}")
-    print(f"{'─' * 55}")
+    print(f"{RULE}")
 
     if wing:
         print(f"  Wing: {wing}")
-    groups = get_source_groups(col, min_count, source_pattern, wing=wing)
+    groups = get_source_groups(col, min_count, source_pattern, wing=wing, progress=progress)
     print(f"\n  Sources to check: {len(groups)}")
 
-    t0 = time.time()
+    t0 = time.monotonic()
     total_kept = 0
     total_deleted = 0
+
+    drawers_in_scope = sum(len(ids) for ids in groups.values())
+    seen = {"drawers": 0}
+
+    def _drawer_progress(count):
+        seen["drawers"] += count
+        _progress_tick("embedding dedup", seen["drawers"], drawers_in_scope)
+
+    # None when progress is off, so a non-interactive run pays no per-drawer
+    # callback at all and emits nothing.
+    progress_cb = _drawer_progress if progress else None
 
     sorted_groups = sorted(groups.items(), key=lambda x: len(x[1]), reverse=True)
 
@@ -602,28 +746,39 @@ def dedup_palace(
             else:
                 time.sleep(0.1)
 
-        kept, deleted = dedup_source_group(col, drawer_ids, threshold, dry_run)
+        kept, deleted = dedup_source_group(
+            col, drawer_ids, threshold, dry_run, progress_cb=progress_cb
+        )
         total_kept += len(kept)
         total_deleted += len(deleted)
 
         if deleted:
             print(
                 f"  [{i + 1:3d}/{len(groups)}] "
-                f"{src[:50]:50s} {len(drawer_ids):4d} → {len(kept):4d}  "
+                # Mined paths are arbitrary content; a cp1252 console cannot
+                # encode all of it and must not abort the run (see _printable).
+                f"{_printable(src[:50]):50s} {len(drawer_ids):4d} -> {len(kept):4d}  "
                 f"(-{len(deleted)})"
             )
 
-    elapsed = time.time() - t0
+    elapsed = time.monotonic() - t0
+    if progress:
+        _progress_end("embedding dedup", seen["drawers"], note=f"{len(groups):,} sources")
 
-    print(f"\n{'─' * 55}")
+    palace_after = col.count()
+
+    print(f"\n{RULE}")
     print(f"  Done in {elapsed:.1f}s")
     print(
-        f"  Drawers: {total_kept + total_deleted:,} → {total_kept:,}  (-{total_deleted:,} removed)"
+        f"  Drawers: {total_kept + total_deleted:,} -> {total_kept:,}  (-{total_deleted:,} removed)"
     )
-    print(f"  Palace after: {col.count():,} drawers")
+    print(f"  Palace after: {palace_after:,} drawers")
 
     if dry_run:
         print("\n  [DRY RUN] No changes written. Re-run with --apply to delete.")
+
+    outcome = "ok"
+    warm_seconds = None
 
     if not dry_run and total_deleted:
         # Post-mutation warm (iMelki/mempalace#19): the first palace open
@@ -631,16 +786,39 @@ def dedup_palace(
         # after a 42,606-drawer dedup). Pay that cost here, at mutation time,
         # instead of ambushing the next bridge start or agent query.
         print("\n  Pre-warming palace after deletions...")
-        t_warm = time.time()
+        t_warm = time.monotonic()
         try:
             from .searcher import search_memories
 
             search_memories("warmup", palace_path, n_results=1)
-            print(f"  Palace warm in {time.time() - t_warm:.1f}s")
+            warm_seconds = round(time.monotonic() - t_warm, 3)
+            print(f"  Palace warm in {warm_seconds:.1f}s")
         except Exception as e:
             print(f"  Warm warning (non-fatal): {e}")
+            # A skipped warm is not a failed dedup, but it is not a clean run
+            # either: the next reader pays the cost this pass was meant to absorb.
+            outcome = "ok-with-warnings"
+
+    # Completion metrics for an on-demand run (iMelki/mempalace#32). flagged vs
+    # removed is the load-bearing distinction: a dry-run identifies candidates
+    # and changes nothing, so drawers_removed is 0 until --apply.
+    metrics = {
+        "operation": "dedup",
+        "outcome": outcome,
+        "status": "dry-run" if dry_run else "applied",
+        "duration_seconds": round(time.monotonic() - started, 3),
+        "sources_processed": len(groups),
+        "drawers_processed": total_kept + total_deleted,
+        "drawers_kept": total_kept,
+        "drawers_flagged": total_deleted,
+        "drawers_removed": 0 if dry_run else total_deleted,
+        "palace_drawers_after": palace_after,
+        "warm_seconds": warm_seconds,
+    }
+    print(f"\n  Metrics: {_format_metrics(metrics)}")
 
     print(f"{'=' * 55}\n")
+    return metrics
 
 
 if __name__ == "__main__":
@@ -692,7 +870,10 @@ if __name__ == "__main__":
     parser.add_argument(
         "--progress",
         action="store_true",
-        help="Print incremental progress during long scans",
+        help="Print incremental progress during long passes: the metadata page "
+        "loop, the hash scans, and the embedding-distance dry-run. Written to "
+        "stderr only, so stdout stays a clean report channel. Off by default, so "
+        "non-interactive callers and tests are unaffected.",
     )
     args = parser.parse_args()
 
@@ -731,4 +912,5 @@ if __name__ == "__main__":
             dry_run=not args.apply,
             source_pattern=args.source,
             wing=args.wing,
+            progress=args.progress,
         )

@@ -10,6 +10,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **`dedup --progress` now covers every long pass, and every dedup run ends with
+  completion metrics (#32).** `--progress` previously only instrumented the
+  exact-duplicate content scan, leaving the two passes an operator actually
+  waits on silent. Both are covered now:
+
+  - the metadata pass (`get_source_groups()`), whose 1000-row page loop is
+    itself the slow part on a ~1M-drawer palace, *before* any duplicate work
+    starts;
+  - the embedding-distance dry-run (`dedup_palace()` /
+    `dedup_source_group()`), which runs one throttled `col.query` per drawer.
+    Its heartbeat is per drawer, not per source, because a single large source
+    can dominate an entire run and per-source reporting would sit silent
+    through it. This is the pass that precedes any `--apply`, so it is the one
+    that most needed visibility.
+
+  Every run now also prints a one-line `Metrics:` summary — duration, an
+  outcome, a status, and processed/changed counts — which both entry points also
+  return as a dict for programmatic callers. `drawers_flagged` and
+  `drawers_removed` are reported separately, so a dry-run states what it found
+  while being explicit that it changed nothing (`drawers_removed=0` until
+  `--apply`); a count no pass computed prints as `not-computed` rather than `0`.
+  A failed post-mutation warm downgrades the outcome to `ok-with-warnings`
+  instead of passing silently.
+
+  Progress is opt-in and off by default, and is written to **stderr only** —
+  matching `backup_snapshot.py`, and keeping stdout a clean report channel so a
+  heartbeat can never interleave into a structured document. The two scans added
+  in #33 wrote the same shape to stdout and were moved to stderr.
+
 - **Mining declines generated and vendored content, and reports backup/variant
   directory candidates (#36).** A `wing=coding` audit found ~6,900+ drawers of
   machine-generated `pnpm-lock.yaml` chunks and one project ingested from five
@@ -49,6 +78,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   [`docs/MINE_EXCLUSIONS.md`](docs/MINE_EXCLUSIONS.md).
 
 ### Fixed
+
+- **A redirected `dedup` run no longer dies on the module's own decoration
+  (#32).** `_printable()` protected the arbitrary user content dedup prints, but
+  was never applied to dedup's own literals: the horizontal rules and `->`
+  arrows were literal `U+2500`/`U+2192`. Redirecting a run to a file on Windows
+  (`python -m mempalace.dedup --progress > run.log`) gives a cp1252 stream, so
+  the dry-run path aborted with `UnicodeEncodeError` immediately after the
+  header — before a single result line and before the completion metrics. The
+  module's own decoration is now ASCII, and an AST-level test asserts no printed
+  literal in `dedup.py` needs a non-ASCII codepage. Found by running the real
+  entry point with redirected streams, which `capsys` does not reproduce.
 
 - **`dedup --stats` no longer dies on drawer text a cp1252 console cannot
   encode.** A live cross-source audit aborted with `UnicodeEncodeError` while

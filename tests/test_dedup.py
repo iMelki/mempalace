@@ -1,5 +1,6 @@
 """Tests for mempalace.dedup — near-duplicate drawer detection and removal."""
 
+import re
 import sys
 from unittest.mock import MagicMock, patch
 
@@ -279,7 +280,10 @@ def test_show_stats_emits_no_fabricated_estimate(
     out = capsys.readouterr().out
 
     assert "Estimated duplicates" not in out
-    assert "40" not in out.replace("40 ", "")  # no 0.4-derived figure (100 * 0.4)
+    # no 0.4-derived figure (100 * 0.4 = 40). Matched on a word boundary so an
+    # unrelated number in the metrics line (e.g. a 0.405s duration) cannot make
+    # this flake, while a literal "40" duplicate claim still fails it.
+    assert not re.search(r"\b40\b", out)
     assert "not computed" in out
 
 
@@ -449,10 +453,13 @@ def test_count_cross_source_duplicates_emits_progress(capsys):
     col.get.side_effect = _docs_by_id({"1": "x", "2": "x"})
 
     dedup.count_cross_source_duplicates(col, {"a": ["1"], "b": ["2"]}, progress=True)
-    out = capsys.readouterr().out
+    captured = capsys.readouterr()
 
-    assert "cross-source duplicate scan:" in out
-    assert "100.0%" in out
+    # stderr, not stdout: stdout is the report channel (iMelki/mempalace#32)
+    assert "cross-source duplicate scan:" in captured.err
+    assert "100.0%" in captured.err
+    assert "done, 2 processed" in captured.err
+    assert "cross-source duplicate scan" not in captured.out
 
 
 def test_count_cross_source_duplicates_max_sets_bounds_output_not_counts():
@@ -925,7 +932,7 @@ def test_dedup_palace_with_wing(mock_backend_cls, mock_groups, mock_dedup_group,
 
     mock_groups.return_value = {}
     dedup.dedup_palace(palace_path=str(tmp_path), wing="test_wing", dry_run=True)
-    mock_groups.assert_called_once_with(mock_col, 5, None, wing="test_wing")
+    mock_groups.assert_called_once_with(mock_col, 5, None, wing="test_wing", progress=False)
 
 
 @patch("mempalace.dedup.dedup_source_group")
@@ -997,3 +1004,418 @@ def test_live_dedup_prewarns_palace_after_deletions(monkeypatch, capsys):
     calls.clear()
     dedup.dedup_palace(palace_path="X:/fake-palace", dry_run=True)
     assert not calls
+
+
+# ── progress on every long pass (iMelki/mempalace#32) ─────────────────
+#
+# #33 added --progress for the exact-duplicate content scan only. The metadata
+# page loop and the embedding-distance dry-run — the pass that precedes any
+# --apply, and the genuinely long one — stayed silent. These tests pin all of
+# them, the stderr-only stream, and the off-by-default behaviour.
+
+
+def _metadata_col(count, pages):
+    """A collection whose paged get() returns `pages` of (id, source) rows."""
+    col = MagicMock()
+    col.count.return_value = count
+    col.get.side_effect = [
+        {
+            "ids": [did for did, _ in page],
+            "metadatas": [{"source_file": src} for _, src in page],
+        }
+        for page in pages
+    ]
+    return col
+
+
+def test_get_source_groups_emits_page_loop_progress_to_stderr(capsys):
+    """Gap 1: on a ~1M-drawer palace this loop is the slow part before any
+    duplicate work starts, so it needs its own heartbeat."""
+    col = _metadata_col(3, [[("d1", "a"), ("d2", "a"), ("d3", "a")]])
+
+    dedup.get_source_groups(col, min_count=1, progress=True)
+    captured = capsys.readouterr()
+
+    assert "metadata scan:" in captured.err
+    assert "100.0%" in captured.err
+    assert "done, 3 processed" in captured.err
+    assert "1 sources with 1+ drawers" in captured.err
+    assert captured.out == ""  # stdout stays a clean report channel
+
+
+def test_get_source_groups_is_silent_by_default(capsys):
+    """Non-interactive callers and tests must be unaffected."""
+    col = _metadata_col(3, [[("d1", "a"), ("d2", "a"), ("d3", "a")]])
+
+    dedup.get_source_groups(col, min_count=1)
+    captured = capsys.readouterr()
+
+    assert captured.err == ""
+    assert captured.out == ""
+
+
+def test_get_source_groups_progress_clamps_a_wing_scoped_denominator(capsys):
+    """The denominator is col.count() (whole collection) while a wing `where`
+    clause returns far fewer rows, so the loop ends well below 100%. The closing
+    line must still state the real number rather than a misleading percentage."""
+    col = MagicMock()
+    col.count.return_value = 1000
+    col.get.side_effect = [
+        {"ids": ["d1", "d2"], "metadatas": [{"source_file": "a"}, {"source_file": "a"}]},
+        {"ids": []},
+    ]
+
+    dedup.get_source_groups(col, min_count=1, wing="coding", progress=True)
+    err = capsys.readouterr().err
+
+    assert "  0.2%" in err  # 2 of 1000, not clamped up to 100
+    assert "done, 2 processed" in err
+
+
+def test_dedup_source_group_reports_progress_once_per_drawer():
+    """Gap 2, inner loop: the unit of work is one col.query per drawer, and the
+    empty/short-document early-outs must report too or a group of short drawers
+    would look stalled."""
+    col = MagicMock()
+    col.get.return_value = {
+        "ids": ["d1", "d2", "d3"],
+        "documents": ["a document body long enough to survive", "short", ""],
+        "metadatas": [{}, {}, {}],
+    }
+    col.query.return_value = {"ids": [["d1"]], "distances": [[0.9]]}
+    ticks = []
+
+    kept, deleted = dedup.dedup_source_group(
+        col, ["d1", "d2", "d3"], dry_run=True, progress_cb=ticks.append
+    )
+
+    assert ticks == [1, 1, 1]  # one per drawer, including both early-outs
+    assert (kept, deleted) == (["d1"], ["d2", "d3"])
+
+
+def test_dedup_source_group_needs_no_callback():
+    col = MagicMock()
+    col.get.return_value = {
+        "ids": ["d1"],
+        "documents": ["a document body long enough to survive"],
+        "metadatas": [{}],
+    }
+    kept, deleted = dedup.dedup_source_group(col, ["d1"], dry_run=True)
+    assert (kept, deleted) == (["d1"], [])
+
+
+@patch("mempalace.dedup.get_source_groups")
+@patch("mempalace.dedup.ChromaBackend")
+def test_dedup_palace_emits_per_drawer_progress_to_stderr(
+    mock_backend_cls, mock_groups, tmp_path, capsys
+):
+    """Gap 2, outer loop: the real dedup_source_group is driven here, so this
+    proves the callback dedup_palace supplies actually fires per drawer."""
+    mock_col = MagicMock()
+    mock_col.count.return_value = 2
+    mock_col.get.return_value = {
+        "ids": ["d1", "d2"],
+        "documents": ["a document body long enough to survive", "another distinct body, also long"],
+        "metadatas": [{}, {}],
+    }
+    mock_col.query.return_value = {"ids": [["d1"]], "distances": [[0.9]]}
+    _install_mock_backend(mock_backend_cls, mock_col)
+    mock_groups.return_value = {"a.txt": ["d1", "d2"]}
+
+    dedup.dedup_palace(palace_path=str(tmp_path), dry_run=True, progress=True)
+    captured = capsys.readouterr()
+
+    assert "embedding dedup:" in captured.err
+    assert "100.0%" in captured.err
+    assert "done, 2 processed" in captured.err
+    assert "1 sources" in captured.err
+    assert "embedding dedup" not in captured.out
+
+
+@patch("mempalace.dedup.dedup_source_group")
+@patch("mempalace.dedup.get_source_groups")
+@patch("mempalace.dedup.ChromaBackend")
+def test_dedup_palace_is_silent_by_default(
+    mock_backend_cls, mock_groups, mock_dedup_group, tmp_path, capsys
+):
+    mock_col = MagicMock()
+    mock_col.count.return_value = 5
+    _install_mock_backend(mock_backend_cls, mock_col)
+    mock_groups.return_value = {"a.txt": ["d1", "d2"]}
+    mock_dedup_group.return_value = (["d1"], ["d2"])
+
+    dedup.dedup_palace(palace_path=str(tmp_path), dry_run=True)
+
+    assert capsys.readouterr().err == ""
+    # the per-drawer callback is not even constructed when progress is off
+    assert mock_dedup_group.call_args.kwargs["progress_cb"] is None
+
+
+@patch("mempalace.dedup.dedup_source_group")
+@patch("mempalace.dedup.get_source_groups")
+@patch("mempalace.dedup.ChromaBackend")
+def test_dedup_palace_threads_progress_into_the_metadata_pass(
+    mock_backend_cls, mock_groups, mock_dedup_group, tmp_path
+):
+    """The dry-run path must also get the Gap 1 heartbeat, not just the stats path."""
+    mock_col = MagicMock()
+    mock_col.count.return_value = 0
+    _install_mock_backend(mock_backend_cls, mock_col)
+    mock_groups.return_value = {}
+
+    dedup.dedup_palace(palace_path=str(tmp_path), dry_run=True, progress=True)
+
+    assert mock_groups.call_args.kwargs["progress"] is True
+
+
+@patch("mempalace.dedup.get_source_groups")
+@patch("mempalace.dedup.ChromaBackend")
+def test_show_stats_threads_progress_into_the_metadata_pass(
+    mock_backend_cls, mock_get_groups, tmp_path
+):
+    _install_mock_backend(mock_backend_cls, MagicMock())
+    mock_get_groups.return_value = {"a.txt": ["d1", "d2"]}
+
+    dedup.show_stats(palace_path=str(tmp_path), progress=True)
+
+    assert mock_get_groups.call_args.kwargs["progress"] is True
+
+
+def test_progress_never_writes_to_stdout_on_any_hash_scan(capsys):
+    """Requirement from #32: a progress write must not be able to corrupt a
+    stdout document. Every scan is asserted, not only the newest one, and the
+    two scans shipped in #33 (which printed to stdout) are included."""
+    col = MagicMock()
+    col.get.return_value = {"documents": ["x", "x"]}
+    dedup.count_exact_duplicates(col, {"s": ["1", "2"]}, progress=True)
+    captured = capsys.readouterr()
+    assert "exact-duplicate scan" in captured.err
+    assert captured.out == ""
+
+    col = MagicMock()
+    col.get.side_effect = _docs_by_id({"1": "x", "2": "x"})
+    dedup.count_cross_source_duplicates(col, {"a": ["1"], "b": ["2"]}, progress=True)
+    captured = capsys.readouterr()
+    assert "cross-source duplicate scan" in captured.err
+    assert captured.out == ""
+
+
+def test_progress_tick_and_end_are_no_ops_without_a_total(capsys):
+    """A zero-drawer scope must not divide by zero or print a fake percentage."""
+    dedup._progress_tick("scan", 0, 0)
+    assert capsys.readouterr().err == ""
+
+    dedup._progress_end("scan", 0)
+    assert "done, 0 processed" in capsys.readouterr().err
+
+
+# ── completion metrics for on-demand runs (iMelki/mempalace#32) ───────
+
+
+def test_format_metrics_renders_a_missing_measurement_as_not_computed():
+    """None must never render as 0: a pass that did not run measured nothing."""
+    line = dedup._format_metrics({"outcome": "ok", "sets": None, "drawers": 0})
+    assert line == "outcome=ok  sets=not-computed  drawers=0"
+
+
+@patch("mempalace.dedup.dedup_source_group")
+@patch("mempalace.dedup.get_source_groups")
+@patch("mempalace.dedup.ChromaBackend")
+def test_dedup_palace_dry_run_metrics_report_flagged_not_removed(
+    mock_backend_cls, mock_groups, mock_dedup_group, tmp_path, capsys
+):
+    """Gap 3: the dry-run is the pass that precedes --apply, so it must state
+    what it FOUND while being explicit that it changed nothing."""
+    mock_col = MagicMock()
+    mock_col.count.return_value = 10
+    _install_mock_backend(mock_backend_cls, mock_col)
+    mock_groups.return_value = {"a.txt": ["d1", "d2", "d3", "d4", "d5"]}
+    mock_dedup_group.return_value = (["d1", "d2", "d3"], ["d4", "d5"])
+
+    metrics = dedup.dedup_palace(palace_path=str(tmp_path), dry_run=True)
+
+    assert metrics["operation"] == "dedup"
+    assert metrics["outcome"] == "ok"
+    assert metrics["status"] == "dry-run"
+    assert metrics["sources_processed"] == 1
+    assert metrics["drawers_processed"] == 5
+    assert metrics["drawers_kept"] == 3
+    assert metrics["drawers_flagged"] == 2
+    assert metrics["drawers_removed"] == 0  # nothing was deleted
+    assert metrics["palace_drawers_after"] == 10
+    assert metrics["duration_seconds"] >= 0
+    assert metrics["warm_seconds"] is None
+
+    out = capsys.readouterr().out
+    assert "status=dry-run" in out
+    assert "drawers_flagged=2" in out
+    assert "drawers_removed=0" in out
+    assert "duration_seconds=" in out
+
+
+def _fake_palace(monkeypatch, drawer_count=2, warm=None):
+    """dedup_palace wired to fakes, with a controllable post-deletion warm."""
+
+    class _FakeCol:
+        def count(self):
+            return drawer_count
+
+    class _FakeBackend:
+        def get_collection(self, *a, **k):
+            return _FakeCol()
+
+    import mempalace.searcher as searcher
+
+    monkeypatch.setattr(searcher, "search_memories", warm or (lambda *a, **k: {"results": []}))
+    monkeypatch.setattr(dedup, "ChromaBackend", lambda: _FakeBackend())
+    monkeypatch.setattr(dedup, "get_source_groups", lambda *a, **k: {"src.md": ["d1", "d2"]})
+    monkeypatch.setattr(dedup, "dedup_source_group", lambda *a, **k: (["d1"], ["d2"]))
+
+
+def test_dedup_palace_apply_metrics_report_real_removals(monkeypatch, capsys):
+    _fake_palace(monkeypatch)
+
+    metrics = dedup.dedup_palace(palace_path="X:/fake-palace", dry_run=False)
+
+    assert metrics["status"] == "applied"
+    assert metrics["outcome"] == "ok"
+    assert metrics["drawers_flagged"] == 1
+    assert metrics["drawers_removed"] == 1  # --apply: flagged became removed
+    assert metrics["warm_seconds"] is not None  # the post-mutation warm is timed
+    assert "status=applied" in capsys.readouterr().out
+
+
+def test_dedup_palace_metrics_flag_a_failed_post_mutation_warm(monkeypatch, capsys):
+    """A skipped warm is not a failed dedup, but the run is not clean either:
+    the next reader pays the cost this pass was meant to absorb."""
+
+    def _boom(*a, **k):
+        raise RuntimeError("palace unavailable")
+
+    _fake_palace(monkeypatch, warm=_boom)
+
+    metrics = dedup.dedup_palace(palace_path="X:/fake-palace", dry_run=False)
+
+    assert metrics["outcome"] == "ok-with-warnings"
+    assert metrics["drawers_removed"] == 1
+    assert metrics["warm_seconds"] is None
+    assert "outcome=ok-with-warnings" in capsys.readouterr().out
+
+
+@patch("mempalace.dedup.get_source_groups")
+@patch("mempalace.dedup.ChromaBackend")
+def test_show_stats_metadata_only_metrics_measure_nothing_honestly(
+    mock_backend_cls, mock_get_groups, tmp_path, capsys
+):
+    _install_mock_backend(mock_backend_cls, MagicMock())
+    mock_get_groups.return_value = {"a.txt": ["d1", "d2"]}
+
+    metrics = dedup.show_stats(palace_path=str(tmp_path))
+
+    assert metrics["operation"] == "dedup-stats"
+    assert metrics["status"] == "metadata-only"
+    assert metrics["sources_in_scope"] == 1
+    assert metrics["drawers_in_scope"] == 2
+    assert metrics["drawers_hashed"] == 0
+    assert metrics["exact_duplicate_sets"] is None
+    assert metrics["cross_source_duplicate_sets"] is None
+    assert metrics["duration_seconds"] >= 0
+
+    out = capsys.readouterr().out
+    assert "status=metadata-only" in out
+    assert "exact_duplicate_sets=not-computed" in out
+
+
+@patch("mempalace.dedup.ChromaBackend")
+def test_show_stats_metrics_name_every_pass_that_ran(mock_backend_cls, tmp_path, capsys):
+    """Both hash passes read different drawer sets, so their counts stay separate
+    and drawers_hashed is the total actually read."""
+    mock_col = MagicMock()
+    mock_col.get.side_effect = _docs_by_id({"d1": "same", "d2": "same", "d3": "same"})
+    _install_mock_backend(mock_backend_cls, mock_col)
+
+    groups = {"a.txt": ["d1", "d2"], "b.txt": ["d3"]}
+    with patch.object(dedup, "get_source_groups", return_value=groups):
+        metrics = dedup.show_stats(
+            palace_path=str(tmp_path),
+            min_count=2,
+            exact_duplicates=True,
+            cross_source_duplicates=True,
+        )
+
+    assert metrics["status"] == "exact+cross-source"
+    assert metrics["exact_duplicate_sets"] == 1  # only a.txt's pair
+    assert metrics["exact_redundant_drawers"] == 1
+    assert metrics["cross_source_duplicate_sets"] == 1  # all three merge
+    assert metrics["cross_source_redundant_drawers"] == 2
+    assert metrics["drawers_hashed"] == 5  # 2 intra-source + 3 cross-source
+
+    assert "status=exact+cross-source" in capsys.readouterr().out
+
+
+# ── a redirected run must reach its metrics (iMelki/mempalace#32) ──────
+
+
+def test_dedup_palace_survives_a_cp1252_stdout(monkeypatch):
+    """Regression: `python -m mempalace.dedup --progress > run.log` on Windows
+    redirects stdout to a cp1252 stream, and this module's own literal U+2500
+    rules and U+2192 arrows are not routed through _printable(), so the run died
+    with UnicodeEncodeError after the header — before a single result line and
+    before the completion metrics. Found by running the real CLI with redirected
+    streams, which capsys does not reproduce."""
+    _fake_palace(monkeypatch)
+    buf, stream = _cp1252_stdout(monkeypatch)
+
+    metrics = dedup.dedup_palace(palace_path="X:/fake-palace", dry_run=True, progress=True)
+
+    stream.flush()
+    out = buf.getvalue().decode("cp1252")
+
+    assert metrics["status"] == "dry-run"
+    assert "src.md" in out  # the per-source line, which carries the arrow
+    assert "Metrics: operation=dedup" in out  # the run reached its own end
+    assert "[DRY RUN] No changes written" in out
+
+
+def test_show_stats_notes_survive_a_cp1252_stdout(monkeypatch):
+    """The --exact-duplicates NOTE block held a literal em dash."""
+    mock_col = MagicMock()
+    mock_col.get.return_value = {"documents": ["same", "same"]}
+    backend = MagicMock()
+    backend.get_collection.return_value = mock_col
+    monkeypatch.setattr(dedup, "ChromaBackend", lambda: backend)
+    monkeypatch.setattr(dedup, "get_source_groups", lambda *a, **k: {"a.txt": ["d1", "d2"]})
+
+    buf, stream = _cp1252_stdout(monkeypatch)
+    metrics = dedup.show_stats(palace_path="X:/fake-palace", exact_duplicates=True)
+
+    stream.flush()
+    out = buf.getvalue().decode("cp1252")
+
+    assert metrics["exact_duplicate_sets"] == 1
+    assert "--cross-source-duplicates for that" in out
+    assert "Metrics: operation=dedup-stats" in out
+
+
+def test_no_printed_literal_requires_a_non_ascii_codepage():
+    """Generic guard so the crash above cannot come back through a new print.
+
+    _printable() sanitizes the arbitrary user content this module prints, but it
+    is never applied to the module's own literals, so those must be ASCII. Walks
+    the AST rather than the raw text so f-string fragments are covered too.
+    """
+    import ast
+    import io
+
+    source = io.open(dedup.__file__, encoding="utf-8").read()
+    offenders = []
+    for node in ast.walk(ast.parse(source)):
+        if not (isinstance(node, ast.Call) and getattr(node.func, "id", None) == "print"):
+            continue
+        for part in ast.walk(node):
+            if isinstance(part, ast.Constant) and isinstance(part.value, str):
+                if not part.value.isascii():
+                    offenders.append((part.lineno, part.value))
+
+    assert offenders == []
+    assert dedup.RULE.isascii()  # the shared horizontal rule, used via a constant
