@@ -1,10 +1,15 @@
 name: Tests
 
 on:
+  # `develop` has been stale since 2026-05-12 while all work happens on `dev`, so
+  # these filters meant NOTHING ran on a dev push -- 31 commits accumulated with no
+  # CI between 2026-07-14 and 2026-08-06. The repository default branch was also
+  # still `develop`, which is why `origin/HEAD` kept resolving there; that has been
+  # changed to `main`. See iMelki/mempalace#34.
   push:
-    branches: [main, develop]
+    branches: [main, dev]
   pull_request:
-    branches: [main, develop]
+    branches: [main, dev]
 
 jobs:
   test-linux:
