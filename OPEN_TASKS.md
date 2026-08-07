@@ -1,6 +1,6 @@
 # MemPalace Open Tasks
 
-Last updated: 2026-08-06
+Last updated: 2026-08-08
 
 This file is the durable local index for active `mempalace` issues.
 
@@ -307,8 +307,24 @@ This file is the durable local index for active `mempalace` issues.
     duplicates stays under #19 and remains gated on a real offsite backup.
 
 - [#19 - Audit likely duplicate drawers surfaced by #13 probe](https://github.com/iMelki/mempalace/issues/19)
-  - Status: open go/no-go decision. This is a duplicate-drawer audit and
-    dedupe safety lane, not a live deletion approval.
+  - Status: open. Operator decision made (2026-08-07, same-filename-only
+    scope); apply path built and tested; NOT applied to the live palace.
+  - **Operator policy decision (2026-08-07):** any cleanup touches ONLY the
+    8,145 same-filename cross-source sets (21,017 redundant drawers). The 256
+    mixed-filename shared-boilerplate sets are PERMANENTLY out of scope for
+    deletion.
+  - **Apply path shipped (built, not run):** `plan_same_filename_deletions()` +
+    `check_backup_freshness()` + `apply_same_filename_dedup()` in `dedup.py`,
+    CLI `--same-filename-cleanup [--apply-same-filename]`. Dry-run is the
+    default; live deletion additionally requires a code-enforced
+    backup-freshness gate (new — `dedup_palace()`'s equivalent requirement was
+    previously documentation-only). 45 new tests in `tests/test_dedup.py`.
+  - **Not applied.** `check_backup_freshness()` against this workspace's real
+    `~/.mempalace/backups` returns `ok=false` right now: all 6 local archives
+    have `offsite.status: "pending"` (agent-settings#457, offsite backup, is
+    still in progress). That refusal is proven in the test suite, not worked
+    around. Operator command once the gate clears:
+    `python -m mempalace.dedup --same-filename-cleanup --apply-same-filename --wing coding`
   - Retracted evidence: the old `--stats` "estimated duplicates" figure
     (292,998, later 367,462) was `count * 0.4` over large source groups with no
     content comparison at all. It measured nothing and must not be cited. Fixed

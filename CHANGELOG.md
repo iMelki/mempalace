@@ -10,6 +10,50 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Same-filename-only cross-source dedup APPLY path, built but not applied (#19).**
+  The 2026-08-06 cross-source audit measured 8,145 duplicate sets (21,017 redundant
+  drawers on the coding wing) where every contributing drawer's source_file shares
+  one filename — the copied-directory signature. The operator approved cleanup of
+  exactly that scope (2026-08-07) and PERMANENTLY excluded the other 256 sets, where
+  different filenames merely share a boilerplate chunk. This ships the delete path
+  for that decision:
+
+  - `plan_same_filename_deletions()` hashes document text across the scoped set
+    (like `count_cross_source_duplicates()`, but keeping drawer ids) and builds a
+    deletion candidate list. A digest's set is a candidate **only if** it spans 2+
+    distinct source paths **and** every one of those paths reduces to the same
+    basename. There is no parameter anywhere in this call chain that can widen that
+    filter — no "force" or "include mixed filenames" switch, even under `--apply`.
+    Within a qualifying set, one drawer is kept per `dedup_source_group()`'s
+    keep-longest convention (all entries tie on length, since byte-identical
+    content is why they hashed together, so the deterministic tiebreak is lowest
+    drawer id).
+  - `check_backup_freshness()` is a new, code-enforced precondition:
+    `dedup_palace()`'s docstring has always *described* a 2-day-backup requirement
+    (iMelki/mempalace#19) without ever *checking* it — the 2026-07-05 incident
+    happened with that requirement stated and unenforced. It reads
+    `<backup_dir>/palace-*.tar.gz.receipt.json` generation receipts (schema
+    `knowledge-backup-generation-receipt.v1`, iMelki/agent-settings#456) and only
+    counts a backup as usable if creation, structural validation, offsite copy,
+    and disposable restore are all verified, the run terminated cleanly, and the
+    receipt is within the age window (default 2 days). Fails closed on any
+    missing/unreadable/stale/unverified receipt.
+  - `apply_same_filename_dedup()` wires it together: dry-run is the unconditional
+    default; live deletion requires `dry_run=False` (CLI: `--same-filename-cleanup
+    --apply-same-filename`) **and** a passing `check_backup_freshness()`. A blocked
+    gate is reported (reason + per-archive problems), not silently skipped, and
+    still returns the full plan it would have applied. A successful live run
+    auto-warms the palace afterward, same as `dedup --apply`.
+  - **Not run against the live palace.** `check_backup_freshness()` against this
+    workspace's real `~/.mempalace/backups` right now reports `ok=false`: all 6
+    local archives have `offsite.status: "pending"` (offsite backup is gated
+    behind agent-settings#457, still in progress). That refusal is demonstrated in
+    `tests/test_dedup.py` as proof the gate works, not worked around.
+  - 45 new tests in `tests/test_dedup.py`, including a fixture with both a
+    same-filename set and a mixed-filename set that asserts only the former is
+    ever a deletion candidate, dry-run-by-default, the backup gate blocking a
+    live run, and keep-longest/deterministic tie-break selection.
+
 - **`dedup --progress` now covers every long pass, and every dedup run ends with
   completion metrics (#32).** `--progress` previously only instrumented the
   exact-duplicate content scan, leaving the two passes an operator actually

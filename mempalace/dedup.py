@@ -35,19 +35,39 @@ Usage (standalone):
     # stderr only, so stdout stays a clean report channel; off by default.
     python -m mempalace.dedup --wing coding --progress
 
+    # Operator policy decision (2026-08-07, iMelki/mempalace#19): the ONLY
+    # dedup mutation this repo will build a delete path for is same-filename
+    # cross-source sets -- one file mined from several on-disk copies of a
+    # project. Mixed-filename sets that merely share a boilerplate chunk
+    # (e.g. 10 CSS skins sharing one header) are PERMANENTLY out of scope for
+    # deletion and are structurally unreachable from this mode. Preview first
+    # (the default), then apply once a fresh known-good, offsite-verified
+    # backup exists (checked automatically; see check_backup_freshness()):
+    python -m mempalace.dedup --same-filename-cleanup --wing coding --progress
+    python -m mempalace.dedup --same-filename-cleanup --apply-same-filename --wing coding
+
 Usage (from CLI):
     mempalace dedup [--apply] [--threshold 0.15] [--stats]
 
 Safety: bare invocation is a dry-run preview. Live deletion requires an
 explicit --apply, a palace backup from the last 2 days, and (for bulk runs)
-an operator-approved window — see iMelki/mempalace#19.
+an operator-approved window — see iMelki/mempalace#19. The same-filename
+cleanup path (--same-filename-cleanup) additionally checks that backup
+freshness in code via check_backup_freshness() before --apply-same-filename
+is allowed to delete anything -- see that function's docstring for exactly
+what "fresh" means and iMelki/mempalace#19's operator-decision comment for
+why the scope is same-filename-only.
 """
 
 import argparse
+import glob
+import json
 import os
+import re
 import sys
 import time
 from collections import Counter, defaultdict
+from datetime import datetime, timezone
 
 from .backends.chroma import ChromaBackend
 
@@ -76,6 +96,21 @@ CROSS_SOURCE_SNIPPET_CHARS = 100
 # result or completion metric. A report must not depend on the console's codepage
 # to survive (iMelki/mempalace#32).
 RULE = "-" * 55
+
+# ── same-filename-only cross-source APPLY path (iMelki/mempalace#19) ──────
+# Operator policy decision, 2026-08-07: any dedup cleanup touches ONLY
+# duplicate sets where EVERY contributing drawer's source_file resolves to
+# the SAME basename -- one file mined from several on-disk copies of a
+# project (8,145 such sets / 21,017 redundant drawers measured on the coding
+# wing). The 256 sets where DIFFERENT filenames happen to share an identical
+# chunk (e.g. 10 CSS skins sharing a header) are PERMANENTLY out of scope for
+# deletion; see plan_same_filename_deletions() for the structural filter.
+BACKUP_RECEIPT_SCHEMA = "knowledge-backup-generation-receipt.v1"
+BACKUP_ARCHIVE_GLOB = "palace-*.tar.gz"
+DEFAULT_BACKUP_MAX_AGE_DAYS = 2
+DEFAULT_BACKUP_DIR = os.path.join(os.path.expanduser("~"), ".mempalace", "backups")
+# Fractional-second component of an ISO-8601 timestamp, for _parse_iso8601().
+_FRACTIONAL_SECONDS_RE = re.compile(r"(\.\d+)")
 
 
 def _get_palace_path():
@@ -567,6 +602,492 @@ def print_cross_source_report(result, max_paths=CROSS_SOURCE_MAX_PATHS):
     print("        that is still stored N times, but it is not a copied-directory artifact.")
 
 
+# ── same-filename-only cross-source APPLY path (iMelki/mempalace#19) ──────
+#
+# Everything above this line (count_cross_source_duplicates,
+# print_cross_source_report) is the read-only audit mode from #19: it counts,
+# it never deletes, and it deliberately never picks a canonical copy. This
+# section is the thing that audit was missing -- an actual, tested, gated
+# deletion path -- built strictly to the operator policy decision recorded on
+# #19 (2026-08-07): ONLY same-filename cross-source sets are ever eligible.
+# Mixed-filename sets (shared boilerplate across distinct files) are excluded
+# by construction in plan_same_filename_deletions(), with no parameter of any
+# kind that widens that scope -- there is no "force" or "include mixed"
+# switch to bypass it, on this function or on apply_same_filename_dedup().
+
+
+def _parse_iso8601(value):
+    """Tolerant ISO-8601 -> aware UTC datetime, for backup receipt timestamps.
+
+    Real generation receipts come from at least two writers this function
+    must both understand: this repo's own `generatedAt` convention
+    (`datetime.now(timezone.utc).replace(microsecond=0).isoformat()` with a
+    trailing "Z", see backup_snapshot._utc_now()) and .NET's round-trip "o"
+    format used by the agent-settings backup pipeline that actually produces
+    `<archive>.tar.gz.receipt.json` -- which always emits 7-digit fractional
+    seconds and an explicit "+00:00" offset, e.g.
+    "2026-07-12T01:20:49.7912623+00:00". `datetime.fromisoformat()` on the
+    oldest CI-tested interpreter (3.9) accepts only 0, 3, or 6 fractional
+    digits and does not understand a trailing "Z" at all (that arrived in
+    3.11), so both quirks are normalized here instead of assumed away. Raises
+    ValueError on anything it cannot parse; callers treat that as an invalid
+    receipt, never as "fresh enough".
+    """
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+
+    def _pad_to_six(match):
+        digits = (match.group(1)[1:] + "000000")[:6]
+        return "." + digits
+
+    text = _FRACTIONAL_SECONDS_RE.sub(_pad_to_six, text, count=1)
+    parsed = datetime.fromisoformat(text)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _receipt_is_known_good(receipt):
+    """Same "knownGood" proof set as agent-settings'
+    Get-KnowledgeBackupRetentionPlan.ps1 (iMelki/agent-settings#456): a
+    receipt only counts if the archive's creation AND structural validation
+    are verified, the offsite copy is verified via a real method (not
+    "pending"/"none"/"not-configured"), a disposable restore was verified,
+    and the run's own terminal status was a clean success.
+
+    Deliberately NOT reproduced here: that tool's optional current-archive
+    SHA-256 recompute (`-VerifyArchiveHashes`). That check is itself opt-in
+    in the PS retention planner and is a *retention-planning* concern (is
+    this specific archive's bytes still intact on disk), not a per-apply
+    freshness precondition -- recomputing a multi-GB hash on every dedup
+    invocation would make the safety check itself the slow, disk-heavy part
+    of a run whose whole point is to be cheap enough to run before every
+    apply. Returns (ok: bool, reasons: list[str]); reasons is empty iff ok.
+    """
+    reasons = []
+    if not isinstance(receipt, dict):
+        return False, ["generation-receipt-unreadable"]
+    if receipt.get("schema") != BACKUP_RECEIPT_SCHEMA:
+        reasons.append("generation-receipt-schema-mismatch")
+
+    archive = receipt.get("archive") or {}
+    offsite = receipt.get("offsite") or {}
+    restore = receipt.get("restore") or {}
+    terminal = receipt.get("terminal") or {}
+
+    if archive.get("creationStatus") != "verified":
+        reasons.append("archive-creation-not-verified")
+    if archive.get("structuralValidationStatus") != "verified":
+        reasons.append("archive-structure-not-verified")
+    if offsite.get("status") != "verified":
+        reasons.append("offsite-copy-not-verified")
+    if offsite.get("method") not in ("cryptcheck", "checksum-and-retrieval"):
+        reasons.append("offsite-verification-method-insufficient")
+    if restore.get("status") != "verified":
+        reasons.append("disposable-restore-not-verified")
+    if terminal.get("status") != "succeeded" or terminal.get("exitCode") != 0:
+        reasons.append("generation-terminal-state-not-success")
+
+    return not reasons, reasons
+
+
+def check_backup_freshness(backup_dir=None, max_age_days=DEFAULT_BACKUP_MAX_AGE_DAYS, now=None):
+    """Fail-closed precondition: does a known-good, fresh palace backup exist?
+
+    This is the check dedup_palace()'s docstring has always DESCRIBED
+    ("Live deletion requires an explicit --apply, a palace backup from the
+    last 2 days...") without ever ENFORCING in code -- the 2026-07-05
+    incident (iMelki/mempalace#19) happened with that requirement stated and
+    unchecked: 42,606 drawers were deleted with the newest backup already
+    past the 2-day window. This function exists so any new apply path can
+    refuse to run instead of documenting a requirement nobody checks.
+
+    Looks for `<backup_dir>/palace-*.tar.gz` archives with an adjacent
+    `<archive>.tar.gz.receipt.json` generation receipt (schema
+    knowledge-backup-generation-receipt.v1, iMelki/agent-settings#456) and
+    treats an archive as usable only if ALL of:
+      - _receipt_is_known_good() passes (verified creation/structure/offsite/
+        restore/terminal -- see that function for exact fields);
+      - the receipt's createdAt is within max_age_days of `now` (default: the
+        real current time) and not in the future.
+
+    This function only reads files under backup_dir; it never creates,
+    fetches, uploads, or repairs a backup, and it never touches the palace.
+    Any missing directory, missing archive, missing/unreadable/invalid
+    receipt, or stale timestamp fails CLOSED (ok=False) -- there is no
+    partial-credit path. Multiple archives may qualify; `ok` is True if at
+    least one does.
+
+    Returns a dict: ok, backup_dir, max_age_days, archives_checked,
+    known_good_count, newest_known_good_age_days, reason, problems (one
+    string per archive that did not qualify, or per non-archive failure).
+    """
+    backup_dir = backup_dir or DEFAULT_BACKUP_DIR
+    now = now or datetime.now(timezone.utc)
+    result = {
+        "ok": False,
+        "backup_dir": str(backup_dir),
+        "max_age_days": max_age_days,
+        "archives_checked": 0,
+        "known_good_count": 0,
+        "newest_known_good_age_days": None,
+        "reason": "",
+        "problems": [],
+    }
+
+    if not os.path.isdir(backup_dir):
+        result["reason"] = f"backup directory not found: {backup_dir}"
+        result["problems"].append("backup-directory-missing")
+        return result
+
+    archive_paths = sorted(glob.glob(os.path.join(backup_dir, BACKUP_ARCHIVE_GLOB)))
+    result["archives_checked"] = len(archive_paths)
+    if not archive_paths:
+        result["reason"] = f"no backup archives matching {BACKUP_ARCHIVE_GLOB} in {backup_dir}"
+        result["problems"].append("no-archives-present")
+        return result
+
+    best_age_days = None
+    per_archive_problems = {}
+
+    for archive_path in archive_paths:
+        name = os.path.basename(archive_path)
+        receipt_path = archive_path + ".receipt.json"
+
+        if not os.path.isfile(receipt_path):
+            per_archive_problems[name] = ["generation-receipt-missing"]
+            continue
+        try:
+            with open(receipt_path, encoding="utf-8") as fh:
+                receipt = json.load(fh)
+        except (OSError, ValueError) as exc:
+            per_archive_problems[name] = [f"generation-receipt-unreadable:{exc}"]
+            continue
+
+        ok, reasons = _receipt_is_known_good(receipt)
+        if not ok:
+            per_archive_problems[name] = reasons
+            continue
+
+        try:
+            created_at = _parse_iso8601(str(receipt.get("createdAt", "")))
+        except (ValueError, AttributeError):
+            per_archive_problems[name] = ["generation-created-at-invalid"]
+            continue
+
+        age_days = (now - created_at).total_seconds() / 86400.0
+        if age_days < 0:
+            # A receipt timestamped in the future is untrustworthy, not
+            # "extra fresh" -- treat it the same as an invalid timestamp.
+            per_archive_problems[name] = ["generation-created-at-in-future"]
+            continue
+        if age_days > max_age_days:
+            per_archive_problems[name] = [f"generation-stale:{age_days:.2f}d>{max_age_days}d"]
+            continue
+
+        result["known_good_count"] += 1
+        if best_age_days is None or age_days < best_age_days:
+            best_age_days = age_days
+
+    result["newest_known_good_age_days"] = (
+        None if best_age_days is None else round(best_age_days, 3)
+    )
+    result["problems"] = [
+        f"{name}: {'; '.join(reasons)}" for name, reasons in sorted(per_archive_problems.items())
+    ]
+
+    if result["known_good_count"] > 0:
+        result["ok"] = True
+        result["reason"] = (
+            f"{result['known_good_count']} known-good archive(s) within {max_age_days} "
+            f"day(s); newest is {result['newest_known_good_age_days']:.2f}d old"
+        )
+    else:
+        result["reason"] = (
+            f"no known-good backup archive within {max_age_days} day(s) among "
+            f"{len(archive_paths)} archive(s) checked in {backup_dir}"
+        )
+    return result
+
+
+def plan_same_filename_deletions(col, groups, batch_size=HASH_BATCH_SIZE, progress=False):
+    """Build a same-filename-only cross-source deletion plan.
+
+    This is the ONLY set of drawer ids this module will ever propose for
+    deletion outside the pre-existing embedding-based dedup_source_group()
+    path. It hashes document text across the whole scoped set exactly like
+    count_cross_source_duplicates(), but -- unlike that read-only function,
+    which deliberately discards drawer ids to stay cheap on a ~1M-drawer scan
+    -- this one keeps them, because turning a measurement into a deletion
+    plan requires knowing which specific drawers to keep and delete.
+
+    A digest's set of drawers becomes a deletion candidate if and only if:
+      1. len(entries) >= 2 (an actual duplicate, not a singleton);
+      2. the entries span 2+ DISTINCT source_file paths (cross-source, not
+         the kind --exact-duplicates already looks for);
+      3. every one of those distinct paths reduces to the SAME basename via
+         _basename().
+
+    Any set failing (2) or (3) -- including every one of the 256
+    mixed-filename shared-boilerplate sets from #19's own audit -- is
+    dropped here, structurally, before a delete id is ever produced. There
+    is no parameter to relax this. A set failing only (2) (repeats confined
+    to one source path) is the domain of --exact-duplicates, not this path.
+
+    Keep-longest, reusing dedup_source_group()'s convention: within a
+    qualifying set every drawer's document text is byte-identical by
+    definition (same hash implies same content implies same length), so
+    "keep longest" always ties on length -- the sort key is `(-len(doc),
+    drawer_id)`, so ties fall to the lowest drawer id. That keeps the choice
+    deterministic across repeated dry-runs rather than depending on dict or
+    set iteration order, without inventing a "richness" heuristic content
+    identity cannot distinguish.
+
+    Memory/IO: identical batching to count_cross_source_duplicates()
+    (`batch_size` rows read and released at a time). Unlike that function,
+    this one DOES hold full (drawer_id, source_file, doc_length) tuples per
+    digest rather than a compact source-index int, because it needs real ids
+    to delete -- so it is intentionally only ever run over an already-scoped
+    subset (a --wing/--source filter), not blindly over the whole palace.
+
+    Returns a dict: drawers_scanned, sets (list of {filename, digest,
+    keep_id, delete_ids, redundant, distinct_paths, paths}, largest first),
+    sets_count, redundant_total, delete_ids (flattened, every id in every
+    set's delete_ids -- this is the actual deletion candidate list).
+    """
+    import hashlib
+
+    total = sum(len(ids) for ids in groups.values())
+    scanned = 0
+    # digest -> [(drawer_id, source_file, doc_length), ...]
+    buckets = defaultdict(list)
+
+    for src, ids in groups.items():
+        for i in range(0, len(ids), batch_size):
+            chunk = ids[i : i + batch_size]
+            data = col.get(ids=chunk, include=["documents"])
+            for did, doc in zip(chunk, data["documents"]):
+                if not doc:
+                    continue
+                digest = hashlib.sha256(doc.encode("utf-8", "replace")).hexdigest()
+                buckets[digest].append((did, src, len(doc)))
+            scanned += len(chunk)
+            if progress:
+                _progress_tick("same-filename plan scan", scanned, total)
+
+    if progress:
+        _progress_end("same-filename plan scan", scanned)
+
+    sets = []
+    for digest, entries in buckets.items():
+        if len(entries) < 2:
+            continue
+        distinct_paths = sorted({src for _, src, _ in entries})
+        if len(distinct_paths) < 2:
+            continue  # single-path: --exact-duplicates' scope, not this one
+        distinct_names = {_basename(p) for p in distinct_paths}
+        if len(distinct_names) != 1:
+            continue  # mixed filenames: PERMANENTLY out of scope (#19 decision)
+
+        ordered = sorted(entries, key=lambda entry: (-entry[2], entry[0]))
+        keep_id = ordered[0][0]
+        delete_ids = [entry[0] for entry in ordered[1:]]
+
+        sets.append(
+            {
+                "filename": next(iter(distinct_names)),
+                "digest": digest,
+                "keep_id": keep_id,
+                "delete_ids": delete_ids,
+                "redundant": len(delete_ids),
+                "distinct_paths": len(distinct_paths),
+                "paths": distinct_paths,
+            }
+        )
+
+    # Ordering is for legibility only, same convention as
+    # count_cross_source_duplicates(): largest set first, filename as a
+    # deterministic tiebreak.
+    sets.sort(key=lambda s: (-s["redundant"], s["filename"]))
+
+    delete_ids_all = [did for s in sets for did in s["delete_ids"]]
+    return {
+        "drawers_scanned": scanned,
+        "sets": sets,
+        "sets_count": len(sets),
+        "redundant_total": len(delete_ids_all),
+        "delete_ids": delete_ids_all,
+    }
+
+
+def print_same_filename_plan(
+    plan, max_sets=CROSS_SOURCE_MAX_SETS, max_paths=CROSS_SOURCE_MAX_PATHS
+):
+    """Print a same-filename deletion plan: counts, then the sets themselves.
+
+    Every printed set names its filename, which drawer would be kept, and
+    every contributing path -- so a dry-run report is reviewable before any
+    --apply-same-filename run, not just a bare count.
+    """
+    print(f"\n  Same-filename cross-source duplicate sets: {plan['sets_count']:,}")
+    print(f"  Redundant drawers (deletion candidates):    {plan['redundant_total']:,}")
+    print(f"  Drawers hashed: {plan['drawers_scanned']:,}")
+
+    if plan["sets"]:
+        shown = plan["sets"][:max_sets]
+        print(f"\n  Sets (top {len(shown)} of {plan['sets_count']:,}):")
+        for i, s in enumerate(shown, 1):
+            print(
+                f"    [{i}] {_printable(s['filename'])} -- {s['redundant']} redundant across "
+                f"{s['distinct_paths']} path(s); keep={s['keep_id']}"
+            )
+            for path in s["paths"][:max_paths]:
+                print(f"        {_printable(path)}")
+            hidden = len(s["paths"]) - max_paths
+            if hidden > 0:
+                print(f"        ... +{hidden} more source path(s)")
+
+    print("\n  NOTE: only sets where every contributing path shares ONE filename are ever")
+    print("        deletion candidates. Mixed-filename shared-boilerplate sets are")
+    print("        PERMANENTLY out of scope (operator decision, iMelki/mempalace#19).")
+
+
+def apply_same_filename_dedup(
+    palace_path=None,
+    dry_run=True,
+    wing=None,
+    source_pattern=None,
+    backup_dir=None,
+    backup_max_age_days=DEFAULT_BACKUP_MAX_AGE_DAYS,
+    progress=False,
+    max_sets=CROSS_SOURCE_MAX_SETS,
+):
+    """Same-filename-only cross-source dedup: the APPLY path for #19.
+
+    Scope is deliberately narrow and non-negotiable: plan_same_filename_deletions()
+    structurally excludes every set that is not cross-source AND same-filename,
+    with no parameter anywhere in this call chain to widen that. Dry-run is the
+    unconditional default -- `dry_run` must be explicitly False to delete
+    anything, matching dedup_palace()'s existing --apply convention.
+
+    Even with dry_run=False, nothing is deleted unless check_backup_freshness()
+    reports ok=True for `backup_dir` (default ~/.mempalace/backups) within
+    `backup_max_age_days` (default 2). A blocked gate is not an error: it
+    prints the reason, computes and reports the plan that WOULD have run, and
+    returns with drawers_removed=0 and outcome="blocked-backup-not-fresh" --
+    the same shape a caller would see from a clean dry run, but distinguishable
+    by outcome/status so a script cannot mistake a refusal for a no-op.
+
+    Returns the completion-metrics dict it also prints (see _format_metrics),
+    matching dedup_palace()'s and show_stats()'s existing contract.
+    """
+    started = time.monotonic()
+    palace_path = palace_path or _get_palace_path()
+
+    print(f"\n{'=' * 55}")
+    print("  MemPalace Same-Filename Cross-Source Dedup")
+    print(f"{'=' * 55}")
+
+    col = ChromaBackend().get_collection(palace_path, COLLECTION_NAME)
+
+    print(f"  Palace: {_printable(str(palace_path))}")
+    print(f"  Drawers: {col.count():,}")
+    print(f"  Mode: {'DRY RUN' if dry_run else 'LIVE'}")
+    print(f"{RULE}")
+
+    if wing:
+        print(f"  Wing: {wing}")
+
+    # min_count=1, same reasoning as --cross-source-duplicates: five copies of
+    # one file can be one drawer each, and the default min_count=5 would hide
+    # exactly the duplication this mode looks for.
+    groups = get_source_groups(
+        col, min_count=1, source_pattern=source_pattern, wing=wing, progress=progress
+    )
+    print(f"\n  Sources in scope: {len(groups)}")
+
+    plan = plan_same_filename_deletions(col, groups, progress=progress)
+    print_same_filename_plan(plan, max_sets=max_sets)
+
+    outcome = "ok"
+    status = "dry-run"
+    backup_check = None
+    deleted = 0
+
+    if dry_run:
+        print("\n  [DRY RUN] No changes written.")
+        print("  Live deletion requires dry_run=False (CLI: --apply-same-filename) AND a")
+        print("  passing backup-freshness gate (see check_backup_freshness()).")
+    elif not plan["delete_ids"]:
+        status = "no-op"
+        print("\n  Nothing to delete: no same-filename cross-source duplicate sets in scope.")
+    else:
+        backup_check = check_backup_freshness(
+            backup_dir=backup_dir, max_age_days=backup_max_age_days
+        )
+        print(f"\n  Backup-freshness gate: {'PASS' if backup_check['ok'] else 'BLOCKED'}")
+        print(f"    {backup_check['reason']}")
+
+        if not backup_check["ok"]:
+            outcome = "blocked-backup-not-fresh"
+            status = "blocked"
+            print(
+                "\n  [BLOCKED] Live deletion refused: no known-good, offsite-verified "
+                f"backup within {backup_max_age_days} day(s). See iMelki/mempalace#19."
+            )
+            for problem in backup_check["problems"][:10]:
+                print(f"    - {problem}")
+            hidden = len(backup_check["problems"]) - 10
+            if hidden > 0:
+                print(f"    ... +{hidden} more")
+        else:
+            status = "applied"
+            for i in range(0, len(plan["delete_ids"]), 500):
+                col.delete(ids=plan["delete_ids"][i : i + 500])
+            deleted = len(plan["delete_ids"])
+            print(f"\n  Deleted {deleted:,} redundant drawers across {plan['sets_count']:,} sets.")
+
+    palace_after = col.count()
+    print(f"\n  Palace after: {palace_after:,} drawers")
+
+    warm_seconds = None
+    if not dry_run and deleted:
+        # Same post-mutation warm as dedup_palace() (iMelki/mempalace#19): pay
+        # the one-time post-deletion cost here, at mutation time.
+        print("\n  Pre-warming palace after deletions...")
+        t_warm = time.monotonic()
+        try:
+            from .searcher import search_memories
+
+            search_memories("warmup", palace_path, n_results=1)
+            warm_seconds = round(time.monotonic() - t_warm, 3)
+            print(f"  Palace warm in {warm_seconds:.1f}s")
+        except Exception as e:
+            print(f"  Warm warning (non-fatal): {e}")
+            if outcome == "ok":
+                outcome = "ok-with-warnings"
+
+    metrics = {
+        "operation": "dedup-same-filename",
+        "outcome": outcome,
+        "status": status,
+        "duration_seconds": round(time.monotonic() - started, 3),
+        "sources_in_scope": len(groups),
+        "drawers_hashed": plan["drawers_scanned"],
+        "same_filename_sets": plan["sets_count"],
+        "redundant_drawers_found": plan["redundant_total"],
+        "drawers_removed": deleted,
+        "backup_gate_ok": None if backup_check is None else backup_check["ok"],
+        "backup_gate_reason": None if backup_check is None else backup_check["reason"],
+        "palace_drawers_after": palace_after,
+        "warm_seconds": warm_seconds,
+    }
+    print(f"\n  Metrics: {_format_metrics(metrics)}")
+    print(f"{'=' * 55}\n")
+    return metrics
+
+
 def show_stats(
     palace_path=None,
     wing=None,
@@ -875,9 +1396,39 @@ if __name__ == "__main__":
         "stderr only, so stdout stays a clean report channel. Off by default, so "
         "non-interactive callers and tests are unaffected.",
     )
+    parser.add_argument(
+        "--same-filename-cleanup",
+        action="store_true",
+        help="Select the same-filename-only cross-source dedup mode (iMelki/mempalace#19 "
+        "operator decision, 2026-08-07). Dry-run by default: prints the deletion plan "
+        "without deleting. Mutually exclusive with --stats and --apply -- it is its own "
+        "mode, not a modifier of the embedding-based path.",
+    )
+    parser.add_argument(
+        "--apply-same-filename",
+        action="store_true",
+        help="With --same-filename-cleanup, actually delete the same-filename cross-source "
+        "duplicates found. Requires --same-filename-cleanup. Even then, nothing is deleted "
+        "unless check_backup_freshness() finds a known-good, offsite-verified backup within "
+        "--backup-max-age-days -- see that function's docstring.",
+    )
+    parser.add_argument(
+        "--backup-dir",
+        default=None,
+        help=f"Where --apply-same-filename looks for palace-*.tar.gz backup archives and "
+        f"their .receipt.json files (default: {DEFAULT_BACKUP_DIR}).",
+    )
+    parser.add_argument(
+        "--backup-max-age-days",
+        type=float,
+        default=DEFAULT_BACKUP_MAX_AGE_DAYS,
+        help=f"How fresh a known-good backup must be for --apply-same-filename to proceed "
+        f"(default: {DEFAULT_BACKUP_MAX_AGE_DAYS} days).",
+    )
     args = parser.parse_args()
 
     path = os.path.expanduser(args.palace) if args.palace else None
+    backup_dir = os.path.expanduser(args.backup_dir) if args.backup_dir else None
 
     if args.apply and args.dry_run:
         parser.error("--apply and --dry-run are mutually exclusive")
@@ -891,7 +1442,29 @@ if __name__ == "__main__":
     if args.cross_source_duplicates and not args.stats:
         parser.error("--cross-source-duplicates only applies to --stats")
 
-    if args.stats:
+    if args.apply_same_filename and not args.same_filename_cleanup:
+        parser.error("--apply-same-filename only applies to --same-filename-cleanup")
+
+    if args.same_filename_cleanup and args.stats:
+        parser.error("--same-filename-cleanup cannot be combined with --stats")
+
+    if args.same_filename_cleanup and args.apply:
+        parser.error(
+            "--same-filename-cleanup cannot be combined with --apply (use --apply-same-filename)"
+        )
+
+    if args.same_filename_cleanup:
+        apply_same_filename_dedup(
+            palace_path=path,
+            dry_run=not args.apply_same_filename,
+            wing=args.wing,
+            source_pattern=args.source,
+            backup_dir=backup_dir,
+            backup_max_age_days=args.backup_max_age_days,
+            progress=args.progress,
+            max_sets=args.max_sets,
+        )
+    elif args.stats:
         show_stats(
             palace_path=path,
             wing=args.wing,

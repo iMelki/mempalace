@@ -1,9 +1,12 @@
 """Tests for mempalace.dedup — near-duplicate drawer detection and removal."""
 
+import json
+import os
 import re
 import sys
 from unittest.mock import MagicMock, patch
 
+import pytest
 
 from mempalace import dedup
 
@@ -1419,3 +1422,742 @@ def test_no_printed_literal_requires_a_non_ascii_codepage():
 
     assert offenders == []
     assert dedup.RULE.isascii()  # the shared horizontal rule, used via a constant
+
+
+# ── same-filename-only cross-source APPLY path (iMelki/mempalace#19) ───
+#
+# Operator policy decision (2026-08-07): cleanup touches ONLY duplicate sets
+# where every contributing drawer shares the SAME filename. The 256
+# mixed-filename shared-boilerplate sets are PERMANENTLY out of scope for
+# deletion. These tests cover: the same-filename-only filter genuinely
+# excludes every mixed-filename set, dry-run is the default, the
+# backup-freshness gate blocks real deletion, and keep-longest selection.
+
+
+# ── _parse_iso8601 ───────────────────────────────────────────────────
+
+
+def test_parse_iso8601_handles_this_repos_z_suffixed_generatedat():
+    """backup_snapshot._utc_now()'s own shape: seconds precision + trailing Z."""
+    dt = dedup._parse_iso8601("2026-08-08T12:34:56Z")
+    assert dt.year == 2026 and dt.month == 8 and dt.day == 8
+    assert dt.hour == 12 and dt.minute == 34 and dt.second == 56
+    assert dt.utcoffset().total_seconds() == 0
+
+
+def test_parse_iso8601_handles_dotnet_seven_digit_fractional_seconds():
+    """The real agent-settings backup pipeline's [DateTimeOffset]::ToString('o')
+    shape -- always 7 fractional digits, explicit +00:00 offset. Python's
+    fromisoformat() on the oldest CI-tested interpreter (3.9) only accepts 0,
+    3, or 6 fractional digits, so this must be normalized, not passed through."""
+    dt = dedup._parse_iso8601("2026-07-12T01:20:49.7912623+00:00")
+    assert dt.year == 2026 and dt.month == 7 and dt.day == 12
+    assert dt.hour == 1 and dt.minute == 20 and dt.second == 49
+
+
+def test_parse_iso8601_handles_a_non_utc_offset():
+    dt = dedup._parse_iso8601("2026-08-08T08:00:00-05:00")
+    assert dt.hour == 13  # normalized to UTC
+    assert dt.utcoffset().total_seconds() == 0
+
+
+def test_parse_iso8601_rejects_garbage():
+    import pytest
+
+    with pytest.raises(ValueError):
+        dedup._parse_iso8601("not-a-timestamp")
+
+
+# ── _receipt_is_known_good ──────────────────────────────────────────
+
+
+def _good_receipt(**overrides):
+    """A complete, fully-verified generation receipt. Tests override the
+    nested dict they care about; everything else stays known-good."""
+    receipt = {
+        "schema": dedup.BACKUP_RECEIPT_SCHEMA,
+        "generationId": "test-generation",
+        "createdAt": "2026-08-08T00:00:00Z",
+        "archive": {
+            "fileName": "palace-test.tar.gz",
+            "lengthBytes": 1,
+            "sha256": "0" * 64,
+            "creationStatus": "verified",
+            "structuralValidationStatus": "verified",
+        },
+        "offsite": {
+            "status": "verified",
+            "method": "cryptcheck",
+            "verifiedAt": "2026-08-08T00:00:00Z",
+            "objectIdentity": "gdrive:example",
+        },
+        "restore": {
+            "status": "verified",
+            "verifiedAt": "2026-08-08T00:00:00Z",
+            "receiptPath": "restore.json",
+            "receiptSha256": "0" * 64,
+        },
+        "terminal": {"status": "succeeded", "exitCode": 0},
+    }
+    for key, value in overrides.items():
+        if isinstance(value, dict) and isinstance(receipt.get(key), dict):
+            receipt[key] = {**receipt[key], **value}
+        else:
+            receipt[key] = value
+    return receipt
+
+
+def test_receipt_is_known_good_accepts_a_fully_verified_receipt():
+    ok, reasons = dedup._receipt_is_known_good(_good_receipt())
+    assert ok is True
+    assert reasons == []
+
+
+def test_receipt_is_known_good_rejects_non_dict():
+    ok, reasons = dedup._receipt_is_known_good(None)
+    assert ok is False
+    assert reasons == ["generation-receipt-unreadable"]
+
+
+def test_receipt_is_known_good_rejects_wrong_schema():
+    ok, reasons = dedup._receipt_is_known_good(_good_receipt(schema="something-else"))
+    assert ok is False
+    assert "generation-receipt-schema-mismatch" in reasons
+
+
+def test_receipt_is_known_good_rejects_pending_offsite():
+    """The real, current state of every archive in ~/.mempalace/backups today
+    (agent-settings#457 still in progress): offsite.status == 'pending'."""
+    ok, reasons = dedup._receipt_is_known_good(
+        _good_receipt(offsite={"status": "pending", "method": "none"})
+    )
+    assert ok is False
+    assert "offsite-copy-not-verified" in reasons
+    assert "offsite-verification-method-insufficient" in reasons
+
+
+def test_receipt_is_known_good_rejects_unverified_restore():
+    ok, reasons = dedup._receipt_is_known_good(_good_receipt(restore={"status": "not-run"}))
+    assert ok is False
+    assert "disposable-restore-not-verified" in reasons
+
+
+def test_receipt_is_known_good_rejects_failed_terminal_state():
+    ok, reasons = dedup._receipt_is_known_good(
+        _good_receipt(terminal={"status": "failed", "exitCode": 1})
+    )
+    assert ok is False
+    assert "generation-terminal-state-not-success" in reasons
+
+
+# ── check_backup_freshness ──────────────────────────────────────────
+
+
+def _write_backup_archive(backup_dir, name, receipt=None):
+    """Create <backup_dir>/<name> plus its .receipt.json (unless receipt is
+    None, to test a missing-receipt archive)."""
+    archive_path = backup_dir / name
+    archive_path.write_bytes(b"fake-archive-bytes")
+    if receipt is not None:
+        (backup_dir / f"{name}.receipt.json").write_text(json.dumps(receipt), encoding="utf-8")
+    return archive_path
+
+
+def test_check_backup_freshness_missing_directory_fails_closed(tmp_path):
+    result = dedup.check_backup_freshness(backup_dir=str(tmp_path / "does-not-exist"))
+    assert result["ok"] is False
+    assert "backup-directory-missing" in result["problems"]
+
+
+def test_check_backup_freshness_empty_directory_fails_closed(tmp_path):
+    result = dedup.check_backup_freshness(backup_dir=str(tmp_path))
+    assert result["ok"] is False
+    assert "no-archives-present" in result["problems"]
+    assert result["archives_checked"] == 0
+
+
+def test_check_backup_freshness_missing_receipt_fails_closed(tmp_path):
+    _write_backup_archive(tmp_path, "palace-2026-08-08-0000.tar.gz", receipt=None)
+    result = dedup.check_backup_freshness(backup_dir=str(tmp_path))
+    assert result["ok"] is False
+    assert result["known_good_count"] == 0
+    assert any("generation-receipt-missing" in p for p in result["problems"])
+
+
+def test_check_backup_freshness_unreadable_receipt_fails_closed(tmp_path):
+    archive = tmp_path / "palace-2026-08-08-0000.tar.gz"
+    archive.write_bytes(b"x")
+    (tmp_path / f"{archive.name}.receipt.json").write_text("not json", encoding="utf-8")
+    result = dedup.check_backup_freshness(backup_dir=str(tmp_path))
+    assert result["ok"] is False
+    assert any("generation-receipt-unreadable" in p for p in result["problems"])
+
+
+def test_check_backup_freshness_stale_backup_fails_closed(tmp_path):
+    """A known-good receipt older than max_age_days must still block."""
+    import datetime as dt_module
+
+    now = dt_module.datetime(2026, 8, 8, tzinfo=dt_module.timezone.utc)
+    stale_created = (now - dt_module.timedelta(days=5)).isoformat()
+    _write_backup_archive(
+        tmp_path,
+        "palace-2026-08-03.tar.gz",
+        receipt=_good_receipt(createdAt=stale_created),
+    )
+    result = dedup.check_backup_freshness(backup_dir=str(tmp_path), max_age_days=2, now=now)
+    assert result["ok"] is False
+    assert any("generation-stale" in p for p in result["problems"])
+
+
+def test_check_backup_freshness_future_timestamp_fails_closed(tmp_path):
+    import datetime as dt_module
+
+    now = dt_module.datetime(2026, 8, 8, tzinfo=dt_module.timezone.utc)
+    future_created = (now + dt_module.timedelta(days=1)).isoformat()
+    _write_backup_archive(
+        tmp_path,
+        "palace-2026-08-09.tar.gz",
+        receipt=_good_receipt(createdAt=future_created),
+    )
+    result = dedup.check_backup_freshness(backup_dir=str(tmp_path), now=now)
+    assert result["ok"] is False
+    assert any("generation-created-at-in-future" in p for p in result["problems"])
+
+
+def test_check_backup_freshness_offsite_pending_fails_closed(tmp_path):
+    """Mirrors the REAL current state of this workspace's palace backups."""
+    import datetime as dt_module
+
+    now = dt_module.datetime(2026, 8, 8, tzinfo=dt_module.timezone.utc)
+    fresh_created = now.isoformat()
+    _write_backup_archive(
+        tmp_path,
+        "palace-2026-08-08.tar.gz",
+        receipt=_good_receipt(
+            createdAt=fresh_created, offsite={"status": "pending", "method": "none"}
+        ),
+    )
+    result = dedup.check_backup_freshness(backup_dir=str(tmp_path), now=now)
+    assert result["ok"] is False
+    assert result["known_good_count"] == 0
+
+
+def test_check_backup_freshness_passes_with_one_fresh_known_good_archive(tmp_path):
+    import datetime as dt_module
+
+    now = dt_module.datetime(2026, 8, 8, tzinfo=dt_module.timezone.utc)
+    fresh_created = (now - dt_module.timedelta(hours=6)).isoformat()
+    _write_backup_archive(
+        tmp_path,
+        "palace-2026-08-08.tar.gz",
+        receipt=_good_receipt(createdAt=fresh_created),
+    )
+    result = dedup.check_backup_freshness(backup_dir=str(tmp_path), max_age_days=2, now=now)
+    assert result["ok"] is True
+    assert result["known_good_count"] == 1
+    assert result["newest_known_good_age_days"] == pytest.approx(0.25, abs=0.01)
+
+
+def test_check_backup_freshness_one_good_archive_is_enough_among_several_bad(tmp_path):
+    import datetime as dt_module
+
+    now = dt_module.datetime(2026, 8, 8, tzinfo=dt_module.timezone.utc)
+    _write_backup_archive(tmp_path, "palace-a.tar.gz", receipt=None)
+    _write_backup_archive(
+        tmp_path,
+        "palace-b.tar.gz",
+        receipt=_good_receipt(createdAt=(now - dt_module.timedelta(days=10)).isoformat()),  # stale
+    )
+    _write_backup_archive(
+        tmp_path,
+        "palace-c.tar.gz",
+        receipt=_good_receipt(createdAt=(now - dt_module.timedelta(hours=1)).isoformat()),
+    )
+    result = dedup.check_backup_freshness(backup_dir=str(tmp_path), now=now)
+    assert result["ok"] is True
+    assert result["known_good_count"] == 1
+    assert result["archives_checked"] == 3
+
+
+def test_check_backup_freshness_default_backup_dir_is_the_real_mempalace_backups_dir():
+    assert dedup.DEFAULT_BACKUP_DIR == os.path.join(
+        os.path.expanduser("~"), ".mempalace", "backups"
+    )
+
+
+def test_check_backup_freshness_refuses_against_the_real_workspace_backups_right_now():
+    """Live proof, not a mock: this workspace's actual ~/.mempalace/backups
+    directory, read-only. As of this task (iMelki/mempalace#19), every local
+    archive's offsite.status is 'pending' -- agent-settings#457 (offsite
+    backup) is still in progress -- so the gate must refuse. This test is the
+    demonstration the task asked for: the precondition check correctly
+    blocking a live run right now, not a bypass of it. Skips cleanly if this
+    specific machine's backup directory is absent (e.g. CI), since the
+    directory-missing and no-archives paths are already covered above."""
+    if not os.path.isdir(dedup.DEFAULT_BACKUP_DIR):
+        pytest.skip("no local ~/.mempalace/backups directory on this runner")
+
+    result = dedup.check_backup_freshness()  # read-only; deletes nothing
+
+    assert result["ok"] is False
+    assert result["known_good_count"] == 0
+    assert result["archives_checked"] > 0
+
+
+# ── plan_same_filename_deletions ────────────────────────────────────
+
+
+def test_plan_same_filename_deletions_excludes_every_mixed_filename_set():
+    """The core operator-decision guarantee: construct a fixture with BOTH a
+    same-filename cross-source set and a mixed-filename shared-boilerplate
+    set, and assert only the same-filename one is EVER a deletion candidate."""
+    docs = {
+        # same file, three project copies -- IN scope
+        "c1": "COPIED",
+        "c2": "COPIED",
+        "c3": "COPIED",
+        # different files sharing one chunk (CSS skins) -- PERMANENTLY OUT
+        "s1": "SHARED",
+        "s2": "SHARED",
+    }
+    groups = {
+        r"S:\proj\Css\bootstrap.css": ["c1"],
+        r"S:\proj-backup\Css\bootstrap.css": ["c2"],
+        r"S:\proj-mobile-fixes\Css\bootstrap.css": ["c3"],
+        r"S:\proj\skins\aero.css": ["s1"],
+        r"S:\proj\skins\black.css": ["s2"],
+    }
+    col = MagicMock()
+    col.get.side_effect = _docs_by_id(docs)
+
+    plan = dedup.plan_same_filename_deletions(col, groups)
+
+    assert plan["sets_count"] == 1
+    assert plan["sets"][0]["filename"] == "bootstrap.css"
+    assert set(plan["delete_ids"]) <= {"c1", "c2", "c3"}
+    assert "s1" not in plan["delete_ids"]
+    assert "s2" not in plan["delete_ids"]
+    assert plan["redundant_total"] == 2
+
+
+def test_plan_same_filename_deletions_excludes_single_path_sets():
+    """Repeats confined to one source path are --exact-duplicates' scope, not
+    this one -- the operator's 8,145-set number is cross-path only."""
+    col = MagicMock()
+    col.get.side_effect = _docs_by_id({"1": "dup", "2": "dup"})
+
+    plan = dedup.plan_same_filename_deletions(col, {"a.txt": ["1", "2"]})
+
+    assert plan["sets_count"] == 0
+    assert plan["delete_ids"] == []
+
+
+def test_plan_same_filename_deletions_excludes_unique_and_empty_docs():
+    col = MagicMock()
+    col.get.side_effect = _docs_by_id({"1": "a", "2": "b", "3": None, "4": ""})
+
+    plan = dedup.plan_same_filename_deletions(col, {"a.txt": ["1", "2"], "b.txt": ["3", "4"]})
+
+    assert plan["sets_count"] == 0
+    assert plan["delete_ids"] == []
+    assert plan["drawers_scanned"] == 4
+
+
+def test_plan_same_filename_deletions_keeps_one_deterministic_drawer_per_set():
+    """Keep-longest, reusing dedup_source_group()'s convention. Within an
+    exact-duplicate set every entry has IDENTICAL byte length by
+    construction (same hash implies same content), so the tie always falls
+    to the deterministic secondary key -- lowest drawer id -- rather than
+    depending on dict/set iteration order."""
+    col = MagicMock()
+    col.get.side_effect = _docs_by_id({"z9": "same body", "a1": "same body", "m5": "same body"})
+    groups = {
+        r"S:\proj\x.txt": ["z9"],
+        r"S:\proj-backup\x.txt": ["a1"],
+        r"S:\proj-mobile\x.txt": ["m5"],
+    }
+
+    plan = dedup.plan_same_filename_deletions(col, groups)
+
+    assert plan["sets"][0]["keep_id"] == "a1"
+    assert set(plan["sets"][0]["delete_ids"]) == {"z9", "m5"}
+    # deterministic across repeated runs, not just this one
+    plan_again = dedup.plan_same_filename_deletions(col, groups)
+    assert plan_again["sets"][0]["keep_id"] == "a1"
+
+
+def test_plan_same_filename_deletions_redundant_is_n_minus_one_per_set():
+    col = MagicMock()
+    col.get.side_effect = _docs_by_id({f"d{i}": "same" for i in range(5)})
+    groups = {f"S:\\proj{i}\\x.txt": [f"d{i}"] for i in range(5)}
+
+    plan = dedup.plan_same_filename_deletions(col, groups)
+
+    assert plan["sets_count"] == 1
+    assert plan["sets"][0]["redundant"] == 4
+    assert len(plan["sets"][0]["delete_ids"]) == 4
+    assert plan["redundant_total"] == 4
+
+
+def test_plan_same_filename_deletions_reports_contributing_paths_and_filename():
+    paths = [
+        r"S:\source\EMTS\Repeater_System\repeater-system\assets\js\bui.js",
+        r"S:\source\EMTS\Repeater_System\repeater-system-mobile-fixes\assets\js\bui.js",
+        r"S:\source\EMTS\Repeater_System\repeater-system_backup_250522\assets\js\bui.js",
+    ]
+    groups = {p: [f"d{i}"] for i, p in enumerate(paths)}
+    col = MagicMock()
+    col.get.side_effect = _docs_by_id({f"d{i}": "identical asset body" for i in range(3)})
+
+    plan = dedup.plan_same_filename_deletions(col, groups)
+
+    assert plan["sets"][0]["filename"] == "bui.js"
+    assert plan["sets"][0]["paths"] == sorted(paths)
+    assert plan["sets"][0]["distinct_paths"] == 3
+
+
+def test_plan_same_filename_deletions_batches_and_never_reads_whole_corpus():
+    ids = [f"d{i}" for i in range(1200)]
+    col = MagicMock()
+    col.get.side_effect = _docs_by_id({i: "same-everywhere" for i in ids})
+
+    plan = dedup.plan_same_filename_deletions(col, {"a.txt": ids[:600], "b.txt": ids[600:]})
+
+    sizes = [len(call.kwargs["ids"]) for call in col.get.call_args_list]
+    assert max(sizes) <= dedup.HASH_BATCH_SIZE
+    assert plan["drawers_scanned"] == 1200
+
+
+def test_plan_same_filename_deletions_emits_progress(capsys):
+    col = MagicMock()
+    col.get.side_effect = _docs_by_id({"1": "x", "2": "x"})
+
+    dedup.plan_same_filename_deletions(col, {"a.txt": ["1"], "b.txt": ["2"]}, progress=True)
+    captured = capsys.readouterr()
+
+    assert "same-filename plan scan:" in captured.err
+    assert "same-filename plan scan" not in captured.out
+
+
+def test_plan_same_filename_deletions_never_calls_delete():
+    """Planning is read-only; deletion happens only in apply_same_filename_dedup
+    after the backup gate passes, never inside the planner itself."""
+    col = MagicMock()
+    col.get.side_effect = _docs_by_id({"1": "same", "2": "same"})
+
+    dedup.plan_same_filename_deletions(col, {"a": ["1"], "b": ["2"]})
+
+    col.delete.assert_not_called()
+    col.update.assert_not_called()
+    col.upsert.assert_not_called()
+
+
+def test_plan_same_filename_deletions_has_no_scope_widening_parameter():
+    """Structural guarantee: there is no 'force' or 'include mixed filenames'
+    switch anywhere on the planning or apply functions that could reach a
+    mixed-filename set, even deliberately."""
+    import inspect
+
+    for fn in (dedup.plan_same_filename_deletions, dedup.apply_same_filename_dedup):
+        params = set(inspect.signature(fn).parameters)
+        assert "force" not in params
+        assert not any("mixed" in p or "bypass" in p or "unsafe" in p for p in params)
+
+
+def test_plan_same_filename_deletions_source_always_filters_by_filename_count():
+    """The filter is unconditional in the source, not gated behind a flag."""
+    import inspect
+
+    src = inspect.getsource(dedup.plan_same_filename_deletions)
+    assert "len(distinct_names) != 1" in src
+    assert "len(distinct_paths) < 2" in src
+
+
+# ── print_same_filename_plan ────────────────────────────────────────
+
+
+def test_print_same_filename_plan_shows_counts_filenames_and_keep_id(capsys):
+    plan = {
+        "drawers_scanned": 10,
+        "sets_count": 1,
+        "redundant_total": 2,
+        "sets": [
+            {
+                "filename": "bui.js",
+                "digest": "abc",
+                "keep_id": "d1",
+                "delete_ids": ["d2", "d3"],
+                "redundant": 2,
+                "distinct_paths": 3,
+                "paths": ["S:\\a\\bui.js", "S:\\b\\bui.js", "S:\\c\\bui.js"],
+            }
+        ],
+    }
+    dedup.print_same_filename_plan(plan)
+    out = capsys.readouterr().out
+
+    assert "Same-filename cross-source duplicate sets: 1" in out
+    assert "Redundant drawers (deletion candidates):    2" in out
+    assert "bui.js" in out
+    assert "keep=d1" in out
+    assert "S:\\a\\bui.js" in out
+    assert "PERMANENTLY out of scope" in out
+
+
+def test_print_same_filename_plan_truncates_long_path_lists(capsys):
+    paths = [f"S:\\proj{i}\\x.txt" for i in range(20)]
+    plan = {
+        "drawers_scanned": 20,
+        "sets_count": 1,
+        "redundant_total": 19,
+        "sets": [
+            {
+                "filename": "x.txt",
+                "digest": "abc",
+                "keep_id": "d0",
+                "delete_ids": [f"d{i}" for i in range(1, 20)],
+                "redundant": 19,
+                "distinct_paths": 20,
+                "paths": paths,
+            }
+        ],
+    }
+    dedup.print_same_filename_plan(plan, max_paths=8)
+    out = capsys.readouterr().out
+    assert "... +12 more source path(s)" in out
+
+
+def test_print_same_filename_plan_handles_empty_plan(capsys):
+    dedup.print_same_filename_plan(
+        {"drawers_scanned": 0, "sets_count": 0, "redundant_total": 0, "sets": []}
+    )
+    out = capsys.readouterr().out
+    assert "Same-filename cross-source duplicate sets: 0" in out
+
+
+# ── apply_same_filename_dedup ───────────────────────────────────────
+
+
+def _fake_same_filename_palace(monkeypatch, groups, docs, count_sequence=None):
+    """Wires get_source_groups + a fake collection whose get()/count()/
+    delete() feed plan_same_filename_deletions and apply_same_filename_dedup
+    without touching a real palace."""
+    monkeypatch.setattr(dedup, "get_source_groups", lambda *a, **k: groups)
+
+    counts = iter(count_sequence) if count_sequence is not None else None
+
+    class _FakeCol:
+        def __init__(self):
+            self.deleted_ids = []
+
+        def get(self, ids=None, include=None, **kwargs):
+            return {"ids": list(ids), "documents": [docs[i] for i in ids]}
+
+        def count(self):
+            return next(counts) if counts is not None else len(docs)
+
+        def delete(self, ids):
+            self.deleted_ids.extend(ids)
+
+    fake_col = _FakeCol()
+
+    class _FakeBackend:
+        def get_collection(self, *a, **k):
+            return fake_col
+
+    monkeypatch.setattr(dedup, "ChromaBackend", lambda: _FakeBackend())
+    return fake_col
+
+
+def test_apply_same_filename_dry_run_never_deletes(monkeypatch, capsys):
+    docs = {"c1": "COPIED", "c2": "COPIED"}
+    groups = {r"S:\a\x.txt": ["c1"], r"S:\b\x.txt": ["c2"]}
+    fake_col = _fake_same_filename_palace(monkeypatch, groups, docs)
+
+    metrics = dedup.apply_same_filename_dedup(palace_path="X:/fake", dry_run=True)
+
+    assert fake_col.deleted_ids == []
+    assert metrics["drawers_removed"] == 0
+    assert metrics["status"] == "dry-run"
+    out = capsys.readouterr().out
+    assert "[DRY RUN]" in out
+
+
+def test_apply_same_filename_dry_run_is_the_default_via_cli():
+    """Mirrors test_cli_bare_invocation_defaults_to_dry_run: dry_run=not
+    args.apply_same_filename must be the literal wiring, so a bare
+    --same-filename-cleanup invocation can never delete."""
+    src = open("mempalace/dedup.py", encoding="utf-8").read()
+    assert "dry_run=not args.apply_same_filename" in src
+
+
+def test_apply_same_filename_blocked_without_fresh_backup(monkeypatch, capsys):
+    """The precondition check must refuse live deletion when no known-good
+    backup exists -- proving the gate works, not working around it."""
+    docs = {"c1": "COPIED", "c2": "COPIED"}
+    groups = {r"S:\a\x.txt": ["c1"], r"S:\b\x.txt": ["c2"]}
+    fake_col = _fake_same_filename_palace(monkeypatch, groups, docs)
+    monkeypatch.setattr(
+        dedup,
+        "check_backup_freshness",
+        lambda **k: {
+            "ok": False,
+            "reason": "no known-good backup archive within 2 day(s)",
+            "problems": ["palace-x.tar.gz: offsite-copy-not-verified"],
+        },
+    )
+
+    metrics = dedup.apply_same_filename_dedup(palace_path="X:/fake", dry_run=False)
+
+    assert fake_col.deleted_ids == []
+    assert metrics["drawers_removed"] == 0
+    assert metrics["outcome"] == "blocked-backup-not-fresh"
+    assert metrics["backup_gate_ok"] is False
+    out = capsys.readouterr().out
+    assert "[BLOCKED]" in out
+    assert "offsite-copy-not-verified" in out
+
+
+def test_apply_same_filename_deletes_only_same_filename_ids_when_gate_passes(monkeypatch, capsys):
+    docs = {
+        "c1": "COPIED",
+        "c2": "COPIED",
+        "s1": "SHARED",
+        "s2": "SHARED",
+    }
+    groups = {
+        r"S:\a\bootstrap.css": ["c1"],
+        r"S:\b\bootstrap.css": ["c2"],
+        r"S:\a\aero.css": ["s1"],
+        r"S:\a\black.css": ["s2"],
+    }
+    fake_col = _fake_same_filename_palace(monkeypatch, groups, docs)
+    monkeypatch.setattr(
+        dedup,
+        "check_backup_freshness",
+        lambda **k: {"ok": True, "reason": "1 known-good archive", "problems": []},
+    )
+    monkeypatch.setattr("mempalace.searcher.search_memories", lambda *a, **k: {"results": []})
+
+    metrics = dedup.apply_same_filename_dedup(palace_path="X:/fake", dry_run=False)
+
+    # exactly one of c1/c2 deleted (the other kept); neither shared-boilerplate
+    # id (s1, s2) is ever touched
+    assert len(fake_col.deleted_ids) == 1
+    assert fake_col.deleted_ids[0] in {"c1", "c2"}
+    assert "s1" not in fake_col.deleted_ids
+    assert "s2" not in fake_col.deleted_ids
+    assert metrics["drawers_removed"] == 1
+    assert metrics["outcome"] == "ok"
+    assert metrics["backup_gate_ok"] is True
+
+
+def test_apply_same_filename_prewarms_after_live_deletion(monkeypatch, capsys):
+    docs = {"c1": "COPIED", "c2": "COPIED"}
+    groups = {r"S:\a\x.txt": ["c1"], r"S:\b\x.txt": ["c2"]}
+    _fake_same_filename_palace(monkeypatch, groups, docs)
+    monkeypatch.setattr(
+        dedup,
+        "check_backup_freshness",
+        lambda **k: {"ok": True, "reason": "fresh", "problems": []},
+    )
+    calls = []
+    monkeypatch.setattr(
+        "mempalace.searcher.search_memories",
+        lambda *a, **k: calls.append((a, k)) or {"results": []},
+    )
+
+    dedup.apply_same_filename_dedup(palace_path="X:/fake", dry_run=False)
+
+    out = capsys.readouterr().out
+    assert "Pre-warming palace" in out
+    assert calls, "post-deletion warm did not invoke search_memories"
+
+
+def test_apply_same_filename_no_op_when_nothing_to_delete(monkeypatch, capsys):
+    """No same-filename sets in scope: no backup check needed, no deletion,
+    a clean no-op rather than a spurious block."""
+    docs = {"s1": "SHARED", "s2": "SHARED"}
+    groups = {r"S:\a\aero.css": ["s1"], r"S:\a\black.css": ["s2"]}
+    fake_col = _fake_same_filename_palace(monkeypatch, groups, docs)
+    backup_check_called = []
+    monkeypatch.setattr(
+        dedup,
+        "check_backup_freshness",
+        lambda **k: backup_check_called.append(1) or {"ok": True, "reason": "x", "problems": []},
+    )
+
+    metrics = dedup.apply_same_filename_dedup(palace_path="X:/fake", dry_run=False)
+
+    assert fake_col.deleted_ids == []
+    assert metrics["status"] == "no-op"
+    assert not backup_check_called  # never even asked -- nothing to delete
+
+
+# ── CLI wiring for --same-filename-cleanup / --apply-same-filename ─────
+
+
+def test_cli_apply_same_filename_requires_same_filename_cleanup():
+    import subprocess
+    import sys as sys_module
+
+    res = subprocess.run(
+        [sys_module.executable, "-m", "mempalace.dedup", "--apply-same-filename"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert res.returncode == 2
+    assert "--apply-same-filename only applies to --same-filename-cleanup" in res.stderr
+
+
+def test_cli_same_filename_cleanup_rejects_stats_combo():
+    import subprocess
+    import sys as sys_module
+
+    res = subprocess.run(
+        [sys_module.executable, "-m", "mempalace.dedup", "--same-filename-cleanup", "--stats"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert res.returncode == 2
+    assert "--same-filename-cleanup cannot be combined with --stats" in res.stderr
+
+
+def test_cli_same_filename_cleanup_rejects_apply_combo():
+    import subprocess
+    import sys as sys_module
+
+    res = subprocess.run(
+        [sys_module.executable, "-m", "mempalace.dedup", "--same-filename-cleanup", "--apply"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert res.returncode == 2
+    assert "use --apply-same-filename" in res.stderr
+
+
+def test_cli_same_filename_cleanup_dry_run_against_nonexistent_palace_does_not_crash_parser():
+    """Parser-level wiring only: --same-filename-cleanup alone (no --apply)
+    must parse cleanly (real palace connection failure is a runtime error,
+    not a parser error) -- proving it is accepted as its own mode."""
+    import subprocess
+    import sys as sys_module
+
+    res = subprocess.run(
+        [
+            sys_module.executable,
+            "-m",
+            "mempalace.dedup",
+            "--same-filename-cleanup",
+            "--palace",
+            "X:/definitely-not-a-real-palace-path",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    # Never a parser error (exit 2); it fails later trying to open the palace.
+    assert res.returncode != 2
