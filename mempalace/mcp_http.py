@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import functools
 import hmac
 import json
@@ -819,6 +820,98 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+ACCEPT_LOOP_FAILURE_MESSAGE = "Accept failed on a socket"
+
+
+def _handle_accept_loop_exception(loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
+    """memsys#458: the loop-wide asyncio exception handler that hardens the
+    bridge's accept loop against the zombie-identity-match-no-listener
+    incident -- alive by every pid check, serving nothing.
+
+    Root cause, verified against this project's own CPython 3.11 stdlib
+    (``Lib/asyncio/proactor_events.py``, ``BaseProactorEventLoop.
+    _accept_connection``'s inner ``loop()``): on Windows, ANY ``OSError``
+    raised while accepting a connection -- including a transient WinError 64
+    during a brief network hiccup -- is caught there, reported via
+    ``loop.call_exception_handler({'message': 'Accept failed on a socket',
+    ...})``, and the listening socket is then unconditionally closed on the
+    very next line. There is no retry, no re-arm, and no public hook that
+    lets a handler countermand the close -- by the time this function runs,
+    the outcome (socket closed forever) is already decided. The event loop
+    and the process both keep running; nothing is listening on the port
+    ever again.
+
+    Because CPython always treats this specific event as fatal to the
+    socket, "log and continue" is not an available response for THIS event
+    -- there is no in-process recovery to attempt. The honest, safe
+    response is to log loudly with full detail and exit the process
+    non-zero immediately, so external supervision (the MemSys watchdog /
+    launcher, see agent-settings' Start-MemSysRouter.ps1
+    zombie-identity-match-no-listener repair path) restarts the bridge
+    instead of it sitting resident and useless -- dying quietly while
+    staying resident is the worst outcome memsys#458 identified.
+
+    Every OTHER unhandled callback exception routed through this handler is
+    genuinely "log and continue": it is forwarded to asyncio's own default
+    exception handler (logged, loop keeps running), unchanged from stock
+    behaviour. Narrowing the exit path to exactly this one message means an
+    unrelated background-task exception elsewhere cannot take the whole
+    bridge down.
+
+    ``os._exit`` (not ``sys.exit``) is required here: this callback runs
+    inside the event loop's own synchronous dispatch, where a raised
+    ``SystemExit`` would just be reported as yet another "exception in
+    callback" rather than actually terminating the interpreter.
+    """
+    if context.get("message") != ACCEPT_LOOP_FAILURE_MESSAGE:
+        loop.default_exception_handler(context)
+        return
+
+    exc = context.get("exception")
+    logger.critical(
+        "MemPalace bridge lost its listening socket and cannot recover it "
+        "in-process (memsys#458): asyncio's own accept loop closes the "
+        "socket unconditionally after any OSError raised during accept, "
+        "with no retry available to this process. Exiting non-zero for "
+        "supervised restart instead of staying resident with nothing "
+        "listening. socket=%r",
+        context.get("socket"),
+        exc_info=exc if isinstance(exc, BaseException) else None,
+    )
+    # Flush every logging handler before the hard exit below -- os._exit
+    # skips normal interpreter cleanup, and this CRITICAL line is the only
+    # record of why the process is about to disappear.
+    logging.shutdown()
+    os._exit(1)
+
+
+async def _serve_with_hardened_accept_loop(server: Any) -> None:
+    """Install the memsys#458 accept-loop exception handler before serving.
+
+    ``server`` is a ``uvicorn.Server`` in production; typed ``Any`` so tests
+    can pass a disposable fake without importing uvicorn's private surface.
+    """
+    asyncio.get_running_loop().set_exception_handler(_handle_accept_loop_exception)
+    await server.serve()
+
+
+def _run_uvicorn_with_hardened_accept_loop(config: Any) -> None:
+    """memsys#458: run uvicorn the same way ``uvicorn.Server(config).run()``
+    does, except the accept-loop exception handler is installed on the
+    fresh event loop before ``server.serve()`` starts accepting
+    connections, so a dead listening socket cannot go unnoticed.
+
+    ``uvicorn.Server.run()`` is intentionally not reused here: it opens its
+    own event loop internally (via an ``asyncio.run``-equivalent) with no
+    hook to set an exception handler before serving begins, and the
+    handler must be attached before the first connection can arrive.
+    """
+    import uvicorn
+
+    server = uvicorn.Server(config)
+    asyncio.run(_serve_with_hardened_accept_loop(server))
+
+
 def main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
     if not 1 <= args.port <= 65535:
@@ -882,7 +975,8 @@ def main(argv: list[str] | None = None) -> None:
         timeout_graceful_shutdown=10,
         ws="none",
     )
-    uvicorn.Server(config).run()
+    # memsys#458: hardened accept loop -- see _run_uvicorn_with_hardened_accept_loop.
+    _run_uvicorn_with_hardened_accept_loop(config)
 
 
 if __name__ == "__main__":  # pragma: no cover

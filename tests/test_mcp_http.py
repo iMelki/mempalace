@@ -1432,3 +1432,133 @@ def test_cli_defaults_to_loopback_and_serial_backend_calls():
     assert (
         _parse_args(["--termination-timeout-seconds", "0.25"]).termination_timeout_seconds == 0.25
     )
+
+
+# --- memsys#458: hardened accept loop ---------------------------------------
+#
+# These never open a real listening socket or force a genuine WinError 64 --
+# that would be flaky-by-construction and platform-specific. Instead they
+# prove the two things that actually matter and are fully deterministic:
+# (1) the classifier routes the exact asyncio accept-loop-death signature to
+# a non-zero process exit and forwards every other exception context to
+# asyncio's stock default handler unchanged, and (2) the handler is really
+# the one installed on the loop `uvicorn.Server.serve()` runs on, not merely
+# reachable in theory. `os._exit` is monkeypatched throughout so a matching
+# test cannot terminate the pytest process itself.
+
+
+class _RecordingLoop:
+    """Minimal stand-in for asyncio.AbstractEventLoop's one method the
+    handler calls on the non-matching path, so that path can be asserted
+    without depending on a real event loop's internal state."""
+
+    def __init__(self):
+        self.default_handler_calls: list[dict] = []
+
+    def default_exception_handler(self, context):
+        self.default_handler_calls.append(context)
+
+
+def test_accept_loop_handler_exits_nonzero_on_the_exact_accept_loop_death_signature(
+    monkeypatch, caplog
+):
+    exit_calls = []
+    monkeypatch.setattr(mcp_http_module.os, "_exit", lambda code: exit_calls.append(code))
+    loop = _RecordingLoop()
+    context = {
+        "message": mcp_http_module.ACCEPT_LOOP_FAILURE_MESSAGE,
+        "exception": OSError(64, "The specified network name is no longer available"),
+        "socket": "fixture-socket-repr",
+    }
+
+    with caplog.at_level("CRITICAL", logger="mempalace_mcp_http"):
+        mcp_http_module._handle_accept_loop_exception(loop, context)
+
+    assert exit_calls == [1]
+    assert loop.default_handler_calls == []
+    assert any("memsys#458" in record.message for record in caplog.records)
+
+
+def test_accept_loop_handler_forwards_every_other_exception_to_the_default_handler(monkeypatch):
+    exit_calls = []
+    monkeypatch.setattr(mcp_http_module.os, "_exit", lambda code: exit_calls.append(code))
+    loop = _RecordingLoop()
+    unrelated_context = {
+        "message": "Exception in callback something_else()",
+        "exception": RuntimeError("unrelated background task failure"),
+    }
+
+    mcp_http_module._handle_accept_loop_exception(loop, unrelated_context)
+
+    assert exit_calls == []
+    assert loop.default_handler_calls == [unrelated_context]
+
+
+def test_accept_loop_handler_does_not_exit_when_message_is_merely_similar(monkeypatch):
+    # Guards against a substring/fuzzy match accidentally widening the trigger
+    # to something that merely mentions "accept" or "socket".
+    exit_calls = []
+    monkeypatch.setattr(mcp_http_module.os, "_exit", lambda code: exit_calls.append(code))
+    loop = _RecordingLoop()
+    almost_context = {"message": "Accept failed on a socket during shutdown"}
+
+    mcp_http_module._handle_accept_loop_exception(loop, almost_context)
+
+    assert exit_calls == []
+    assert loop.default_handler_calls == [almost_context]
+
+
+def test_serve_with_hardened_accept_loop_installs_the_real_handler_before_serving(monkeypatch):
+    exit_calls = []
+    monkeypatch.setattr(mcp_http_module.os, "_exit", lambda code: exit_calls.append(code))
+    observed_handler = {}
+
+    class _FakeServer:
+        async def serve(self):
+            loop = asyncio.get_running_loop()
+            observed_handler["handler"] = loop.get_exception_handler()
+            # Firing the handler THIS way (through the loop's own dispatch,
+            # not by calling the function directly) proves the wiring, not
+            # just the classifier logic already covered above.
+            loop.call_exception_handler(
+                {
+                    "message": mcp_http_module.ACCEPT_LOOP_FAILURE_MESSAGE,
+                    "exception": OSError(64, "fixture"),
+                }
+            )
+
+    asyncio.run(mcp_http_module._serve_with_hardened_accept_loop(_FakeServer()))
+
+    assert observed_handler["handler"] is mcp_http_module._handle_accept_loop_exception
+    assert exit_calls == [1]
+
+
+def test_run_uvicorn_with_hardened_accept_loop_wires_a_real_uvicorn_server(monkeypatch):
+    import uvicorn
+
+    served = []
+
+    class _FakeServer:
+        def __init__(self, config):
+            served.append(config)
+
+        async def serve(self):
+            # Proves the handler is attached even through the full
+            # uvicorn.Server(config) construction path, not only when a
+            # server object is handed in directly.
+            asyncio.get_running_loop().call_exception_handler(
+                {
+                    "message": mcp_http_module.ACCEPT_LOOP_FAILURE_MESSAGE,
+                    "exception": OSError(64, "fixture"),
+                }
+            )
+
+    exit_calls = []
+    monkeypatch.setattr(mcp_http_module.os, "_exit", lambda code: exit_calls.append(code))
+    monkeypatch.setattr(uvicorn, "Server", _FakeServer)
+
+    fixture_config = object()
+    mcp_http_module._run_uvicorn_with_hardened_accept_loop(fixture_config)
+
+    assert served == [fixture_config]
+    assert exit_calls == [1]
