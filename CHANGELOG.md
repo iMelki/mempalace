@@ -123,6 +123,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **Public documentation and dedup fixtures no longer expose workstation-specific
+  filesystem roots (#42).** Historical operational examples now use portable
+  placeholders, while dedup test fixtures use synthetic project paths that retain
+  the original basename and grouping behavior.
+
 - **A redirected `dedup` run no longer dies on the module's own decoration
   (#32).** `_printable()` protected the arbitrary user content dedup prints, but
   was never applied to dedup's own literals: the horizontal rules and `->`
@@ -568,7 +573,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   The fresh SQLite replay dry-run planned `856,510` rows in `857` batches,
   replayed `0`, and left the live collection unchanged. A post-drain palace
   backup is now verified tar-readable at
-  `C:\Users\Milky\.mempalace\backups\palace-2026-07-03-1526-pre-hnsw-sqlite-replay-final-drain.tar.gz`
+  `<user-home>/.mempalace/backups/palace-2026-07-03-1526-pre-hnsw-sqlite-replay-final-drain.tar.gz`
   (`14,636.8 MB` compressed in `986.5s`; total `1,062.6s`; upload disabled),
   satisfying the fresh-backup gate before any supervised non-dry replay.
 - **HNSW incident tracking now reflects the post-provider-chat SQLite growth.**
