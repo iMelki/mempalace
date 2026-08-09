@@ -1,6 +1,6 @@
 # MemPalace Open Tasks
 
-Last updated: 2026-08-08
+Last updated: 2026-08-09
 
 This file is the durable local index for active `mempalace` issues.
 
@@ -460,7 +460,7 @@ This file is the durable local index for active `mempalace` issues.
     `status=completed`, `replayed=856,510 == planned_reembed_count`,
     `verified_count=856,510`, `warnings=[]`, duration `18,621.7s` (~5h10m).
     Result artifact:
-    `C:\Users\Milky\.mempalace\repair-runs\sqlite-replay-final-20260703T130250Z\result.json`.
+    `<user-home>/.mempalace/repair-runs/sqlite-replay-final-20260703T130250Z/result.json`.
     Follow-up `repair-status` (2026-07-04): drawers `sqlite=861,715`,
     `hnsw=850,000`, divergence `11,715`, `status=OK`; closets
     `sqlite=12,107`, `hnsw=11,826`, divergence `281`, `status=OK`. Divergence
@@ -486,6 +486,18 @@ This file is the durable local index for active `mempalace` issues.
   - Completed via [PR #2](https://github.com/iMelki/mempalace/pull/2).
 
 ## Recently Closed
+
+- [#43 - Pre-push Git environment breaks temporary-repository tests](https://github.com/iMelki/mempalace/issues/43)
+  - Closed 2026-08-09 after isolating both disposable-repository setup and scanner
+    Git reads from an enclosing hook's repository-local environment. The focused
+    project-scanner and palace-lock tranche passes `54` tests, including regressions
+    for fixture creation and scanner reads under inherited Git variables.
+
+- [#42 - Sanitize personal paths from public documentation](https://github.com/iMelki/mempalace/issues/42)
+  - Closed 2026-08-09 after replacing workstation-specific roots in the changelog,
+    task index, and dedup fixtures with portable placeholders or synthetic paths.
+    The focused dedup suite passed `117` tests with `1` skipped, and local Markdown
+    links validated successfully.
 
 - [#27 - Conversation miner cannot reconcile pending drawer-and-closet rewrite](https://github.com/iMelki/mempalace/issues/27)
   - Closed 2026-07-29 after `69ea0d9` bound an existing closet collection

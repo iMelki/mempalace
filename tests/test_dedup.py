@@ -357,11 +357,11 @@ def test_count_cross_source_duplicates_merges_across_source_groups():
 def test_count_cross_source_duplicates_reports_contributing_source_paths():
     """Five on-disk copies of one project: the operator must see WHICH paths."""
     paths = [
-        r"S:\source\EMTS\Repeater_System\repeater-system\assets\js\bui.js",
-        r"S:\source\EMTS\Repeater_System\repeater-system-mobile-fixes\assets\js\bui.js",
-        r"S:\source\EMTS\Repeater_System\repeater-system-all-ui-alpha-ver\assets\js\bui.js",
-        r"S:\source\EMTS\Repeater_System\repeater-system_backup_250522\assets\js\bui.js",
-        r"S:\source\EMTS\Repeater_System\files\bui.js",
+        r"X:\projects\ExampleOrg\Widget_System\widget-system\assets\js\bui.js",
+        r"X:\projects\ExampleOrg\Widget_System\widget-system-mobile-fixes\assets\js\bui.js",
+        r"X:\projects\ExampleOrg\Widget_System\widget-system-all-ui-alpha-ver\assets\js\bui.js",
+        r"X:\projects\ExampleOrg\Widget_System\widget-system_backup_250522\assets\js\bui.js",
+        r"X:\projects\ExampleOrg\Widget_System\files\bui.js",
     ]
     groups = {p: [f"d{i}"] for i, p in enumerate(paths)}
     col = MagicMock()
@@ -1801,9 +1801,9 @@ def test_plan_same_filename_deletions_redundant_is_n_minus_one_per_set():
 
 def test_plan_same_filename_deletions_reports_contributing_paths_and_filename():
     paths = [
-        r"S:\source\EMTS\Repeater_System\repeater-system\assets\js\bui.js",
-        r"S:\source\EMTS\Repeater_System\repeater-system-mobile-fixes\assets\js\bui.js",
-        r"S:\source\EMTS\Repeater_System\repeater-system_backup_250522\assets\js\bui.js",
+        r"X:\projects\ExampleOrg\Widget_System\widget-system\assets\js\bui.js",
+        r"X:\projects\ExampleOrg\Widget_System\widget-system-mobile-fixes\assets\js\bui.js",
+        r"X:\projects\ExampleOrg\Widget_System\widget-system_backup_250522\assets\js\bui.js",
     ]
     groups = {p: [f"d{i}"] for i, p in enumerate(paths)}
     col = MagicMock()
