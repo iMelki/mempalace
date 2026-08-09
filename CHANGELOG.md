@@ -123,10 +123,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
-- **Temporary Git repositories used by project-scanner tests now ignore an
-  enclosing hook's repository-local environment (#43).** The existing allowlisted
-  test environment is applied to initialization and configuration as well as
-  add/commit, so the full suite can run from a real pre-push hook.
+- **Project-scanner Git subprocesses now ignore an enclosing hook's
+  repository-local environment (#43).** Disposable test repositories use an
+  allowlisted environment, scanner reads strip Git's repository-local variables,
+  and Git text is decoded as UTF-8, so the full suite can run from a real pre-push
+  hook without accidentally reading the outer repository.
 
 - **Public documentation and dedup fixtures no longer expose workstation-specific
   filesystem roots (#42).** Historical operational examples now use portable

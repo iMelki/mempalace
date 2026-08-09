@@ -21,6 +21,7 @@ from mempalace.project_scanner import (
     _parse_gomod,
     _parse_package_json,
     _parse_pyproject,
+    _run_git,
     _UnionFind,
     discover_entities,
     find_git_repos,
@@ -280,6 +281,18 @@ def test_init_git_repo_ignores_inherited_repo_local_git_environment(tmp_path, mo
     _init_git_repo(repo)
 
     assert (repo / ".git").is_dir()
+
+
+def test_run_git_ignores_inherited_repo_local_git_environment(tmp_path, monkeypatch):
+    repo = tmp_path / "fixture-repo"
+    repo.mkdir()
+    _init_git_repo(repo)
+    monkeypatch.setenv("GIT_DIR", str(tmp_path / "outer.git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(tmp_path / "outer-worktree"))
+
+    output = _run_git(repo, "log", "-1", "--format=%s")
+
+    assert output.strip() == "initial"
 
 
 def test_scan_project_from_package_json(tmp_path):
