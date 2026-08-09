@@ -123,6 +123,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **Test-process cache cleanup and bounded #41 diagnostics (#41; relates to
+  #24).** The test fixture resets the default Chroma backend and known-entity
+  cache between units, bounds the managed-write readback configuration to
+  1–60 seconds, and adds pseudonymous per-test metrics to pytest's report
+  only on failure—never a separate local traceback artifact. `mine_lock`
+  records both successful and failed acquisition attempts, including the
+  elapsed time needed to diagnose the Windows retry cliff.
+- **Advisory lock sentinel safety is documented and regression-tested (#41).**
+  Existing lock paths deliberately persist after descriptor close: deleting a
+  path while another contender has the prior file identity open can split the
+  cross-process exclusion boundary. The originally proposed gitignore entry
+  for raw failure artifacts is intentionally not retained; safe lock-path
+  retention remains a separate, evidence-gated task.
+
 - **Project-scanner Git subprocesses now ignore an enclosing hook's
   repository-local environment (#43).** Disposable test repositories use an
   allowlisted environment, scanner reads strip Git's repository-local variables,

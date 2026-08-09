@@ -1,9 +1,11 @@
 """Focused coverage for the issue #22 managed-write receipt foundation."""
 
 import copy
+import importlib.util
 import json
 import os
 import re
+import sys
 import threading
 import time
 import uuid
@@ -3401,6 +3403,91 @@ def test_exact_snapshot_fails_closed_when_embedding_visibility_never_arrives(mon
             ["stable-row"],
             include_embeddings=True,
         )
+
+
+@pytest.mark.parametrize(
+    "raw", ["0", "0.001", "0.5", "0.999", "-1", "nan", "inf", "1e300", "60.01", "not-a-number"]
+)
+def test_readback_timeout_env_rejects_non_positive_non_finite_and_invalid_values(monkeypatch, raw):
+    monkeypatch.setenv("MEMPALACE_MANAGED_WRITE_READBACK_TIMEOUT_SECONDS", raw)
+
+    assert (
+        write_receipts_module._read_positive_finite_timeout_from_env(
+            "MEMPALACE_MANAGED_WRITE_READBACK_TIMEOUT_SECONDS", 5.0
+        )
+        == 5.0
+    )
+
+
+def test_readback_timeout_env_accepts_a_positive_finite_value(monkeypatch):
+    monkeypatch.setenv("MEMPALACE_MANAGED_WRITE_READBACK_TIMEOUT_SECONDS", "12.5")
+
+    assert (
+        write_receipts_module._read_positive_finite_timeout_from_env(
+            "MEMPALACE_MANAGED_WRITE_READBACK_TIMEOUT_SECONDS", 5.0
+        )
+        == 12.5
+    )
+
+
+def test_readback_timeout_env_accepts_its_reviewed_upper_bound(monkeypatch):
+    monkeypatch.setenv("MEMPALACE_MANAGED_WRITE_READBACK_TIMEOUT_SECONDS", "60")
+
+    assert (
+        write_receipts_module._read_positive_finite_timeout_from_env(
+            "MEMPALACE_MANAGED_WRITE_READBACK_TIMEOUT_SECONDS", 5.0
+        )
+        == 60.0
+    )
+
+
+def test_readback_timeout_invalid_env_log_does_not_echo_the_raw_value(monkeypatch, caplog):
+    raw = "private-config-value"
+    monkeypatch.setenv("MEMPALACE_MANAGED_WRITE_READBACK_TIMEOUT_SECONDS", raw)
+
+    with caplog.at_level("WARNING", logger="mempalace.write_receipts"):
+        assert (
+            write_receipts_module._read_positive_finite_timeout_from_env(
+                "MEMPALACE_MANAGED_WRITE_READBACK_TIMEOUT_SECONDS", 5.0
+            )
+            == 5.0
+        )
+
+    assert raw not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (None, 5.0),
+        ("12.5", 12.5),
+        ("0", 5.0),
+        ("0.999", 5.0),
+        ("nan", 5.0),
+        ("inf", 5.0),
+        ("1e300", 5.0),
+        ("not-a-number", 5.0),
+    ],
+)
+def test_readback_timeout_env_is_applied_during_a_fresh_module_import(monkeypatch, raw, expected):
+    """The import-time constant must use the bounded parser, not just expose it."""
+    module_name = "mempalace._test_write_receipts_import_config"
+    spec = importlib.util.spec_from_file_location(module_name, write_receipts_module.__file__)
+    assert spec is not None
+    assert spec.loader is not None
+    fresh_module = importlib.util.module_from_spec(spec)
+
+    with monkeypatch.context() as environment:
+        if raw is None:
+            environment.delenv("MEMPALACE_MANAGED_WRITE_READBACK_TIMEOUT_SECONDS", raising=False)
+        else:
+            environment.setenv("MEMPALACE_MANAGED_WRITE_READBACK_TIMEOUT_SECONDS", raw)
+        sys.modules[module_name] = fresh_module
+        try:
+            spec.loader.exec_module(fresh_module)
+            assert fresh_module._MANAGED_WRITE_READBACK_TIMEOUT_SECONDS == expected
+        finally:
+            sys.modules.pop(module_name, None)
 
 
 def test_exact_embedding_readback_propagates_unrelated_backend_errors():

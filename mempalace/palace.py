@@ -6,10 +6,15 @@ Consolidates collection access patterns used by both miners and the MCP server.
 
 import contextlib
 import hashlib
+import logging
+import math
 import os
 import re
+import time
 
 from .backends.chroma import ChromaBackend
+
+_LOGGER = logging.getLogger(__name__)
 
 SKIP_DIRS = {
     ".git",
@@ -38,6 +43,24 @@ SKIP_DIRS = {
 }
 
 _DEFAULT_BACKEND = ChromaBackend()
+
+
+def reset_default_backend() -> None:
+    """Drop every client cached by the process-wide default backend.
+
+    ``_DEFAULT_BACKEND`` is a module-level singleton shared by every miner
+    and MCP call in the process, so its client cache never naturally clears.
+    mempalace#41 measured a full test-suite run ending with 110 live
+    ``PersistentClient`` objects because nothing called this between tests.
+
+    This is a test-lifecycle primitive: the autouse ``_reset_mcp_cache``
+    fixture in ``tests/conftest.py`` calls it alongside the existing
+    ``ChromaBackend._quarantined_paths`` clear. A production caller must first
+    coordinate all in-flight work that could hold a collection/client; this
+    helper intentionally does not provide that runtime ownership protocol.
+    """
+    _DEFAULT_BACKEND.reset()
+
 
 # Schema version for drawer normalization. Bump when the normalization
 # pipeline changes in a way that existing drawers should be rebuilt to pick up
@@ -286,42 +309,153 @@ def upsert_closet_lines(closets_col, closet_id_base, lines, metadata):
     return closets_written
 
 
+# mine_lock's Windows path (msvcrt.locking(LK_LOCK)) retries roughly 10
+# times at ~1s intervals before raising OSError — a ~10s hard cliff that is
+# NOT a RuntimeError, so it escapes any `pytest.raises(RuntimeError, ...)`
+# guard around the code that eventually calls this. mempalace#41 measured a
+# worst-case acquisition of 4.0s under full-suite load — only ~2.5x headroom
+# against that cliff, the tightest margin found anywhere on this path. Log
+# when acquisition crosses this threshold so a real approach to the cliff is
+# caught in the logs before it ever fires, rather than discovered after the
+# fact from a mysterious OSError. Overridable via env var for local tuning.
+def _read_positive_finite_float_from_env(
+    name: str,
+    default: float,
+    *,
+    maximum: float = 9.0,
+) -> float:
+    """Return a safe diagnostic threshold without making module import fragile.
+
+    This value gates warnings only, but an invalid environment value must not
+    crash a miner at startup or turn a finite warning threshold into a value
+    that can never be reached before the documented ~10-second Windows lock
+    acquisition cliff. Do not include the raw configuration value in the log
+    because environment strings may carry sensitive local context.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        configured = float(raw)
+    except (TypeError, ValueError):
+        _LOGGER.warning("Ignoring invalid configured lock threshold for %s; using default.", name)
+        return default
+    if not math.isfinite(configured) or configured <= 0 or configured > maximum:
+        _LOGGER.warning(
+            "Ignoring out-of-range configured lock threshold for %s; using default.", name
+        )
+        return default
+    return configured
+
+
+_MINE_LOCK_WARN_THRESHOLD_SECONDS = _read_positive_finite_float_from_env(
+    "MEMPALACE_MINE_LOCK_WARN_THRESHOLD_SECONDS", 2.0, maximum=9.0
+)
+
+# Running counters for mine_lock attempts, readable by tests and diagnostics
+# without scraping logs. Failed acquisition attempts are included deliberately:
+# the Windows msvcrt retry cliff raises before a caller gets the lock. This is
+# best-effort observability, not a correctness primitive.
+_MINE_LOCK_STATS = {
+    "attempts": 0,
+    "successful_acquisitions": 0,
+    "failed_acquisitions": 0,
+    "max_attempt_seconds": 0.0,
+    "max_successful_acquire_seconds": 0.0,
+}
+
+
+def get_mine_lock_stats() -> dict:
+    """Return a snapshot of ``mine_lock`` attempt counters and durations."""
+    return dict(_MINE_LOCK_STATS)
+
+
+def reset_mine_lock_stats() -> None:
+    """Reset the ``mine_lock`` attempt counters (test-only)."""
+    _MINE_LOCK_STATS.update(
+        {
+            "attempts": 0,
+            "successful_acquisitions": 0,
+            "failed_acquisitions": 0,
+            "max_attempt_seconds": 0.0,
+            "max_successful_acquire_seconds": 0.0,
+        }
+    )
+
+
+def _record_mine_lock_attempt(*, acquired: bool, elapsed_seconds: float) -> None:
+    """Record one acquisition attempt, including a raised lock operation."""
+    _MINE_LOCK_STATS["attempts"] += 1
+    if acquired:
+        _MINE_LOCK_STATS["successful_acquisitions"] += 1
+        if elapsed_seconds > _MINE_LOCK_STATS["max_successful_acquire_seconds"]:
+            _MINE_LOCK_STATS["max_successful_acquire_seconds"] = elapsed_seconds
+    else:
+        _MINE_LOCK_STATS["failed_acquisitions"] += 1
+    if elapsed_seconds > _MINE_LOCK_STATS["max_attempt_seconds"]:
+        _MINE_LOCK_STATS["max_attempt_seconds"] = elapsed_seconds
+
+
 @contextlib.contextmanager
 def mine_lock(source_file: str):
     """Cross-platform file lock for mine operations.
 
     Prevents multiple agents from mining the same file simultaneously,
     which causes duplicate drawers when the delete+insert cycle interleaves.
+
+    Lock-path sentinels intentionally persist after release. Advisory locks
+    are tied to the opened file identity: on POSIX, unlinking while another
+    contender already has the old file open can leave that contender waiting
+    on an unlinked inode while a later caller creates and locks a new inode.
+    That splits the exclusivity boundary. Closing the descriptor releases the
+    OS lock safely; any retention cleanup must be separately serialized and
+    prove that no contender can still hold or open the path.
     """
     lock_dir = os.path.join(os.path.expanduser("~"), ".mempalace", "locks")
     os.makedirs(lock_dir, exist_ok=True)
-    lock_path = os.path.join(
-        lock_dir, hashlib.sha256(source_file.encode()).hexdigest()[:16] + ".lock"
-    )
+    source_lock_key = hashlib.sha256(source_file.encode()).hexdigest()[:16]
+    lock_path = os.path.join(lock_dir, source_lock_key + ".lock")
 
     lf = open(lock_path, "w")
+    acquire_started = time.monotonic()
+    acquired = False
     try:
-        if os.name == "nt":
-            import msvcrt
-
-            msvcrt.locking(lf.fileno(), msvcrt.LK_LOCK, 1)
-        else:
-            import fcntl
-
-            fcntl.flock(lf, fcntl.LOCK_EX)
-        yield
-    finally:
         try:
             if os.name == "nt":
                 import msvcrt
 
-                msvcrt.locking(lf.fileno(), msvcrt.LK_UNLCK, 1)
+                msvcrt.locking(lf.fileno(), msvcrt.LK_LOCK, 1)
             else:
                 import fcntl
 
-                fcntl.flock(lf, fcntl.LOCK_UN)
-        except Exception:
-            pass
+                fcntl.flock(lf, fcntl.LOCK_EX)
+            acquired = True
+        finally:
+            acquire_elapsed = time.monotonic() - acquire_started
+            _record_mine_lock_attempt(acquired=acquired, elapsed_seconds=acquire_elapsed)
+            if acquire_elapsed >= _MINE_LOCK_WARN_THRESHOLD_SECONDS:
+                _LOGGER.warning(
+                    "mine_lock acquisition %s after %.3fs for source lock %s — approaching the "
+                    "~10s msvcrt OSError cliff on Windows (mempalace#41)",
+                    "succeeded" if acquired else "failed",
+                    acquire_elapsed,
+                    source_lock_key,
+                )
+
+        yield
+    finally:
+        if acquired:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+
+                    msvcrt.locking(lf.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(lf, fcntl.LOCK_UN)
+            except Exception:
+                pass
         lf.close()
 
 
@@ -353,6 +487,11 @@ def mine_palace_lock(palace_path: str):
     Non-blocking: if another `mine` is already writing to this palace,
     raise MineAlreadyRunning so the caller can exit cleanly instead of
     piling up as a waiting worker.
+
+    Its lock-path sentinel persists for the same reason as ``mine_lock``:
+    deleting a path while another process may still have the previous file
+    identity open can split the cross-process exclusion boundary. Descriptor
+    close releases the lock; any retention policy is separate from locking.
     """
     lock_dir = os.path.join(os.path.expanduser("~"), ".mempalace", "locks")
     os.makedirs(lock_dir, exist_ok=True)

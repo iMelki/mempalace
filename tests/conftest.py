@@ -10,12 +10,14 @@ mempalace imports — so that module-level initialisations (e.g.
 instead of the real user profile.
 """
 
+import json
 import os
 import hashlib
 import math
 import re
 import shutil
 import tempfile
+import time
 
 # ── Isolate HOME before any mempalace imports ──────────────────────────
 _original_env = {}
@@ -28,6 +30,15 @@ os.environ["HOME"] = _session_tmp
 os.environ["USERPROFILE"] = _session_tmp
 os.environ["HOMEDRIVE"] = os.path.splitdrive(_session_tmp)[0] or "C:"
 os.environ["HOMEPATH"] = os.path.splitdrive(_session_tmp)[1] or _session_tmp
+
+# mempalace#41: give the managed-write readback loops (write_receipts.py) a
+# generous budget under test rather than the 5s production default, so a
+# loaded full-suite run has more headroom before the bounded retry gives up.
+# `setdefault` so a developer's own override (e.g. to force 0.0 and exercise
+# the deadline path outside `monkeypatch`) still wins. Individual tests that
+# `monkeypatch.setattr` the module constant directly take precedence over
+# both, since that assignment happens after import time.
+os.environ.setdefault("MEMPALACE_MANAGED_WRITE_READBACK_TIMEOUT_SECONDS", "20")
 
 # Now it is safe to import mempalace modules that trigger initialisation.
 import chromadb  # noqa: E402
@@ -80,7 +91,24 @@ _TEST_EMBEDDING_FUNCTION = _DeterministicEmbeddingFunction()
 
 @pytest.fixture(autouse=True)
 def _reset_mcp_cache():
-    """Reset the MCP server's cached ChromaDB client/collection between tests."""
+    """Reset process-wide caches so no test leaks state into the next one.
+
+    mempalace#41 measured two never-reset module-level singletons that
+    accumulate for the whole test session:
+
+    * ``palace._DEFAULT_BACKEND`` — its ``_clients``/``_freshness`` dicts
+      held 110 live ``PersistentClient`` objects (plus their SQLite handles
+      and in-RAM HNSW segments) by the end of one full-suite run, since
+      nothing ever called ``close_palace``/``close`` between tests.
+    * ``miner._ENTITY_REGISTRY_CACHE`` — mtime-gated against
+      ``~/.mempalace/known_entities.json``, which resolves against the
+      session-shared temp ``HOME`` set up above. A predecessor test's write
+      could silently change a later test's closet documents and receipt
+      entity-extraction digest.
+
+    Both are reset here alongside the pre-existing MCP client/collection
+    cache and ``ChromaBackend._quarantined_paths`` clear.
+    """
 
     def _clear_cache():
         try:
@@ -96,6 +124,18 @@ def _reset_mcp_cache():
             from mempalace.backends.chroma import ChromaBackend
 
             ChromaBackend._quarantined_paths.clear()
+        except (ImportError, AttributeError):
+            pass
+        try:
+            from mempalace import palace
+
+            palace.reset_default_backend()
+        except (ImportError, AttributeError):
+            pass
+        try:
+            from mempalace import miner
+
+            miner.reset_entity_registry_cache()
         except (ImportError, AttributeError):
             pass
 
@@ -261,3 +301,144 @@ def seeded_kg(kg):
     kg.add_triple("Alice", "works_at", "NewCo", valid_from="2025-01-01")
 
     return kg
+
+
+# ── Failure diagnostics (mempalace#41 / #24) ────────────────────────────
+#
+# Two flaky-under-load occurrences in TestDiaryIngest each lost their
+# traceback: the pre-push runner invoked pytest with just `-q`, and neither
+# occurrence recorded attempt counts or elapsed time for the bounded-retry
+# helpers on the suspected path. The two pieces below close that gap:
+#
+# 1. `pytest_runtest_makereport` attaches a sanitized section to the current
+#    failed setup/call report before pytest emits that report.
+# 2. `_readback_and_lock_diagnostics` wraps the two managed-write readback
+#    helpers named in #41 (`_collection_rows_for_ids`,
+#    `_verify_managed_write_readback`) to count calls and track elapsed
+#    time, and resets then reads `palace.get_mine_lock_stats()` for the
+#    current test's mine_lock attempt counters. The makereport hook attaches
+#    a diagnostics section to the actual failed setup/call report before
+#    pytest emits it. It adds only a bounded,
+#    pseudonymous metrics section to pytest's own report. Full traceback text
+#    and raw node IDs can contain source paths, fixture values, or assertion
+#    data, so this fixture never materializes a separate local artifact.
+_DIAGNOSTICS_SCHEMA = "mempalace-test-failure-diagnostics/v1"
+_DIAGNOSTICS_MAX_BYTES = 4096
+
+
+def _build_sanitized_failure_diagnostics(
+    *,
+    nodeid: str,
+    phase: str,
+    stats: dict,
+    mine_lock_stats: dict,
+) -> str:
+    """Build one bounded metrics-only report section without raw test data."""
+    artifact = {
+        "schema": _DIAGNOSTICS_SCHEMA,
+        "phase": phase,
+        "test_id_sha256": hashlib.sha256(nodeid.encode("utf-8")).hexdigest(),
+        "readback": {
+            "collection_rows_for_ids_calls": int(stats["collection_rows_for_ids_calls"]),
+            "collection_rows_for_ids_elapsed_max": float(
+                stats["collection_rows_for_ids_elapsed_max"]
+            ),
+            "verify_managed_write_readback_calls": int(
+                stats["verify_managed_write_readback_calls"]
+            ),
+            "verify_managed_write_readback_elapsed_max": float(
+                stats["verify_managed_write_readback_elapsed_max"]
+            ),
+        },
+        "mine_lock": {
+            "attempts": int(mine_lock_stats["attempts"]),
+            "successful_acquisitions": int(mine_lock_stats["successful_acquisitions"]),
+            "failed_acquisitions": int(mine_lock_stats["failed_acquisitions"]),
+            "max_attempt_seconds": float(mine_lock_stats["max_attempt_seconds"]),
+            "max_successful_acquire_seconds": float(
+                mine_lock_stats["max_successful_acquire_seconds"]
+            ),
+        },
+    }
+    encoded = json.dumps(artifact, allow_nan=False, ensure_ascii=True, sort_keys=True).encode(
+        "utf-8"
+    )
+    if len(encoded) > _DIAGNOSTICS_MAX_BYTES:
+        return '{"schema":"mempalace-test-failure-diagnostics/v1","status":"omitted-size-cap"}'
+    return encoded.decode("utf-8")
+
+
+@pytest.hookimpl(tryfirst=True, hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    outcome = yield
+    rep = outcome.get_result()
+    diagnostic_state = getattr(item, "_mempalace_failure_diagnostic_state", None)
+    if diagnostic_state is not None and rep.when in {"setup", "call"} and rep.failed:
+        diagnostics = _build_sanitized_failure_diagnostics(
+            nodeid=item.nodeid,
+            phase=rep.when,
+            stats=diagnostic_state["stats"],
+            mine_lock_stats=diagnostic_state["palace"].get_mine_lock_stats(),
+        )
+        # pytest emits this report after the hook returns. Appending directly
+        # to the current TestReport is intentionally different from calling
+        # item.add_report_section during fixture teardown, which would land on
+        # a later teardown report and be invisible beside the actual failure.
+        rep.sections.append(("mempalace safe diagnostics", diagnostics))
+    setattr(item, f"rep_{rep.when}", rep)
+
+
+@pytest.fixture(autouse=True)
+def _readback_and_lock_diagnostics(request, monkeypatch):
+    try:
+        from mempalace import palace, write_receipts as wr
+    except ImportError:
+        yield
+        return
+
+    stats = {
+        "collection_rows_for_ids_calls": 0,
+        "collection_rows_for_ids_elapsed_max": 0.0,
+        "verify_managed_write_readback_calls": 0,
+        "verify_managed_write_readback_elapsed_max": 0.0,
+    }
+
+    orig_rows = wr._collection_rows_for_ids
+    orig_verify = wr._verify_managed_write_readback
+
+    def _wrapped_rows(*args, **kwargs):
+        started = time.monotonic()
+        try:
+            return orig_rows(*args, **kwargs)
+        finally:
+            elapsed = time.monotonic() - started
+            stats["collection_rows_for_ids_calls"] += 1
+            if elapsed > stats["collection_rows_for_ids_elapsed_max"]:
+                stats["collection_rows_for_ids_elapsed_max"] = elapsed
+
+    def _wrapped_verify(*args, **kwargs):
+        started = time.monotonic()
+        try:
+            return orig_verify(*args, **kwargs)
+        finally:
+            elapsed = time.monotonic() - started
+            stats["verify_managed_write_readback_calls"] += 1
+            if elapsed > stats["verify_managed_write_readback_elapsed_max"]:
+                stats["verify_managed_write_readback_elapsed_max"] = elapsed
+
+    monkeypatch.setattr(wr, "_collection_rows_for_ids", _wrapped_rows)
+    monkeypatch.setattr(wr, "_verify_managed_write_readback", _wrapped_verify)
+
+    # The counters are diagnostic-only and process-local in pytest. Resetting
+    # them before this test prevents an earlier contention test from being
+    # misattributed to a later failure.
+    palace.reset_mine_lock_stats()
+    setattr(
+        request.node,
+        "_mempalace_failure_diagnostic_state",
+        {"palace": palace, "stats": stats},
+    )
+    try:
+        yield
+    finally:
+        delattr(request.node, "_mempalace_failure_diagnostic_state")

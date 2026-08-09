@@ -104,7 +104,7 @@ quote-style = "double"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-addopts = "-p no:cacheprovider -m 'not benchmark and not slow and not stress'"
+addopts = "-p no:cacheprovider --tb=long -rf -m 'not benchmark and not slow and not stress'"
 markers = [
     "benchmark: scale/performance benchmark tests",
     "slow: tests that take more than 30 seconds",

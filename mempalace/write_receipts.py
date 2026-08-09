@@ -57,7 +57,51 @@ _DIRECTORY_DURABILITY_BYTES = b"mempalace-directory-durability/v1\n"
 _DIRECTORY_SYNC_BARRIER = ".mempalace-directory-sync-barrier-v1"
 _PURGE_AUTHORITY = object()
 _MANAGED_WRITE_AUTHORITY = object()
-_MANAGED_WRITE_READBACK_TIMEOUT_SECONDS = 5.0
+
+
+def _read_positive_finite_timeout_from_env(
+    name: str,
+    default: float,
+    *,
+    minimum: float = 1.0,
+    maximum: float = 60.0,
+) -> float:
+    """Read one bounded timeout without allowing an invalid env value to hang startup.
+
+    A zero timeout remains useful as a direct test monkeypatch after import,
+    but an environment setting is an operator-facing configuration boundary and
+    must fall within the reviewed 1–60 second wall-clock range. Invalid values
+    keep the known-safe default and never echo their raw contents into logs.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        configured = float(raw)
+    except (TypeError, ValueError):
+        _LOGGER.warning("Ignoring invalid configured timeout for %s; using the default.", name)
+        return default
+    if not math.isfinite(configured) or configured < minimum or configured > maximum:
+        _LOGGER.warning("Ignoring out-of-range configured timeout for %s; using the default.", name)
+        return default
+    return configured
+
+
+# A readback that verifies an already-committed write is bookkeeping, not
+# work — capping it with a constant unrelated to the caller's real budget
+# converts finished work into failure under host load (memsys#370's lesson,
+# cited explicitly in mempalace#41/#24). Caller-configurable via env var
+# rather than hard-coded so a slow/loaded environment (e.g. the test suite
+# under a full-suite run) can raise it without editing source. Individual
+# tests may still `monkeypatch.setattr` this module attribute directly to
+# force a specific budget (including 0.0, to exercise the deadline path) —
+# that continues to take precedence since it runs after this env-var read.
+_MANAGED_WRITE_READBACK_TIMEOUT_SECONDS = _read_positive_finite_timeout_from_env(
+    "MEMPALACE_MANAGED_WRITE_READBACK_TIMEOUT_SECONDS",
+    5.0,
+    minimum=1.0,
+    maximum=60.0,
+)
 _MANAGED_WRITE_READBACK_INITIAL_RETRY_SECONDS = 0.01
 _MANAGED_WRITE_READBACK_MAX_RETRY_SECONDS = 0.25
 _MANAGED_WRITE_READBACK_BACKOFF = 2.0

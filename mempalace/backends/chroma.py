@@ -1213,6 +1213,29 @@ class ChromaBackend(BaseBackend):
         for client in clients:
             self._close_client(client)
 
+    def reset(self) -> None:
+        """Close and drop every cached client without permanently closing the backend.
+
+        Unlike :meth:`close`, this does **not** set ``self._closed`` — a
+        subsequent :meth:`_client` call rebuilds a fresh ``PersistentClient``
+        on demand instead of raising ``BackendClosedError``. This is the
+        entry point long-lived callers (notably the test suite's autouse
+        fixture) use to drop leaked state between units of work without
+        retiring the backend instance itself.
+
+        mempalace#41 measured a full test-suite run ending with 110 live
+        ``PersistentClient`` objects held in ``self._clients`` because
+        nothing ever called :meth:`close_palace` or :meth:`close` between
+        tests — each cached client (and its SQLite handle plus in-RAM HNSW
+        segments) outlived the test that created it for the rest of the
+        session.
+        """
+        clients = tuple({id(client): client for client in self._clients.values()}.values())
+        self._clients.clear()
+        self._freshness.clear()
+        for client in clients:
+            self._close_client(client)
+
     def health(self, palace: Optional[PalaceRef] = None) -> HealthStatus:
         if self._closed:
             return HealthStatus.unhealthy("backend closed")

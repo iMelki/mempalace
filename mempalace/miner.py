@@ -512,6 +512,25 @@ _ENTITY_EXTRACT_WINDOW = 5000  # chars of content scanned for capitalized words
 _ENTITY_METADATA_LIMIT = 25  # max entities packed into the metadata field
 
 
+def reset_entity_registry_cache() -> None:
+    """Clear the in-process known-entities cache.
+
+    ``_ENTITY_REGISTRY_PATH`` is resolved once at import time against
+    whatever ``HOME`` was at that moment, and ``_ENTITY_REGISTRY_CACHE`` is a
+    module-level dict gated only by that path's mtime — nothing ever resets
+    it between units of work in a long-lived process. mempalace#41: in the
+    test suite this let a predecessor test's `known_entities.json` write
+    change a later, unrelated test's closet documents and receipt config,
+    since all tests in a session share one temp ``HOME``. Mirrors the
+    inline invalidation `add_to_known_entities` already does on write; call
+    this directly when a caller (notably the test suite's autouse fixture)
+    needs the cache empty regardless of whether a write happened.
+    """
+    _ENTITY_REGISTRY_CACHE["mtime"] = None
+    _ENTITY_REGISTRY_CACHE["names"] = frozenset()
+    _ENTITY_REGISTRY_CACHE["raw"] = {}
+
+
 def _refresh_known_entities_cache() -> None:
     """Reload ``~/.mempalace/known_entities.json`` into the module cache if
     its mtime changed since the last read. Shared by ``_load_known_entities``
@@ -721,9 +740,7 @@ def add_to_known_entities(entities_by_category: dict, wing: str = None) -> str:
         pass
 
     # Invalidate in-process cache so later calls in the same run see the write.
-    _ENTITY_REGISTRY_CACHE["mtime"] = None
-    _ENTITY_REGISTRY_CACHE["names"] = frozenset()
-    _ENTITY_REGISTRY_CACHE["raw"] = {}
+    reset_entity_registry_cache()
 
     return str(registry_path)
 

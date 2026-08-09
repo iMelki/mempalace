@@ -6,6 +6,23 @@ This file is the durable local index for active `mempalace` issues.
 
 ## Active Issues
 
+- [#41 - Stabilize the load-sensitive managed-write test family](https://github.com/iMelki/mempalace/issues/41)
+  - The initial bounded fix slice resets the process-wide Chroma client and
+    known-entity caches between tests, makes the managed-write readback budget
+    configurable only within the 1–60 second operational range, records
+    failure-only pseudonymous readback/lock metrics in pytest's report (not a
+    retained local traceback artifact), and exposes successful and failed
+    mine-lock acquisition latency for the current test.
+  - Advisory lock paths intentionally persist after release. Deleting a path
+    while a contender can still hold the older file identity can split mutual
+    exclusion across two files; lock retention needs a separately serialized,
+    evidence-backed policy rather than an automatic unlink.
+  - This issue remains open: use the next failure's bounded pytest report
+    section to identify the shared root cause with
+    [#24](https://github.com/iMelki/mempalace/issues/24), add the remaining
+    repeated-suite proof, and design safe lock-path retention without
+    weakening cross-process exclusion.
+
 - [#31 - Bind immutable evaluation corpus identity for MemSys gold baselines](https://github.com/iMelki/mempalace/issues/31)
   - The HTTP consumer is shipped. The producer now has a durable three-phase
     snapshot / scan / finalize workflow: an integrity-checked SQLite online
