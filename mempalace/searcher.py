@@ -144,6 +144,52 @@ def _bm25_scores(
     return scores
 
 
+def _is_sqlite_lock(error: sqlite3.OperationalError) -> bool:
+    """Return whether SQLite reported transient writer contention."""
+    message = str(error).lower()
+    return "locked" in message or "busy" in message
+
+
+def _sqlite_lock_degraded_result(
+    query: str,
+    wing: str,
+    room: str,
+    operation: str,
+    candidate_count: int,
+) -> dict:
+    """Build the stable retryable receipt used for every SQLite read phase.
+
+    A concurrent Chroma writer can lock a read-only connection briefly.  This
+    must be distinguishable from a real empty result so upstream callers can
+    try an alternate source or schedule a bounded retry.
+    """
+    logger.warning(
+        "BM25 sqlite fallback deferred by a database lock (operation=%s, candidates=%s)",
+        operation,
+        candidate_count,
+    )
+    return {
+        "query": query,
+        "filters": {"wing": wing, "room": room},
+        "total_before_filter": 0,
+        "results": [],
+        "error": "sqlite database is temporarily locked",
+        "status": "degraded",
+        "reason": "sqlite_locked",
+        "retryable": True,
+        "retryAfterMs": 250,
+        "fallback": {
+            "mode": "bm25_only_via_sqlite",
+            "reason": "sqlite_locked",
+        },
+        "diagnostics": {
+            "operation": operation,
+            "candidateCount": candidate_count,
+            "sqliteErrorClass": "OperationalError",
+        },
+    }
+
+
 def _hybrid_rank(
     results: list,
     query: str,
@@ -438,8 +484,12 @@ def _bm25_only_via_sqlite(
 
     try:
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-    except sqlite3.Error as e:
-        return {"error": f"sqlite open failed: {e}"}
+    except sqlite3.OperationalError as error:
+        if _is_sqlite_lock(error):
+            return _sqlite_lock_degraded_result(query, wing, room, "open", 0)
+        return {"error": f"sqlite open failed: {error}"}
+    except sqlite3.Error as error:
+        return {"error": f"sqlite open failed: {error}"}
 
     try:
         # FTS5 MATCH expects whitespace-separated tokens. Drop tokens
@@ -459,7 +509,9 @@ def _bm25_only_via_sqlite(
                     (fts_query, max_candidates),
                 ).fetchall()
                 candidate_ids = [r[0] for r in rows]
-            except sqlite3.Error:
+            except sqlite3.Error as error:
+                if isinstance(error, sqlite3.OperationalError) and _is_sqlite_lock(error):
+                    return _sqlite_lock_degraded_result(query, wing, room, "fts_candidates", 0)
                 # FTS5 tokenizer mismatch or syntax error — fall through
                 # to the recency-window selector below.
                 logger.debug("FTS5 MATCH failed; using recency fallback", exc_info=True)
@@ -487,7 +539,9 @@ def _bm25_only_via_sqlite(
                     (max_candidates,),
                 ).fetchall()
                 candidate_ids = [r[0] for r in rows]
-            except sqlite3.Error:
+            except sqlite3.Error as error:
+                if isinstance(error, sqlite3.OperationalError) and _is_sqlite_lock(error):
+                    return _sqlite_lock_degraded_result(query, wing, room, "recency_candidates", 0)
                 logger.debug(
                     "recency-window query failed; trying id-ordered fallback",
                     exc_info=True,
@@ -506,7 +560,11 @@ def _bm25_only_via_sqlite(
                         (max_candidates,),
                     ).fetchall()
                     candidate_ids = [r[0] for r in rows]
-                except sqlite3.Error:
+                except sqlite3.Error as fallback_error:
+                    if isinstance(fallback_error, sqlite3.OperationalError) and _is_sqlite_lock(
+                        fallback_error
+                    ):
+                        return _sqlite_lock_degraded_result(query, wing, room, "id_candidates", 0)
                     logger.debug("id-ordered fallback also failed", exc_info=True)
                     candidate_ids = []
 
@@ -523,14 +581,21 @@ def _bm25_only_via_sqlite(
             }
 
         placeholders = ",".join(["?"] * len(candidate_ids))
-        meta_rows = conn.execute(
-            f"""
-            SELECT id, key, string_value, int_value
-            FROM embedding_metadata
-            WHERE id IN ({placeholders})
-            """,
-            candidate_ids,
-        ).fetchall()
+        try:
+            meta_rows = conn.execute(
+                f"""
+                SELECT id, key, string_value, int_value
+                FROM embedding_metadata
+                WHERE id IN ({placeholders})
+                """,
+                candidate_ids,
+            ).fetchall()
+        except sqlite3.OperationalError as error:
+            if _is_sqlite_lock(error):
+                return _sqlite_lock_degraded_result(
+                    query, wing, room, "metadata", len(candidate_ids)
+                )
+            raise
     finally:
         conn.close()
 

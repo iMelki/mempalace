@@ -55,7 +55,7 @@ chroma = "mempalace.backends.chroma:ChromaBackend"
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
-    "ruff>=0.4.0",
+    "ruff>=0.15.9,<0.16",
     "psutil>=5.9",
     "mcp==1.28.1; python_version >= '3.10'",
 ]
@@ -74,7 +74,7 @@ coreml = ["onnxruntime>=1.16"]
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
-    "ruff>=0.4.0",
+    "ruff>=0.15.9,<0.16",
     "psutil>=5.9",
     "mcp==1.28.1; python_version >= '3.10'",
 ]
@@ -104,7 +104,7 @@ quote-style = "double"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-addopts = "-p no:cacheprovider -m 'not benchmark and not slow and not stress'"
+addopts = "-p no:cacheprovider --tb=long -rf -m 'not benchmark and not slow and not stress'"
 markers = [
     "benchmark: scale/performance benchmark tests",
     "slow: tests that take more than 30 seconds",

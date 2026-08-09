@@ -42,6 +42,9 @@ class ManagedAdapterResult:
     sources_unchanged: int
     drawers_written: int
     receipt_ids: tuple[str, ...]
+    receipt_events: tuple[dict[str, Any], ...]
+    receipt_verification_statuses: tuple[str, ...]
+    receipt_validation_errors: tuple[Optional[str], ...]
 
 
 def managed_adapter_ingest(
@@ -53,8 +56,11 @@ def managed_adapter_ingest(
     caller: str,
     config: Any,
     run: Optional[ManagedRunIdentity] = None,
+    committed_error_policy: str = "raise",
 ) -> ManagedAdapterResult:
     """Serialize source read-through-write for one managed adapter invocation."""
+    if committed_error_policy not in {"raise", "report"}:
+        raise ValueError("committed_error_policy must be 'raise' or 'report'")
     lock_key = _managed_adapter_lock_key(source)
     with managed_write_scope(palace.palace_path, lock_factory=mine_palace_lock):
         with mine_lock(lock_key):
@@ -67,6 +73,7 @@ def managed_adapter_ingest(
                 caller=caller,
                 config=config,
                 run=run,
+                committed_error_policy=committed_error_policy,
             )
 
 
@@ -79,6 +86,7 @@ def _managed_adapter_ingest_locked(  # noqa: C901 - transactional generator orch
     caller: str,
     config: Any,
     run: Optional[ManagedRunIdentity] = None,
+    committed_error_policy: str = "raise",
 ) -> ManagedAdapterResult:
     """Drive an RFC 002 adapter through the fail-closed receipt path.
 
@@ -114,11 +122,41 @@ def _managed_adapter_ingest_locked(  # noqa: C901 - transactional generator orch
     unchanged = 0
     drawers_written = 0
     receipt_ids: list[str] = []
+    receipt_events: list[dict[str, Any]] = []
+    receipt_verification_statuses: list[str] = []
+    receipt_validation_errors: list[Optional[str]] = []
+    active_terminal_status: Optional[str] = None
+    active_terminal_error: Optional[str] = None
+
+    def verify_active_terminal() -> None:
+        if active is None or active.state != "COMPLETE":
+            raise ReceiptVerificationError("terminal verification requires a COMPLETE receipt")
+        if active.last_event_path is None:
+            raise ReceiptVerificationError("terminal COMPLETE has no durable receipt path")
+        verification = _verify_context_receipt(
+            palace,
+            active.last_event_path,
+            current_source_content_hash=active.source["content_hash"],
+            store=active.store,
+        )
+        if verification.status != "represented":
+            raise ReceiptVerificationError(
+                "terminal receipt verification returned "
+                f"{verification.status}: {verification.outcomes}"
+            )
+
+    def capture_committed_error(error: Exception) -> bool:
+        nonlocal active_terminal_status, active_terminal_error
+        if committed_error_policy != "report" or active is None or active.state != "COMPLETE":
+            return False
+        active_terminal_status = "committed-unverified"
+        active_terminal_error = f"{type(error).__module__}.{type(error).__qualname__}: {error}"
+        return True
 
     def finish_active() -> None:
         nonlocal active, active_item, active_source_file, active_source_aliases
         nonlocal active_snapshots, active_mutated, active_incomplete_purge, active_recovery_path
-        nonlocal active_previous
+        nonlocal active_previous, active_terminal_status, active_terminal_error
         nonlocal skip_active, completed, unchanged, drawers_written
         if active is None:
             return
@@ -127,21 +165,55 @@ def _managed_adapter_ingest_locked(  # noqa: C901 - transactional generator orch
                 drawers=active.counts["drawers_written"],
                 items=len(active.outputs),
             )
+            empty_disposition = None
+            if not active.outputs:
+                empty_disposition = adapter.empty_output_disposition
             if active_previous is not None:
-                active.record_invalidation(active_previous, reason="source-rewrite-purge")
-            active.complete()
-            _finalize_rewrite_recovery(
-                palace,
-                active.store,
-                active.source["identity"],
-                active.receipt_id,
-            )
+                invalidation_reason = (
+                    "source-zero-output-purge"
+                    if empty_disposition == "ZERO_OUTPUT"
+                    else "source-rewrite-purge"
+                )
+                active.record_invalidation(active_previous, reason=invalidation_reason)
+            try:
+                active.complete(disposition=empty_disposition)
+                verify_active_terminal()
+                _finalize_rewrite_recovery(
+                    palace,
+                    active.store,
+                    active.source["identity"],
+                    active.receipt_id,
+                )
+            except Exception as exc:
+                if not capture_committed_error(exc):
+                    raise
+            else:
+                active_terminal_status = "represented"
+                active_terminal_error = None
+        elif active.state == "COMPLETE" and active_terminal_status is None:
+            try:
+                verify_active_terminal()
+            except Exception as exc:
+                if not capture_committed_error(exc):
+                    raise
+            else:
+                active_terminal_status = "represented"
+                active_terminal_error = None
         if active.state == "COMPLETE":
             completed += 1
             drawers_written += active.counts["drawers_written"]
         if active.disposition == "UNCHANGED":
             unchanged += 1
         receipt_ids.append(active.receipt_id)
+        receipt_events.append(
+            dict(active.last_event) if isinstance(active.last_event, dict) else {}
+        )
+        if active_terminal_status is None:
+            error = ReceiptVerificationError("terminal receipt verification status is missing")
+            if not capture_committed_error(error):
+                raise error
+        receipt_verification_statuses.append(active_terminal_status)
+        receipt_validation_errors.append(active_terminal_error)
         active = None
         active_item = None
         active_source_file = None
@@ -151,6 +223,8 @@ def _managed_adapter_ingest_locked(  # noqa: C901 - transactional generator orch
         active_incomplete_purge = None
         active_recovery_path = None
         active_previous = None
+        active_terminal_status = None
+        active_terminal_error = None
         skip_active = False
         palace._clear_receipt()
 
@@ -244,13 +318,21 @@ def _managed_adapter_ingest_locked(  # noqa: C901 - transactional generator orch
                     config_digest=resolved_run.config_digest,
                 )
                 if trusted_prior is not None:
-                    _complete_reused_context_receipt(
-                        palace,
-                        active,
-                        trusted_prior,
-                        source_file=active_source_file,
-                        source_aliases=active_source_aliases,
-                    )
+                    try:
+                        _complete_reused_context_receipt(
+                            palace,
+                            active,
+                            trusted_prior,
+                            source_file=active_source_file,
+                            source_aliases=active_source_aliases,
+                        )
+                        verify_active_terminal()
+                    except Exception as exc:
+                        if not capture_committed_error(exc):
+                            raise
+                    else:
+                        active_terminal_status = "represented"
+                        active_terminal_error = None
                     palace.skip_current_item()
                     skip_active = True
                 elif adapter_current:
@@ -344,6 +426,9 @@ def _managed_adapter_ingest_locked(  # noqa: C901 - transactional generator orch
         sources_unchanged=unchanged,
         drawers_written=drawers_written,
         receipt_ids=tuple(receipt_ids),
+        receipt_events=tuple(receipt_events),
+        receipt_verification_statuses=tuple(receipt_verification_statuses),
+        receipt_validation_errors=tuple(receipt_validation_errors),
     )
 
 

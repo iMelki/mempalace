@@ -40,7 +40,7 @@ def _shell_path(path: Path) -> str:
     posix_path = path.as_posix()
     drive = path.drive.rstrip(":")
     if drive:
-        return f"/{drive.lower()}{posix_path[len(path.drive):]}"
+        return f"/{drive.lower()}{posix_path[len(path.drive) :]}"
     return posix_path
 
 

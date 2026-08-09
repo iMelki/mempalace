@@ -1,8 +1,10 @@
 name: Deploy Docs
 
 on:
+  # Was [develop], stale since 2026-05-12 -- so docs have not deployed since then.
+  # Deploy from the release branch now that it is the repository default.
   push:
-    branches: [develop]
+    branches: [main]
     paths:
       - ".github/workflows/deploy-docs.yml"
       - "website/**"
@@ -51,7 +53,9 @@ jobs:
           path: website/.vitepress/dist
 
   deploy:
-    if: github.ref_name == 'develop'
+    # Must track the push trigger above; leaving this as 'develop' would build
+    # docs on main and then silently skip the deploy step.
+    if: github.ref_name == 'main'
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

@@ -62,7 +62,16 @@ mempalace search "why did we switch to GraphQL"
 
 # Load context for a new session
 mempalace wake-up
+
+# See what mining will decline to ingest, and which directories look like backups
+mempalace exclusions ~/projects/myapp
+mempalace variants ~/projects
 ```
+
+Mining respects `.gitignore` and declines generated/vendored content
+(lockfiles, `node_modules/`, `obj/`, `dist/`, …) by default. Every default is
+reversible from `mempalace.yaml` — see
+[docs/MINE_EXCLUSIONS.md](docs/MINE_EXCLUSIONS.md).
 
 For Claude Code, Gemini CLI, MCP-compatible tools, and local models, see
 [mempalaceofficial.com/guide/getting-started](https://mempalaceofficial.com/guide/getting-started.html).
@@ -187,6 +196,7 @@ No API key is required for the core benchmark path.
 - Getting started → [mempalaceofficial.com/guide/getting-started](https://mempalaceofficial.com/guide/getting-started.html)
 - CLI reference → [mempalaceofficial.com/reference/cli](https://mempalaceofficial.com/reference/cli.html)
 - Python API → [mempalaceofficial.com/reference/python-api](https://mempalaceofficial.com/reference/python-api.html)
+- Mine-time exclusions → [docs/MINE_EXCLUSIONS.md](docs/MINE_EXCLUSIONS.md)
 - Full benchmark methodology → [benchmarks/BENCHMARKS.md](benchmarks/BENCHMARKS.md)
 - Release notes → [CHANGELOG.md](CHANGELOG.md)
 - Corrections and public notices → [docs/HISTORY.md](docs/HISTORY.md)

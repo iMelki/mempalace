@@ -24,6 +24,10 @@ from mcp.client.streamable_http import streamable_http_client  # noqa: E402
 from starlette.testclient import TestClient  # noqa: E402
 
 import mempalace.mcp_http as mcp_http_module  # noqa: E402
+from mempalace.evaluation_identity import (  # noqa: E402
+    EVALUATION_CORPUS_MANIFEST_SCHEMA,
+    sha256_identity,
+)
 from mempalace.mcp_http import (  # noqa: E402
     DEFAULT_HOST,
     DEFAULT_MAX_CONCURRENCY,
@@ -54,6 +58,23 @@ def _registry(handler):
             },
             "handler": handler,
         }
+    }
+
+
+def _evaluation_manifest(data_plane_id: str) -> dict[str, object]:
+    material = {
+        "schema": EVALUATION_CORPUS_MANIFEST_SCHEMA,
+        "dataPlaneId": data_plane_id,
+        "inventorySha256": "sha256:" + "a" * 64,
+        "scopeSha256": "sha256:" + "b" * 64,
+        "sourceRevision": "sha256:" + "c" * 64,
+        "processingSourceRevision": "sha256:" + "d" * 64,
+        "itemCount": 42,
+    }
+    return {
+        **material,
+        "capturedAtUtc": "2026-07-29T14:00:00Z",
+        "corpusRevision": sha256_identity(material),
     }
 
 
@@ -210,6 +231,77 @@ def test_authenticated_healthz_preserves_operator_probe_contract():
     assert healthy.status_code == 200
     assert healthy.json()["status"] == "ok"
     assert healthy.json()["transport"] == "native-http"
+
+
+def test_authenticated_memsys_identity_is_startup_bound_and_fail_closed_for_corpus():
+    app = create_http_app(auth_token=AUTH_FIXTURE, tools=_registry(lambda _: {}))
+    with TestClient(app) as client:
+        missing = client.get("/__memsys/identity")
+        identity = client.get(
+            "/__memsys/identity", headers={"Authorization": f"Bearer {AUTH_FIXTURE}"}
+        )
+
+    assert missing.status_code == 401
+    assert identity.status_code == 200
+    payload = identity.json()
+    assert payload["schema"] == "memsys-stack-identity/v1"
+    assert payload["service"] == "mempalace"
+    assert payload["revision"].startswith("sha256:")
+    assert payload["serviceRevision"].startswith("version:")
+    assert payload["corpusGeneration"] == {
+        "schema": "mempalace-corpus-generation/v1",
+        "status": "unavailable",
+        "corpusRevision": None,
+        "scope": "none",
+        "capturedAtUtc": None,
+    }
+    serialized = json.dumps(payload)
+    assert AUTH_FIXTURE not in serialized
+    assert "mempalace\\" not in serialized.casefold()
+
+
+def test_authenticated_memsys_identity_exposes_only_validated_evaluation_manifest(monkeypatch):
+    data_plane_id = "sha256:" + "d" * 64
+    monkeypatch.setenv("MEMSYS_MEMPALACE_DATA_PLANE_ID", data_plane_id)
+    manifest = _evaluation_manifest(data_plane_id)
+    app = create_http_app(
+        auth_token=AUTH_FIXTURE,
+        tools=_registry(lambda _: {}),
+        evaluation_corpus_manifest=manifest,
+    )
+
+    with TestClient(app) as client:
+        payload = client.get(
+            "/__memsys/identity", headers={"Authorization": f"Bearer {AUTH_FIXTURE}"}
+        ).json()
+
+    assert payload["dataPlaneId"] == data_plane_id
+    assert payload["corpusGeneration"] == {
+        "schema": "mempalace-corpus-generation/v1",
+        "status": "complete",
+        "corpusRevision": manifest["corpusRevision"],
+        "scope": "evaluation-manifest",
+        "capturedAtUtc": "2026-07-29T14:00:00Z",
+        "itemCount": 42,
+        "inventorySha256": "sha256:" + "a" * 64,
+    }
+    serialized = json.dumps(payload)
+    assert AUTH_FIXTURE not in serialized
+    assert "sourceRevision" not in serialized
+
+
+def test_evaluation_manifest_data_plane_or_digest_mismatch_fails_startup(monkeypatch):
+    data_plane_id = "sha256:" + "d" * 64
+    monkeypatch.setenv("MEMSYS_MEMPALACE_DATA_PLANE_ID", data_plane_id)
+    manifest = _evaluation_manifest(data_plane_id)
+    manifest["itemCount"] = 43
+
+    with pytest.raises(ValueError, match="corpusRevision"):
+        create_http_app(
+            auth_token=AUTH_FIXTURE,
+            tools=_registry(lambda _: {}),
+            evaluation_corpus_manifest=manifest,
+        )
 
 
 def test_http_catalog_matches_stdio_catalog():
@@ -1340,3 +1432,133 @@ def test_cli_defaults_to_loopback_and_serial_backend_calls():
     assert (
         _parse_args(["--termination-timeout-seconds", "0.25"]).termination_timeout_seconds == 0.25
     )
+
+
+# --- memsys#458: hardened accept loop ---------------------------------------
+#
+# These never open a real listening socket or force a genuine WinError 64 --
+# that would be flaky-by-construction and platform-specific. Instead they
+# prove the two things that actually matter and are fully deterministic:
+# (1) the classifier routes the exact asyncio accept-loop-death signature to
+# a non-zero process exit and forwards every other exception context to
+# asyncio's stock default handler unchanged, and (2) the handler is really
+# the one installed on the loop `uvicorn.Server.serve()` runs on, not merely
+# reachable in theory. `os._exit` is monkeypatched throughout so a matching
+# test cannot terminate the pytest process itself.
+
+
+class _RecordingLoop:
+    """Minimal stand-in for asyncio.AbstractEventLoop's one method the
+    handler calls on the non-matching path, so that path can be asserted
+    without depending on a real event loop's internal state."""
+
+    def __init__(self):
+        self.default_handler_calls: list[dict] = []
+
+    def default_exception_handler(self, context):
+        self.default_handler_calls.append(context)
+
+
+def test_accept_loop_handler_exits_nonzero_on_the_exact_accept_loop_death_signature(
+    monkeypatch, caplog
+):
+    exit_calls = []
+    monkeypatch.setattr(mcp_http_module.os, "_exit", lambda code: exit_calls.append(code))
+    loop = _RecordingLoop()
+    context = {
+        "message": mcp_http_module.ACCEPT_LOOP_FAILURE_MESSAGE,
+        "exception": OSError(64, "The specified network name is no longer available"),
+        "socket": "fixture-socket-repr",
+    }
+
+    with caplog.at_level("CRITICAL", logger="mempalace_mcp_http"):
+        mcp_http_module._handle_accept_loop_exception(loop, context)
+
+    assert exit_calls == [1]
+    assert loop.default_handler_calls == []
+    assert any("memsys#458" in record.message for record in caplog.records)
+
+
+def test_accept_loop_handler_forwards_every_other_exception_to_the_default_handler(monkeypatch):
+    exit_calls = []
+    monkeypatch.setattr(mcp_http_module.os, "_exit", lambda code: exit_calls.append(code))
+    loop = _RecordingLoop()
+    unrelated_context = {
+        "message": "Exception in callback something_else()",
+        "exception": RuntimeError("unrelated background task failure"),
+    }
+
+    mcp_http_module._handle_accept_loop_exception(loop, unrelated_context)
+
+    assert exit_calls == []
+    assert loop.default_handler_calls == [unrelated_context]
+
+
+def test_accept_loop_handler_does_not_exit_when_message_is_merely_similar(monkeypatch):
+    # Guards against a substring/fuzzy match accidentally widening the trigger
+    # to something that merely mentions "accept" or "socket".
+    exit_calls = []
+    monkeypatch.setattr(mcp_http_module.os, "_exit", lambda code: exit_calls.append(code))
+    loop = _RecordingLoop()
+    almost_context = {"message": "Accept failed on a socket during shutdown"}
+
+    mcp_http_module._handle_accept_loop_exception(loop, almost_context)
+
+    assert exit_calls == []
+    assert loop.default_handler_calls == [almost_context]
+
+
+def test_serve_with_hardened_accept_loop_installs_the_real_handler_before_serving(monkeypatch):
+    exit_calls = []
+    monkeypatch.setattr(mcp_http_module.os, "_exit", lambda code: exit_calls.append(code))
+    observed_handler = {}
+
+    class _FakeServer:
+        async def serve(self):
+            loop = asyncio.get_running_loop()
+            observed_handler["handler"] = loop.get_exception_handler()
+            # Firing the handler THIS way (through the loop's own dispatch,
+            # not by calling the function directly) proves the wiring, not
+            # just the classifier logic already covered above.
+            loop.call_exception_handler(
+                {
+                    "message": mcp_http_module.ACCEPT_LOOP_FAILURE_MESSAGE,
+                    "exception": OSError(64, "fixture"),
+                }
+            )
+
+    asyncio.run(mcp_http_module._serve_with_hardened_accept_loop(_FakeServer()))
+
+    assert observed_handler["handler"] is mcp_http_module._handle_accept_loop_exception
+    assert exit_calls == [1]
+
+
+def test_run_uvicorn_with_hardened_accept_loop_wires_a_real_uvicorn_server(monkeypatch):
+    import uvicorn
+
+    served = []
+
+    class _FakeServer:
+        def __init__(self, config):
+            served.append(config)
+
+        async def serve(self):
+            # Proves the handler is attached even through the full
+            # uvicorn.Server(config) construction path, not only when a
+            # server object is handed in directly.
+            asyncio.get_running_loop().call_exception_handler(
+                {
+                    "message": mcp_http_module.ACCEPT_LOOP_FAILURE_MESSAGE,
+                    "exception": OSError(64, "fixture"),
+                }
+            )
+
+    exit_calls = []
+    monkeypatch.setattr(mcp_http_module.os, "_exit", lambda code: exit_calls.append(code))
+    monkeypatch.setattr(uvicorn, "Server", _FakeServer)
+
+    fixture_config = object()
+    mcp_http_module._run_uvicorn_with_hardened_accept_loop(fixture_config)
+
+    assert served == [fixture_config]
+    assert exit_calls == [1]

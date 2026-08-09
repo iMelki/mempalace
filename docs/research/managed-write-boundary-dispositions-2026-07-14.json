@@ -1,0 +1,340 @@
+{
+  "schema": "mempalace-managed-write-boundary-disposition/v1",
+  "asOf": "2026-07-15",
+  "ownerIssue": "https://github.com/iMelki/mempalace/issues/22",
+  "status": "decisions-recorded-implementation-open",
+  "policy": {
+    "managedReceiptScope": "Any operation that creates, replaces, or removes source-derived MemPalace representations must preserve exact source/output lineage through managed receipts.",
+    "retirementMeaning": "Retire the unmanaged mutation surface, not the user-facing capability; retain a read-only or receipt-aware replacement.",
+    "explicitExclusionMeaning": "The state is not a source-derived drawer representation and must use a named, separately testable ownership, backup, and audit contract.",
+    "historicalBoundary": "No disposition fabricates write-time receipts for old rows. Any replay emits a new historical-recovery run receipt with the original source evidence linked as input."
+  },
+  "allowedDispositions": [
+    "adapt-to-managed-receipts",
+    "retire-unmanaged-mutation-surface",
+    "explicitly-exclude-with-boundary"
+  ],
+  "summary": {
+    "total": 21,
+    "adaptToManagedReceipts": 10,
+    "retireUnmanagedMutationSurface": 6,
+    "explicitlyExcludeWithBoundary": 5
+  },
+  "implementationProgress": {
+    "adaptationsMetOnDev": 4,
+    "adaptationsRemaining": 6,
+    "completedAdaptationIds": [
+      "diary-ingest",
+      "mcp-diary-write",
+      "mcp-drawer-mutations",
+      "sweeper-jsonl-ingest"
+    ],
+    "retirementsMetOnDev": 1,
+    "retirementsRemaining": 5,
+    "completedRetirementIds": [
+      "receipt-optional-core-miners"
+    ]
+  },
+  "entries": [
+    {
+      "id": "migration-rebuild-swap",
+      "surface": "Legacy collection migration and palace-directory swap",
+      "disposition": "adapt-to-managed-receipts",
+      "currentState": "blocked-when-receipt-root-exists",
+      "managedRepresentation": "Preserve or rebuild the receipt journal and prove every current source manifest before the replacement directory is swapped in.",
+      "reason": "A collection rebuild can otherwise preserve rows while silently severing their authoritative receipt lineage.",
+      "evidence": [
+        {"path": "mempalace/migrate.py", "line": 193},
+        {"path": "tests/test_migrate.py", "line": 52}
+      ],
+      "requiredAcceptance": ["clone-only migration", "exact receipt/readback parity", "atomic swap rollback proof"]
+    },
+    {
+      "id": "repair-row-pruning",
+      "surface": "Repair deletion of corrupt drawer IDs",
+      "disposition": "adapt-to-managed-receipts",
+      "currentState": "unmanaged-explicit-command",
+      "managedRepresentation": "Publish invalidations or successor manifests for every authoritative receipt affected by a deleted row.",
+      "reason": "Deleting a represented row without updating lineage makes an otherwise complete receipt report a permanent unexplained missing output.",
+      "evidence": [
+        {"path": "mempalace/repair.py", "line": 380},
+        {"path": "tests/test_repair.py", "line": 165}
+      ],
+      "requiredAcceptance": ["affected-receipt inventory", "backup and dry run", "post-delete exact verifier"]
+    },
+    {
+      "id": "repair-replay-rebuild",
+      "surface": "Repair replay that recreates collections and upserts recovered rows",
+      "disposition": "adapt-to-managed-receipts",
+      "currentState": "unmanaged-explicit-command",
+      "managedRepresentation": "Bind backup identity, recovered rows, replacement collections, and superseded receipts into one attended recovery run.",
+      "reason": "A replay changes the represented store wholesale and therefore must preserve the authoritative source/output contract.",
+      "evidence": [
+        {"path": "mempalace/repair.py", "line": 998},
+        {"path": "tests/test_repair.py", "line": 480}
+      ],
+      "requiredAcceptance": ["disposable full rehearsal", "receipt DAG preservation", "native restore proof"]
+    },
+    {
+      "id": "repair-max-sequence-id",
+      "surface": "Direct Chroma SQLite sequence-metadata correction",
+      "disposition": "explicitly-exclude-with-boundary",
+      "currentState": "physical-maintenance-command",
+      "boundaryContract": "mempalace-maintenance-operation/v1",
+      "reason": "Physical sequence metadata is not a source-derived drawer, but changing it still needs an exclusive lock, backup, before/after evidence, and an operation receipt.",
+      "evidence": [
+        {"path": "mempalace/repair.py", "line": 1440},
+        {"path": "tests/test_repair.py", "line": 816}
+      ],
+      "requiredAcceptance": ["exclusive offline boundary", "backup receipt", "SQLite and retrieval verification"]
+    },
+    {
+      "id": "deduplicate-drawers",
+      "surface": "Duplicate-drawer deletion",
+      "disposition": "adapt-to-managed-receipts",
+      "currentState": "dry-run-default-apply-unmanaged",
+      "managedRepresentation": "For every approved deletion, publish a successor or invalidation that explains why the old exact output no longer belongs to its source representation.",
+      "reason": "Deleting IDs without revising exact manifests turns intentional cleanup into unexplained receipt loss.",
+      "evidence": [
+        {"path": "mempalace/dedup.py", "line": 98},
+        {"path": "tests/test_dedup.py", "line": 168}
+      ],
+      "requiredAcceptance": ["source-scoped reviewed delete manifest", "receipt-aware invalidation", "restore rehearsal"]
+    },
+    {
+      "id": "sweeper-jsonl-ingest",
+      "surface": "Sweeper JSONL-to-drawer ingestion",
+      "disposition": "adapt-to-managed-receipts",
+      "currentState": "managed-receipt-adapter-on-dev",
+      "acceptanceStatus": "met-on-dev",
+      "managedRepresentation": "Use an isolated per-file sweeper source lane, deterministic message IDs, exact source and semantic identity, managed adapter ingestion, and exact rewrite recovery.",
+      "reason": "The physical file identity is shared with primary mining, so the sweeper needs its own receipt selector while preserving origin metadata and deterministic message IDs.",
+      "evidence": [
+        {"path": "mempalace/sweeper.py", "line": 453},
+        {"path": "mempalace/sweeper.py", "line": 809},
+        {"path": "mempalace/provenance.py", "line": 131},
+        {"path": "tests/test_sweeper.py", "line": 196},
+        {"path": "tests/test_sweeper.py", "line": 721},
+        {"path": "tests/test_sweeper.py", "line": 860},
+        {"path": "tests/test_sweeper.py", "line": 1019},
+        {"path": "docs/research/sweeper-jsonl-managed-write-contract-2026-07-15.md", "line": 1}
+      ],
+      "requiredAcceptance": ["managed driver integration", "idempotent replay", "partial-write recovery test", "durable terminal verification and post-commit reporting"]
+    },
+    {
+      "id": "compression-derived-closets",
+      "surface": "Compression-generated closet records",
+      "disposition": "adapt-to-managed-receipts",
+      "currentState": "direct-derived-write",
+      "managedRepresentation": "Emit derived-output receipts that bind source manifests, model identity, configuration digest, and exact generated closets.",
+      "reason": "Generated summaries are derived memory outputs whose reproducibility depends on both source state and model/configuration.",
+      "evidence": [
+        {"path": "mempalace/cli.py", "line": 886},
+        {"path": "tests/test_cli.py", "line": 945}
+      ],
+      "requiredAcceptance": ["source lineage", "model/config digest", "replacement rollback test"]
+    },
+    {
+      "id": "diary-ingest",
+      "surface": "Diary file drawer and closet ingestion",
+      "disposition": "adapt-to-managed-receipts",
+      "currentState": "managed-receipt-adapter-on-dev",
+      "acceptanceStatus": "met-on-dev",
+      "managedRepresentation": "Preserve the diary source lock while routing drawer and closet writes through managed ingestion and rewrite recovery.",
+      "reason": "A diary file is a normal versioned source and should have the same exact representation proof as project and conversation files.",
+      "evidence": [
+        {"path": "mempalace/diary_ingest.py", "line": 138},
+        {"path": "tests/test_closets.py", "line": 580}
+      ],
+      "requiredAcceptance": ["changed-file supersession", "zero-output behavior", "drawer and closet verification"]
+    },
+    {
+      "id": "closet-regeneration",
+      "surface": "LLM closet purge and regeneration",
+      "disposition": "adapt-to-managed-receipts",
+      "currentState": "direct-derived-rewrite",
+      "managedRepresentation": "Publish a successor derived-output receipt binding source rows, model/configuration, and exact generated output hashes.",
+      "reason": "Regeneration purges old derived outputs before replacement and therefore needs the same durable predecessor snapshot as other rewrites.",
+      "evidence": [
+        {"path": "mempalace/closet_llm.py", "line": 194},
+        {"path": "tests/test_closet_llm.py", "line": 216}
+      ],
+      "requiredAcceptance": ["durable pre-purge snapshot", "model/config lineage", "hard-exit restoration"]
+    },
+    {
+      "id": "topic-tunnel-registry",
+      "surface": "Global topic-tunnel JSON topology registry",
+      "disposition": "explicitly-exclude-with-boundary",
+      "currentState": "locked-atomic-separate-store",
+      "boundaryContract": "mempalace-topic-tunnel-state/v1",
+      "reason": "Topic topology is operational graph state, not evidence that a source is represented as drawers.",
+      "evidence": [
+        {"path": "mempalace/palace_graph.py", "line": 333},
+        {"path": "tests/test_palace_graph_tunnels.py", "line": 30}
+      ],
+      "requiredAcceptance": ["versioned schema", "owner and backup policy", "atomic mutation audit"]
+    },
+    {
+      "id": "knowledge-graph-sqlite",
+      "surface": "Knowledge-graph entity and triple SQLite writes",
+      "disposition": "explicitly-exclude-with-boundary",
+      "currentState": "separate-store-rejected-by-managed-adapters",
+      "boundaryContract": "mempalace-graph-write-receipt/v1",
+      "reason": "Graph entities and temporal triples need graph-specific lineage and completeness; forcing them into drawer receipts would misstate both representations.",
+      "evidence": [
+        {"path": "mempalace/knowledge_graph.py", "line": 47},
+        {"path": "tests/test_write_receipts.py", "line": 3756}
+      ],
+      "requiredAcceptance": ["graph expected-versus-represented contract", "temporal lineage receipt", "backup and integrity proof"]
+    },
+    {
+      "id": "mcp-drawer-mutations",
+      "surface": "MCP drawer add, update, and delete tools",
+      "disposition": "adapt-to-managed-receipts",
+      "currentState": "managed-receipt-service-on-dev",
+      "managedRepresentation": "Require a logical source identity and publish create, supersession, or deletion receipts inside the existing palace lock.",
+      "reason": "Serialization proves ordering, not provenance or the completeness of the resulting source representation.",
+      "acceptanceStatus": "met-on-dev",
+      "evidence": [
+        {"path": "mempalace/mcp_managed_writes.py", "line": 1},
+        {"path": "mempalace/mcp_server.py", "line": 1057},
+        {"path": "tests/test_mcp_server.py", "line": 694},
+        {"path": "docs/research/mcp-managed-write-contract-2026-07-15.md", "line": 1}
+      ],
+      "requiredAcceptance": ["logical source contract", "delete invalidation", "transport-neutral exact readback"]
+    },
+    {
+      "id": "mcp-diary-write",
+      "surface": "MCP diary writer",
+      "disposition": "adapt-to-managed-receipts",
+      "currentState": "managed-receipt-service-on-dev",
+      "managedRepresentation": "Route the tool through managed diary ingestion and the shared lock/recovery boundary.",
+      "reason": "The former diary path bypassed both source receipts and the drawer tools' common mutation wrapper.",
+      "acceptanceStatus": "met-on-dev",
+      "evidence": [
+        {"path": "mempalace/mcp_managed_writes.py", "line": 1},
+        {"path": "mempalace/mcp_server.py", "line": 1493},
+        {"path": "tests/test_mcp_server.py", "line": 1200},
+        {"path": "docs/research/mcp-managed-write-contract-2026-07-15.md", "line": 1}
+      ],
+      "requiredAcceptance": ["common lock", "managed diary receipt", "MCP integration recovery test"]
+    },
+    {
+      "id": "project-sidecar-files",
+      "surface": "Project configuration, entity, and origin sidecar files",
+      "disposition": "explicitly-exclude-with-boundary",
+      "currentState": "local-files-excluded-from-mining",
+      "boundaryContract": "mempalace-project-sidecar-input/v1",
+      "reason": "These files configure or audit ingestion; their hashes can influence run receipts, but they are not represented memory outputs themselves.",
+      "evidence": [
+        {"path": "mempalace/room_detector_local.py", "line": 294},
+        {"path": "mempalace/miner.py", "line": 75}
+      ],
+      "requiredAcceptance": ["input hash in dependent run", "atomic file write", "ownership and privacy documentation"]
+    },
+    {
+      "id": "backend-open-time-mutation",
+      "surface": "Automatic Chroma quarantine, HNSW configuration, and SQLite repair during backend open",
+      "disposition": "retire-unmanaged-mutation-surface",
+      "currentState": "automatic-on-open",
+      "retirementTarget": "Opening becomes read-only; each mutation moves to an explicit locked, backup-backed maintenance command with an operation receipt.",
+      "reason": "A read/open operation must not silently change durable state or make backup and rollback timing unknowable.",
+      "evidence": [
+        {"path": "mempalace/backends/chroma.py", "line": 135},
+        {"path": "tests/test_backends.py", "line": 513}
+      ],
+      "requiredAcceptance": ["no mutation on ordinary open", "explicit maintenance CLI", "before/after artifact"]
+    },
+    {
+      "id": "public-direct-collection-api",
+      "surface": "Public write-capable ChromaBackend and palace.get_collection access",
+      "disposition": "retire-unmanaged-mutation-surface",
+      "currentState": "public-write-capable-handle",
+      "retirementTarget": "Keep raw mutation primitives private to receipt-aware core code and expose read-only public collection views.",
+      "reason": "Any public raw handle can bypass source identity, recovery snapshots, and receipt publication by construction.",
+      "evidence": [
+        {"path": "mempalace/palace.py", "line": 53},
+        {"path": "mempalace/backends/chroma.py", "line": 724}
+      ],
+      "requiredAcceptance": ["read-only public facade", "private write authority", "compatibility deprecation tests"]
+    },
+    {
+      "id": "unmanaged-palace-context",
+      "surface": "PalaceContext non-dry pass-through writes outside managed_adapter_ingest",
+      "disposition": "retire-unmanaged-mutation-surface",
+      "currentState": "unmanaged-write-pass-through",
+      "retirementTarget": "Preserve read-only context use; require managed_adapter_ingest for every non-dry adapter mutation.",
+      "reason": "The pass-through mode is a supported bypass around all source receipt and recovery guarantees.",
+      "evidence": [
+        {"path": "mempalace/sources/_context_capabilities.py", "line": 86},
+        {"path": "tests/test_sources.py", "line": 253}
+      ],
+      "requiredAcceptance": ["non-dry bypass rejection", "read-only compatibility", "third-party adapter migration note"]
+    },
+    {
+      "id": "receipt-optional-core-miners",
+      "surface": "Project and conversation miner branches that permit receipt_store=None",
+      "disposition": "retire-unmanaged-mutation-surface",
+      "currentState": "non-dry-bypass-retired-on-dev",
+      "retirementTarget": "Require a ReceiptStore for non-dry core mining; preserve receiptless behavior only for explicitly read-only/dry execution.",
+      "reason": "An optional receipt parameter leaves the canonical miner capable of silently returning to best-effort destructive rewrites.",
+      "acceptanceStatus": "met-on-dev",
+      "evidence": [
+        {"path": "mempalace/miner.py", "line": 815},
+        {"path": "mempalace/convo_miner.py", "line": 568},
+        {"path": "mempalace/write_receipts.py", "line": 1056},
+        {"path": "tests/test_write_receipts.py", "line": 54},
+        {"path": "tests/test_miner.py", "line": 474},
+        {"path": "docs/research/core-miner-receipt-required-contract-2026-07-15.md", "line": 1}
+      ],
+      "requiredAcceptance": ["non-dry receipt requirement", "dry-run compatibility", "CLI and API regression coverage"]
+    },
+    {
+      "id": "legacy-cli-repair-implementation",
+      "surface": "Duplicate legacy repair implementation in cli.py",
+      "disposition": "retire-unmanaged-mutation-surface",
+      "currentState": "duplicate-mutation-implementation",
+      "retirementTarget": "Route the CLI to one receipt-aware repair service and remove the duplicate direct implementation.",
+      "reason": "Two repair implementations can drift on locking, backup, receipt, and verification behavior.",
+      "evidence": [
+        {"path": "mempalace/cli.py", "line": 748},
+        {"path": "mempalace/repair.py", "line": 998}
+      ],
+      "requiredAcceptance": ["single repair service", "CLI output compatibility", "receipt-aware integration test"]
+    },
+    {
+      "id": "mcp-direct-collection-cache",
+      "surface": "MCP cache that directly gets or creates Chroma collections",
+      "disposition": "retire-unmanaged-mutation-surface",
+      "currentState": "no-create-or-hnsw-pin-on-read-but-transport-handle-still-direct",
+      "retirementTarget": "Make the transport consume a private read facade and explicit receipt-aware mutation service; never create durable collection state as a read-side cache effect.",
+      "reason": "Transport caching should not own database creation or expose a second write path around the canonical backend boundary.",
+      "acceptanceStatus": "partial-no-create-on-read-proven-read-facade-open",
+      "evidence": [
+        {"path": "mempalace/mcp_server.py", "line": 477},
+        {"path": "tests/test_mcp_server.py", "line": 694}
+      ],
+      "requiredAcceptance": ["read facade", "no create-on-read", "transport mutation delegation tests"]
+    },
+    {
+      "id": "non-palace-operational-artifacts",
+      "surface": "Global config, onboarding state, hook logs, exports, and split-output files",
+      "disposition": "explicitly-exclude-with-boundary",
+      "currentState": "separate-local-artifacts",
+      "boundaryContract": "mempalace-operational-artifact-ownership/v1",
+      "reason": "These files are inputs, exports, or operational evidence rather than current palace representations and must not inflate drawer completeness denominators.",
+      "evidence": [
+        {"path": "mempalace/cli.py", "line": 176},
+        {"path": "mempalace/hooks_cli.py", "line": 309}
+      ],
+      "requiredAcceptance": ["artifact inventory", "atomicity and privacy policy", "explicit completeness exclusion"]
+    }
+  ],
+  "researchBasis": [
+    "https://www.w3.org/TR/prov-dm/",
+    "https://www.w3.org/TR/prov-constraints/",
+    "https://openlineage.io/docs/spec/facets/",
+    "https://docs.trychroma.com/reference/python",
+    "https://github.com/chroma-core/chroma/issues/7040"
+  ]
+}

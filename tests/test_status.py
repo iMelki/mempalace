@@ -1,6 +1,12 @@
+import os
 import sqlite3
 
-from mempalace.status import _sqlite_status_counts, status
+from mempalace.status import (
+    _default_palace_path,
+    _sqlite_status_counts,
+    get_fast_drawer_count,
+    status,
+)
 
 
 def _seed_sqlite_status_palace(palace_path):
@@ -86,3 +92,48 @@ def test_status_uses_sqlite_without_opening_collection(tmp_path, monkeypatch, ca
     assert "MemPalace Status — 2 drawers" in out
     assert "WING: agents" in out
     assert "ROOM: tools" in out
+
+
+def test_get_fast_drawer_count_matches_metadata_segment(tmp_path):
+    palace_path = tmp_path / "palace"
+    _seed_sqlite_status_palace(palace_path)
+
+    # 3 embeddings exist but one is vector-segment-only; only METADATA counts.
+    assert get_fast_drawer_count(str(palace_path)) == 2
+
+
+def test_default_palace_path_points_at_the_palace_not_the_config_dir(monkeypatch):
+    """Regression: /healthz served `drawers: 0` for a 1,003,935-drawer palace.
+
+    ``status.py`` defaulted to ``~/.mempalace`` -- the CONFIG directory --
+    while ``config.DEFAULT_PALACE_PATH`` and every other module use
+    ``~/.mempalace/palace``. Both directories contain a ``chroma.sqlite3``, so
+    the wrong one opened cleanly and returned a confident 0 rather than
+    failing. Served next to ``status: ok`` it read as "the palace is empty".
+    """
+
+    monkeypatch.delenv("MEMPALACE_PATH", raising=False)
+    monkeypatch.delenv("MEMPALACE_PALACE_PATH", raising=False)
+
+    resolved = _default_palace_path()
+
+    assert os.path.basename(os.path.normpath(resolved)) == "palace"
+
+    from mempalace.config import DEFAULT_PALACE_PATH
+
+    assert os.path.normpath(resolved) == os.path.normpath(DEFAULT_PALACE_PATH)
+
+
+def test_explicit_env_overrides_still_win(monkeypatch, tmp_path):
+    monkeypatch.delenv("MEMPALACE_PATH", raising=False)
+    monkeypatch.setenv("MEMPALACE_PALACE_PATH", str(tmp_path / "custom"))
+    assert _default_palace_path() == str(tmp_path / "custom")
+
+    monkeypatch.setenv("MEMPALACE_PATH", str(tmp_path / "winner"))
+    assert _default_palace_path() == str(tmp_path / "winner")
+
+
+def test_fast_count_returns_none_when_no_palace_exists(tmp_path):
+    # Must not report a confident 0 for a path that has no palace at all --
+    # None means "cannot assert", which callers treat differently from empty.
+    assert get_fast_drawer_count(str(tmp_path / "nonexistent")) is None

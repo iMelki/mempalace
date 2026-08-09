@@ -143,9 +143,9 @@ def test_mine_convos_rebuilds_stale_drawers_after_schema_bump(capsys, test_embed
         # Second mine — version gate should trigger rebuild
         mine_convos(tmpdir, palace_path, wing="test")
         out = capsys.readouterr().out
-        assert (
-            "Files skipped (already filed): 0" in out
-        ), "stale drawers should force a rebuild, not a skip"
+        assert "Files skipped (already filed): 0" in out, (
+            "stale drawers should force a rebuild, not a skip"
+        )
 
         client, col = _open_collection(palace_path, test_embedding_function)
         rebuilt = col.get(where={"source_file": resolved})

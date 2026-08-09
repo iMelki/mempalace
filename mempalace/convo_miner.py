@@ -17,12 +17,15 @@ from collections import defaultdict
 from contextlib import nullcontext
 from typing import Optional
 
+from chromadb.errors import NotFoundError as _ChromaNotFoundError
+
 from .normalize import normalize
 from .palace import (
     NORMALIZE_VERSION,
     SKIP_DIRS,
     MineAlreadyRunning,
     file_already_mined,
+    get_closets_collection,
     get_collection,
     mine_lock,
     mine_palace_lock,
@@ -37,6 +40,7 @@ from .write_receipts import (
     complete_reused_receipt,
     managed_write_scope,
     purge_managed_source_snapshot,
+    require_managed_receipts,
     rollback_managed_source_rows,
     sha256_bytes,
     snapshot_managed_source_rows,
@@ -579,6 +583,12 @@ def _process_conversation_file(
     receipt_run: ManagedRunIdentity = None,
 ) -> tuple[int, dict, bool]:
     """Lock before reading so a waiting invocation cannot retain stale bytes."""
+    require_managed_receipts(
+        dry_run=dry_run,
+        receipt_store=receipt_store,
+        receipt_run=receipt_run,
+        operation="conversation _process_conversation_file",
+    )
     raw_source_alias = os.fspath(filepath)
     source_file = canonical_source_locator(filepath, local_path=True)
     managed = not dry_run and receipt_store is not None and receipt_run is not None
@@ -619,6 +629,12 @@ def _process_conversation_file_locked(
     source_aliases: tuple[str, ...] = (),
 ) -> tuple[int, dict, bool]:
     """Process one conversation source and close its receipt terminally."""
+    require_managed_receipts(
+        dry_run=dry_run,
+        receipt_store=receipt_store,
+        receipt_run=receipt_run,
+        operation="conversation _process_conversation_file_locked",
+    )
     source_file = str(filepath)
     receipt = None
     if not dry_run and receipt_store is not None and receipt_run is not None:
@@ -870,6 +886,7 @@ def mine_convos(
     limit: int = 0,
     dry_run: bool = False,
     extract_mode: str = "exchange",
+    raise_on_lock_conflict: bool = False,
 ):
     """Serialize every mutating conversation run against one palace."""
     kwargs = {
@@ -887,6 +904,8 @@ def mine_convos(
         with managed_write_scope(palace_path, lock_factory=mine_palace_lock):
             return _mine_convos_impl(**kwargs)
     except MineAlreadyRunning:
+        if raise_on_lock_conflict:
+            raise
         print(
             f"mempalace: another mine is already running against {palace_path} - exiting cleanly.",
             file=sys.stderr,
@@ -933,8 +952,23 @@ def _mine_convos_impl(
 
     collection = get_collection(palace_path) if not dry_run else None
     if not dry_run:
+        # Recovery is palace-wide: a prior filesystem mine may have an
+        # interrupted rewrite spanning both drawers and closets. Conversation
+        # writes still emit drawers only, but recovery must see every managed
+        # collection before it can safely reconcile that record.
+        try:
+            closets_collection = get_closets_collection(palace_path, create=False)
+        except _ChromaNotFoundError:
+            # Fresh conversation-only palaces do not have a closet index yet.
+            # Omitting it preserves that lazy creation behavior; a pending
+            # recovery that names closets still fails closed in the receipt
+            # store rather than silently creating a new collection.
+            closets_collection = None
         receipt_store = ReceiptStore(palace_path)
-        receipt_store.reconcile_pending_rewrites({"drawers": collection})
+        recovery_collections = {"drawers": collection}
+        if closets_collection is not None:
+            recovery_collections["closets"] = closets_collection
+        receipt_store.reconcile_pending_rewrites(recovery_collections)
         receipt_run = receipt_store.create_run(
             caller=agent,
             mode=f"conversations:{extract_mode}",

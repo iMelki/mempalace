@@ -27,6 +27,7 @@ Examples:
     mempalace search "pricing discussion" --wing my_app --room costs
 """
 
+import json
 import os
 import sys
 import shlex
@@ -486,6 +487,11 @@ def _maybe_run_mine_after_init(args, cfg) -> None:
 
 def cmd_mine(args):
     palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
+    plan_out = getattr(args, "plan_out", None)
+    plan_progress_jsonl = getattr(args, "plan_progress_jsonl", None)
+    manifest_path = getattr(args, "manifest", None)
+    start_index = getattr(args, "start_index", None)
+    progress_jsonl = getattr(args, "progress_jsonl", None)
     include_ignored = []
     for raw in args.include_ignored or []:
         include_ignored.extend(part.strip() for part in raw.split(",") if part.strip())
@@ -501,61 +507,234 @@ def cmd_mine(args):
         )
 
     if args.mode == "convos":
+        if any(
+            value is not None
+            for value in (
+                plan_out,
+                plan_progress_jsonl,
+                manifest_path,
+                start_index,
+                progress_jsonl,
+            )
+        ):
+            print(
+                "  ERROR: deterministic source manifests currently support projects mode only",
+                file=sys.stderr,
+            )
+            sys.exit(2)
         from .convo_miner import mine_convos
+        from .miner import MINE_LOCK_CONFLICT_EXIT_CODE
+        from .palace import MineAlreadyRunning
 
-        mine_convos(
-            convo_dir=args.dir,
-            palace_path=palace_path,
-            wing=args.wing,
-            agent=args.agent,
-            limit=args.limit,
-            dry_run=args.dry_run,
-            extract_mode=args.extract,
-        )
+        try:
+            mine_convos(
+                convo_dir=args.dir,
+                palace_path=palace_path,
+                wing=args.wing,
+                agent=args.agent,
+                limit=args.limit,
+                dry_run=args.dry_run,
+                extract_mode=args.extract,
+                raise_on_lock_conflict=True,
+            )
+        except MineAlreadyRunning:
+            print(
+                "mempalace: another mine already holds the requested palace; retry later.",
+                file=sys.stderr,
+            )
+            sys.exit(MINE_LOCK_CONFLICT_EXIT_CODE)
     else:
-        from .miner import mine
+        from .miner import MINE_LOCK_CONFLICT_EXIT_CODE, mine
+        from .palace import MineAlreadyRunning
 
-        mine(
-            project_dir=args.dir,
-            palace_path=palace_path,
-            wing_override=args.wing,
-            agent=args.agent,
-            limit=args.limit,
-            dry_run=args.dry_run,
-            respect_gitignore=not args.no_gitignore,
-            include_ignored=include_ignored,
+        try:
+            mine(
+                project_dir=args.dir,
+                palace_path=palace_path,
+                wing_override=args.wing,
+                agent=args.agent,
+                limit=args.limit,
+                dry_run=args.dry_run,
+                respect_gitignore=not args.no_gitignore,
+                include_ignored=include_ignored,
+                plan_out=plan_out,
+                plan_progress_jsonl=plan_progress_jsonl,
+                manifest_path=manifest_path,
+                start_index=start_index,
+                progress_jsonl=progress_jsonl,
+                raise_on_lock_conflict=True,
+                report_variants=not getattr(args, "no_variant_report", False),
+            )
+        except MineAlreadyRunning:
+            print(
+                "mempalace: another mine already holds the requested palace; retry later.",
+                file=sys.stderr,
+            )
+            sys.exit(MINE_LOCK_CONFLICT_EXIT_CODE)
+
+
+def cmd_variants(args):
+    """Report backup/variant directory candidates for operator confirmation.
+
+    Read-only and report-only by design (#36): this command never excludes,
+    deletes, or mines anything. A directory named ``backup`` can hold the
+    only surviving copy of something, so the decision stays with the
+    operator — confirmed names go into ``exclude.dirs`` in ``mempalace.yaml``.
+    """
+    from .mine_exclusions import (
+        detect_variant_directories,
+        format_variant_report,
+        load_variant_settings,
+        read_project_config,
+        resolve_exclusion_policy,
+    )
+    from .miner import SKIP_FILENAMES
+
+    target = os.path.expanduser(args.dir)
+    if not os.path.isdir(target):
+        print(f"ERROR: Directory not found: {target}", file=sys.stderr)
+        sys.exit(2)
+
+    config = read_project_config(target)
+    settings = load_variant_settings(config)
+    max_depth = args.max_depth if args.max_depth is not None else settings["max_depth"]
+    if max_depth < 1:
+        print("ERROR: --max-depth must be at least 1", file=sys.stderr)
+        sys.exit(2)
+
+    candidates = detect_variant_directories(
+        target,
+        max_depth=max_depth,
+        policy=resolve_exclusion_policy(target, artifact_files=SKIP_FILENAMES),
+        globs=settings["globs"],
+    )
+
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "schema": "mempalace-variant-candidates/v1",
+                    "root": os.path.abspath(target),
+                    "max_depth": max_depth,
+                    "applied": False,
+                    "candidate_count": len(candidates),
+                    "candidates": [candidate.to_dict() for candidate in candidates],
+                },
+                indent=2,
+            )
         )
+        return
+
+    for line in format_variant_report(candidates):
+        print(line)
+
+
+def cmd_exclusions(args):
+    """Print the effective mine-time exclusion policy for a directory."""
+    from .mine_exclusions import read_project_config
+    from .miner import resolve_mine_exclusion_policy
+
+    target = os.path.expanduser(args.dir)
+    if not os.path.isdir(target):
+        print(f"ERROR: Directory not found: {target}", file=sys.stderr)
+        sys.exit(2)
+
+    config = read_project_config(target)
+    policy = resolve_mine_exclusion_policy(target, config)
+    effective = policy.as_dict()
+
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "root": os.path.abspath(target),
+                    "configured": bool(config.get("exclude")),
+                    "digest": policy.digest(),
+                    "policy": effective,
+                },
+                indent=2,
+            )
+        )
+        return
+
+    print(f"\n  Effective mine exclusions for {os.path.abspath(target)}")
+    print(f"  Source: {'mempalace.yaml exclude: block' if config.get('exclude') else 'defaults'}")
+    print(f"  Digest: {policy.digest()}")
+    for key in (
+        "generated_files",
+        "generated_file_globs",
+        "generated_dirs",
+        "generated_dir_globs",
+        "extra_files",
+        "extra_file_globs",
+        "extra_dirs",
+        "extra_dir_globs",
+        "allow_files",
+        "allow_dirs",
+        "artifact_files",
+    ):
+        values = effective.get(key) or []
+        if values:
+            print(f"\n  {key} ({len(values)}):")
+            print(f"    {', '.join(values)}")
+    print(
+        "\n  Reverse any default in mempalace.yaml — set `exclude.generated_files: false`\n"
+        "  or list individual names under `exclude.allow_files` / `exclude.allow_dirs`.\n"
+    )
 
 
 def cmd_sweep(args):
     """Sweep a transcript file or directory.
 
-    The sweeper deduplicates against its own prior writes via
-    deterministic drawer IDs + a timestamp cursor. It does NOT currently
-    coordinate with the file-level miners (miner.py / convo_miner.py) —
-    those produce char-chunked drawers without compatible message
-    metadata, so running both miners may store overlapping content under
-    different IDs.
+    Each JSONL file replaces its complete message-level representation under
+    a managed receipt. The sweeper uses a separate source lane from the
+    file-level miners, so their chunked rows can coexist without either path
+    claiming the other's provenance.
     """
     from .sweeper import sweep, sweep_directory
 
     palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
     target = os.path.expanduser(args.target)
+    allow_zero_output = bool(getattr(args, "allow_zero_output", False))
 
     if os.path.isfile(target):
-        result = sweep(target, palace_path)
+        result = sweep(target, palace_path, allow_zero_output=allow_zero_output)
         print(
             f"  Swept {target}: +{result['drawers_added']} new, "
-            f"{result['drawers_already_present']} already present, "
-            f"{result['drawers_skipped']} skipped (< cursor)."
+            f"~{result['drawers_updated']} updated, "
+            f"={result['drawers_semantically_unchanged']} semantically unchanged, "
+            f"-{result['drawers_removed']} removed, "
+            f"{result['drawers_rebound']} receipt rebindings, "
+            f"{result['drawers_physical_mutations']} physical mutations; "
+            f"{result['drawers_represented']}/{result['drawers_expected']} "
+            "represented/expected; "
+            f"receipt {result['receipt_id']} ({result['verification_status']})."
         )
+        if result["verification_status"] != "represented":
+            print(
+                "  WARNING: the sweep committed, but terminal verification or recovery "
+                "finalization is incomplete: "
+                f"{result['verification_error']}",
+                file=sys.stderr,
+            )
+            sys.exit(3)
     elif os.path.isdir(target):
-        result = sweep_directory(target, palace_path)
+        result = sweep_directory(
+            target,
+            palace_path,
+            allow_zero_output=allow_zero_output,
+        )
         print(
             f"  Swept {result['files_succeeded']}/{result['files_attempted']} "
             f"files from {target}: +{result['drawers_added']} new, "
-            f"{result['drawers_already_present']} already present, "
-            f"{result['drawers_skipped']} skipped (< cursor)."
+            f"~{result['drawers_updated']} updated, "
+            f"={result['drawers_semantically_unchanged']} semantically unchanged, "
+            f"-{result['drawers_removed']} removed, "
+            f"{result['drawers_rebound']} receipt rebindings, "
+            f"{result['drawers_physical_mutations']} physical mutations, "
+            f"{result['drawers_represented']} whole-run represented, "
+            f"{result['drawers_verifier_confirmed']}/{result['drawers_expected']} "
+            "per-file verifier-confirmed/expected."
         )
         failures = result.get("failures") or []
         if failures:
@@ -564,6 +743,13 @@ def cmd_sweep(args):
                 file=sys.stderr,
             )
             sys.exit(2)
+        if result.get("files_committed_unverified"):
+            print(
+                "  WARNING: one or more files committed without complete terminal "
+                "verification/finalization; inspect per-file verification_error values.",
+                file=sys.stderr,
+            )
+            sys.exit(3)
     else:
         print(f"  ERROR: Not a file or directory: {target}", file=sys.stderr)
         sys.exit(1)
@@ -651,6 +837,91 @@ def cmd_repair_status(args):
         as_json=getattr(args, "json", False),
         artifact_dir=getattr(args, "artifact_dir", None),
     )
+
+
+def cmd_backup_snapshot(args):
+    """Clean-client lease + staged consistent snapshot + content identity (#33).
+
+    Recursively tarring a live palace is not crash-consistent: ``chroma.sqlite3``
+    is a multi-gigabyte live SQLite database and the HNSW segment files are
+    mutated as a group. This command is the safe replacement -- it holds the
+    exclusive palace lock every miner and MCP managed write already honors,
+    copies the catalog with SQLite's online backup API, copies only the segment
+    directories the snapshot's own catalog references, and emits a verifiable
+    content-identity receipt. It never mutates the palace.
+    """
+    import json
+
+    from .backup_snapshot import PalaceSnapshotError, stage_palace_snapshot, verify_snapshot_receipt
+
+    palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
+    as_json = getattr(args, "json", False)
+
+    try:
+        if getattr(args, "verify_receipt", None):
+            result = verify_snapshot_receipt(
+                args.verify_receipt,
+                staged_root=getattr(args, "staged_root", None) or None,
+                verify_hashes=not getattr(args, "skip_hash_verification", False),
+            )
+            if as_json:
+                print(json.dumps(result, ensure_ascii=True, separators=(",", ":"), sort_keys=True))
+            else:
+                print(f"MemPalace snapshot verification: valid={result['valid']}")
+                print(f"  Files: {result['fileCount']}  hashed={result['hashesVerified']}")
+                for problem in result["problems"]:
+                    print(f"  PROBLEM {problem}")
+            if not result["valid"]:
+                sys.exit(2)
+            return
+
+        if not getattr(args, "staging_dir", None):
+            print(
+                "backup-snapshot requires --staging-dir (an empty directory outside the palace)",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+
+        receipt = stage_palace_snapshot(
+            palace_path,
+            args.staging_dir,
+            use_maintenance_marker=not getattr(args, "no_maintenance_marker", False),
+            progress=getattr(args, "progress", False),
+        )
+    except PalaceSnapshotError as exc:
+        if as_json:
+            print(
+                json.dumps(
+                    {
+                        "schema": "mempalace-backup-snapshot-receipt/v1",
+                        "status": "error",
+                        "leaseProven": False,
+                        "snapshotConsistencyProven": False,
+                        "contentIdentityProven": False,
+                        "message": str(exc),
+                    },
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+            )
+        else:
+            print(f"MemPalace snapshot failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    if as_json:
+        print(json.dumps(receipt, ensure_ascii=True, separators=(",", ":"), sort_keys=True))
+        return
+    identity = receipt.get("contentIdentity", {})
+    print("MemPalace staged backup snapshot: complete")
+    print(f"  Staged root:  {receipt['stagedRoot']}")
+    print(f"  Receipt:      {receipt['receiptPath']}")
+    print(f"  Files staged: {identity.get('fileCount')}")
+    print(f"  Bytes staged: {identity.get('totalBytes'):,}")
+    for label, entry in sorted((identity.get("counts") or {}).items()):
+        print(f"  {label:<12} sqlite={entry.get('sqliteCount')} hnsw={entry.get('hnswCount')}")
+    print(f"  Identity:     {receipt['contentIdentityDigest']}")
+    print(f"  Duration:     {receipt['durationSeconds']}s")
 
 
 def cmd_warm(args):
@@ -1140,6 +1411,52 @@ def main():
     )
     p_mine.add_argument("--limit", type=int, default=0, help="Max files to process (0 = all)")
     p_mine.add_argument(
+        "--plan-out",
+        default=None,
+        help=(
+            "Create or reuse an immutable deterministic project-source manifest "
+            "at this path before mining"
+        ),
+    )
+    p_mine.add_argument(
+        "--plan-progress-jsonl",
+        default=None,
+        help=(
+            "Persist a hash-chained directory/file cursor while building "
+            "--plan-out so a killed planner resumes at the next exact file"
+        ),
+    )
+    p_mine.add_argument(
+        "--manifest",
+        default=None,
+        help="Consume an existing immutable project-source manifest",
+    )
+    p_mine.add_argument(
+        "--start-index",
+        type=int,
+        default=None,
+        help=(
+            "Expected next zero-based source index; must equal the contiguous "
+            "verified progress prefix"
+        ),
+    )
+    p_mine.add_argument(
+        "--progress-jsonl",
+        default=None,
+        help=(
+            "Append a sanitized durable cursor after each source receipt is "
+            "terminal and exactly represented"
+        ),
+    )
+    p_mine.add_argument(
+        "--no-variant-report",
+        action="store_true",
+        help=(
+            "Suppress the report-only backup/variant directory advisory in the "
+            "mine header. The advisory never excludes anything (#36)"
+        ),
+    )
+    p_mine.add_argument(
         "--redetect-origin",
         action="store_true",
         help=(
@@ -1169,6 +1486,11 @@ def main():
     p_sweep.add_argument(
         "target",
         help="A .jsonl transcript file, or a directory to scan recursively",
+    )
+    p_sweep.add_argument(
+        "--allow-zero-output",
+        action="store_true",
+        help="Allow a reviewed source version to remove every managed sweeper row",
     )
 
     # search
@@ -1376,6 +1698,80 @@ def main():
         help="Emit a single machine-readable warm result JSON object to stdout",
     )
 
+    # backup-snapshot — clean-client lease + staged consistent snapshot (#33)
+    p_backup_snapshot = sub.add_parser(
+        "backup-snapshot",
+        help=(
+            "Stage a consistent, content-identity-proven palace snapshot under an "
+            "exclusive clean-client lease (SQLite online backup; never a live tar)"
+        ),
+    )
+    p_backup_snapshot.add_argument(
+        "--staging-dir",
+        default=None,
+        help="Empty directory outside the palace root that receives the staged restore set",
+    )
+    p_backup_snapshot.add_argument(
+        "--verify-receipt",
+        default=None,
+        help="Verify an existing backup-snapshot-receipt.json instead of creating a snapshot",
+    )
+    p_backup_snapshot.add_argument(
+        "--staged-root",
+        default=None,
+        help="Override the staged root recorded in the receipt during verification",
+    )
+    p_backup_snapshot.add_argument(
+        "--skip-hash-verification",
+        action="store_true",
+        help="Structural verification only (schema, proof flags, inventory, sizes, digest)",
+    )
+    p_backup_snapshot.add_argument(
+        "--no-maintenance-marker",
+        action="store_true",
+        help="Do not raise the shared MemSys maintenance pause marker for the lease window",
+    )
+    p_backup_snapshot.add_argument(
+        "--progress",
+        action="store_true",
+        help="Print SQLite online-backup progress to stderr",
+    )
+    p_backup_snapshot.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the machine-readable snapshot receipt or verification object to stdout",
+    )
+
+    # variants
+    p_variants = sub.add_parser(
+        "variants",
+        help="Report backup/variant directory candidates (read-only, excludes nothing)",
+    )
+    p_variants.add_argument("dir", help="Directory to inspect")
+    p_variants.add_argument(
+        "--max-depth",
+        type=int,
+        default=None,
+        help="Directory depth to inspect (default: 3, or `variants.max_depth` in mempalace.yaml)",
+    )
+    p_variants.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the machine-readable candidate list to stdout",
+    )
+
+    # exclusions
+    p_exclusions = sub.add_parser(
+        "exclusions",
+        help="Show the effective mine-time exclusion policy for a directory",
+    )
+    p_exclusions.add_argument("dir", nargs="?", default=".", help="Project directory (default: .)")
+    p_exclusions.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the machine-readable effective policy to stdout",
+    )
+
     # mcp
     sub.add_parser(
         "mcp",
@@ -1433,9 +1829,12 @@ def main():
         "wake-up": cmd_wakeup,
         "repair": cmd_repair,
         "repair-status": cmd_repair_status,
+        "backup-snapshot": cmd_backup_snapshot,
         "warm": cmd_warm,
         "migrate": cmd_migrate,
         "status": cmd_status,
+        "variants": cmd_variants,
+        "exclusions": cmd_exclusions,
     }
     dispatch[args.command](args)
 

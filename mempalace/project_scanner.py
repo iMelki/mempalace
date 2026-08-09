@@ -58,6 +58,24 @@ SKIP_DIRS = {
 MAX_DEPTH = 6
 MAX_COMMITS_PER_REPO = 1000
 GIT_TIMEOUT = 10
+GIT_REPOSITORY_LOCAL_ENV_VARS = {
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CONFIG",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_GRAFT_FILE",
+    "GIT_INDEX_FILE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_PREFIX",
+    "GIT_INTERNAL_SUPER_PREFIX",
+    "GIT_SHALLOW_FILE",
+    "GIT_COMMON_DIR",
+}
 
 
 # ==================== DATACLASSES ====================
@@ -183,14 +201,31 @@ MANIFEST_PARSERS = {
 # ==================== GIT HELPERS ====================
 
 
+def _git_subprocess_env() -> dict[str, str]:
+    """Return the process environment without an enclosing repo's Git state."""
+    env = os.environ.copy()
+    for key in list(env):
+        upper = key.upper()
+        if (
+            upper in GIT_REPOSITORY_LOCAL_ENV_VARS
+            or upper.startswith("GIT_CONFIG_KEY_")
+            or upper.startswith("GIT_CONFIG_VALUE_")
+        ):
+            env.pop(key, None)
+    return env
+
+
 def _run_git(cwd: Path, *args: str, timeout: int = GIT_TIMEOUT) -> str:
     try:
         r = subprocess.run(
             ["git", "-C", str(cwd), *args],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
             check=False,
+            env=_git_subprocess_env(),
         )
         return r.stdout if r.returncode == 0 else ""
     except (OSError, subprocess.SubprocessError):
@@ -210,15 +245,21 @@ def _global_git_identity() -> tuple[str, str]:
             ["git", "config", "--global", "user.name"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=2,
             check=False,
+            env=_git_subprocess_env(),
         ).stdout.strip()
         e = subprocess.run(
             ["git", "config", "--global", "user.email"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=2,
             check=False,
+            env=_git_subprocess_env(),
         ).stdout.strip()
         return n, e
     except (OSError, subprocess.SubprocessError):

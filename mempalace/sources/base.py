@@ -199,6 +199,9 @@ class BaseSourceAdapter(ABC):
     supported_modes: ClassVar[frozenset[str]] = frozenset({"chunked_content"})
     declared_transformations: ClassVar[frozenset[str]] = frozenset()
     default_privacy_class: ClassVar[str] = "pii_potential"
+    # Adapters that intentionally represent deletion or filtering as an empty
+    # current source may opt into an explicit terminal receipt disposition.
+    empty_output_disposition: ClassVar[Optional[str]] = None
 
     # ------------------------------------------------------------------
     # Required methods

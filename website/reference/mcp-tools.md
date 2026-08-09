@@ -88,29 +88,41 @@ Returns the AAAK dialect specification.
 
 ### `mempalace_add_drawer`
 
-File verbatim content into the palace. Identical content (same deterministic drawer ID) is silently skipped. For similarity-based duplicate detection before filing, use `mempalace_check_duplicate`.
+File one logical source into a receipt-owned drawer. Reusing the same `source_id`
+updates or idempotently retries that source; it does not create a second drawer.
+Use `mempalace_check_duplicate` separately when you want similarity review across
+different sources.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `wing` | string | **Yes** | Wing (project name) |
 | `room` | string | **Yes** | Room (aspect: backend, decisions, etc.) |
 | `content` | string | **Yes** | Verbatim content to store |
-| `source_file` | string | No | Where this came from |
+| `source_id` | string | **Yes at execution** | Stable ID for the real note, message, or record; reuse it for later updates or deletion |
+| `source_file` | string | No | Source label; only its basename is retained as `source_name` |
 | `added_by` | string | No | Who is filing (default: "mcp") |
 
-**Returns:** `{ success, drawer_id, wing, room }`
+For transition compatibility, `source_id` is exposed in the JSON Schema but is
+not yet in its `required` array. The server still rejects a real mutation that
+omits it with an actionable error. Existing fourth and fifth positional Python
+arguments remain `source_file` and `added_by`.
+
+**Returns:** `{ success, reason, drawer_id, source_id, receipt_id, wing, room }`
 
 ---
 
 ### `mempalace_delete_drawer`
 
-Delete a drawer by ID. Irreversible.
+Delete a receipt-owned drawer and publish a verified zero-output successor plus
+an invalidation for the prior receipt. Rows that predate managed receipts remain
+readable but require an explicit provenance migration before update or deletion.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `drawer_id` | string | **Yes** | ID of the drawer to delete |
+| `source_id` | string | **Yes at execution** | Stable logical source ID used when the drawer was filed |
 
-**Returns:** `{ success, drawer_id }`
+**Returns:** `{ success, reason, drawer_id, source_id, receipt_id }`
 
 ---
 
@@ -143,7 +155,9 @@ List drawers with pagination. Optional wing/room filter. Returns IDs, wings, roo
 
 ### `mempalace_update_drawer`
 
-Update an existing drawer's content and/or metadata (wing, room). Fetches the existing drawer first; returns an error if not found.
+Supersede a receipt-owned drawer's content and/or semantic metadata. The current
+receipt, source ownership, document, wing, room, and semantic metadata marker
+must all verify before replacement.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -151,8 +165,9 @@ Update an existing drawer's content and/or metadata (wing, room). Fetches the ex
 | `content` | string | No | New content (omit to keep existing) |
 | `wing` | string | No | New wing (omit to keep existing) |
 | `room` | string | No | New room (omit to keep existing) |
+| `source_id` | string | **Yes at execution** | Stable logical source ID used when the drawer was filed |
 
-**Returns:** `{ success, drawer_id, updated_fields }`
+**Returns:** `{ success, reason, drawer_id, source_id, receipt_id, wing, room }`
 
 ---
 
@@ -329,8 +344,10 @@ Write to your personal agent diary.
 | `agent_name` | string | **Yes** | Your name — each agent gets its own wing |
 | `entry` | string | **Yes** | Diary entry (in AAAK format recommended) |
 | `topic` | string | No | Topic tag (default: "general") |
+| `wing` | string | No | Target wing; defaults to `wing_{agent_name}` |
+| `source_id` | string | No | Stable retry ID. Its identity is scoped by agent and wing; omit it to append a new entry |
 
-**Returns:** `{ success, entry_id, agent, topic, timestamp }`
+**Returns:** `{ success, reason, entry_id, source_id, receipt_id, agent, topic, timestamp }`
 
 ---
 

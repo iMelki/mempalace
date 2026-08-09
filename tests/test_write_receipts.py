@@ -1,14 +1,17 @@
 """Focused coverage for the issue #22 managed-write receipt foundation."""
 
 import copy
+import importlib.util
 import json
 import os
 import re
+import sys
 import threading
 import time
 import uuid
 from contextlib import contextmanager
 
+import chromadb
 import pytest
 
 import mempalace.convo_miner as convo_miner_module
@@ -43,6 +46,7 @@ from mempalace.write_receipts import (
     canonical_source_locator,
     purge_managed_source_snapshot,
     rollback_managed_source_rows,
+    require_managed_receipts,
     sha256_bytes,
     shared_receipt_projection,
     snapshot_managed_source_rows,
@@ -50,6 +54,55 @@ from mempalace.write_receipts import (
 )
 
 _THREAD_TEST_TIMEOUT_SECONDS = 10.0
+
+
+def test_managed_receipt_requirement_preserves_receipt_free_dry_runs():
+    require_managed_receipts(
+        dry_run=True,
+        receipt_store=None,
+        receipt_run=None,
+        operation="test dry run",
+    )
+
+
+def test_managed_receipt_requirement_rejects_partial_invalid_and_foreign_pairs(tmp_path):
+    store = ReceiptStore(tmp_path / "palace-a")
+    run = store.create_run(caller="test", mode="test", config={})
+    foreign_store = ReceiptStore(tmp_path / "palace-b")
+
+    for receipt_store, receipt_run in (
+        (store, None),
+        (None, run),
+        (object(), run),
+        (store, object()),
+    ):
+        with pytest.raises(ReceiptIdentityError, match="require both ReceiptStore"):
+            require_managed_receipts(
+                dry_run=False,
+                receipt_store=receipt_store,
+                receipt_run=receipt_run,
+                operation="test write",
+            )
+
+    with pytest.raises(ReceiptIdentityError, match="different ReceiptStore"):
+        require_managed_receipts(
+            dry_run=False,
+            receipt_store=foreign_store,
+            receipt_run=run,
+            operation="test write",
+        )
+
+    digest = sha256_bytes(b"source")
+    with pytest.raises(ReceiptIdentityError, match="different ReceiptStore"):
+        foreign_store.begin_source(
+            run=run,
+            source_locator="logical://source",
+            source_content_hash=digest,
+            source_version_hash=digest,
+            source_size_bytes=6,
+            adapter_name="test",
+            adapter_version="1",
+        )
 
 
 class _MemoryCollection:
@@ -955,7 +1008,7 @@ def test_managed_conversation_rewrite_with_fewer_chunks_leaves_no_stale_ids(tmp_
     assert verify_receipt(second, collection, store=store).status == "represented"
 
 
-def test_unmanaged_miners_preserve_best_effort_purge_behavior(tmp_path):
+def test_unmanaged_miners_fail_closed_before_best_effort_purge_or_write(tmp_path):
     project = tmp_path / "project"
     project.mkdir()
     project_source = project / "legacy-project.md"
@@ -963,36 +1016,37 @@ def test_unmanaged_miners_preserve_best_effort_purge_behavior(tmp_path):
     project_collection = _MemoryCollection()
     project_collection.delete_error = RuntimeError("legacy project purge failure")
 
-    project_drawers, _ = process_file(
-        project_source,
-        project,
-        project_collection,
-        "project",
-        [{"name": "general", "description": "general"}],
-        "test-runner",
-        False,
-    )
+    with pytest.raises(ReceiptIdentityError, match="require both ReceiptStore"):
+        process_file(
+            project_source,
+            project,
+            project_collection,
+            "project",
+            [{"name": "general", "description": "general"}],
+            "test-runner",
+            False,
+        )
 
     conversation_source = project / "legacy-conversation.txt"
     conversation_source.write_text(_long_source_text("conversation"), encoding="utf-8")
     conversation_collection = _MemoryCollection()
     conversation_collection.delete_error = RuntimeError("legacy conversation purge failure")
-    conversation_drawers, _, skipped = _process_conversation_file(
-        filepath=conversation_source,
-        collection=conversation_collection,
-        wing="conversations",
-        agent="test-runner",
-        extract_mode="exchange",
-        dry_run=False,
-        index=1,
-        total_files=1,
-    )
+    with pytest.raises(ReceiptIdentityError, match="require both ReceiptStore"):
+        _process_conversation_file(
+            filepath=conversation_source,
+            collection=conversation_collection,
+            wing="conversations",
+            agent="test-runner",
+            extract_mode="exchange",
+            dry_run=False,
+            index=1,
+            total_files=1,
+        )
 
-    assert project_drawers > 0
-    assert project_collection.upsert_calls > 0
-    assert conversation_drawers > 0
-    assert conversation_collection.upsert_calls > 0
-    assert skipped is False
+    assert project_collection.delete_calls == 0
+    assert project_collection.upsert_calls == 0
+    assert conversation_collection.delete_calls == 0
+    assert conversation_collection.upsert_calls == 0
 
 
 def test_managed_normalization_consumes_the_bytes_bound_to_the_receipt(tmp_path):
@@ -1778,9 +1832,17 @@ def test_direct_replacement_between_validation_and_delete_survives_and_blocks_pu
             if self.race_enabled and ids:
                 self.race_enabled = False
                 baseline_document = self.rows[ids[0]][0]
+                baseline_metadata = self.rows[ids[0]][1]
+                replacement_document = f"prefix {baseline_document} suffix"
                 self.rows[ids[0]] = (
-                    f"prefix {baseline_document} suffix",
-                    {"source_file": "logical://another/source"},
+                    replacement_document,
+                    {
+                        **baseline_metadata,
+                        META_RECEIPT_ID: str(uuid.uuid4()),
+                        META_OUTPUT_CONTENT_HASH: sha256_bytes(
+                            replacement_document.encode("utf-8")
+                        ),
+                    },
                 )
             return super().delete(
                 ids=ids,
@@ -1823,6 +1885,102 @@ def test_direct_replacement_between_validation_and_delete_survives_and_blocks_pu
     )
     assert len(store._pending_recovery_paths(first["source"]["identity"])) == 1
     assert _current_for_path(store, source)["receipt_id"] == first["receipt_id"]
+
+
+def test_matching_stamped_hash_uses_metadata_binding_without_document_regex(tmp_path):
+    _, _, collection, _, _, _ = _seed_receipted_recovery_source(tmp_path)
+    document, metadata = collection.rows["baseline-row"]
+    row = write_receipts_module._validated_collection_row(
+        "baseline-row",
+        (document, metadata, None),
+    )
+
+    where, where_document = write_receipts_module._delete_filters_for_validated_row(row)
+
+    assert where_document is None
+    assert {META_OUTPUT_CONTENT_HASH: sha256_bytes(document.encode("utf-8"))} in where["$and"]
+
+
+@pytest.mark.parametrize("hash_state", ["missing", "stale"])
+def test_legacy_or_stale_hash_retains_exact_document_regex(tmp_path, hash_state):
+    _, _, collection, _, _, _ = _seed_receipted_recovery_source(tmp_path)
+    document, metadata = collection.rows["baseline-row"]
+    metadata = dict(metadata)
+    if hash_state == "missing":
+        metadata.pop(META_OUTPUT_CONTENT_HASH)
+    else:
+        metadata[META_OUTPUT_CONTENT_HASH] = sha256_bytes(b"different document")
+    row = write_receipts_module._validated_collection_row(
+        "baseline-row",
+        (document, metadata, None),
+    )
+
+    _, where_document = write_receipts_module._delete_filters_for_validated_row(row)
+
+    assert where_document == {"$regex": f"(?s)^{re.escape(document)}$"}
+
+
+def test_stale_hash_on_empty_row_fails_closed(tmp_path):
+    _, _, collection, _, _, _ = _seed_receipted_recovery_source(tmp_path)
+    _, metadata = collection.rows["baseline-row"]
+    row = write_receipts_module._validated_collection_row(
+        "baseline-row",
+        ("", metadata, None),
+    )
+
+    with pytest.raises(ReceiptRecoveryError, match="stale content hash on empty row"):
+        write_receipts_module._delete_filters_for_validated_row(row)
+
+
+def test_real_chroma_large_stamped_row_purges_without_compiling_document_regex(tmp_path):
+    palace_path = tmp_path / "real-chroma-large-delete"
+    store = ReceiptStore(palace_path)
+    run = store.create_run(caller="test-runner", mode="test", config={"fixture": "large"})
+    source_locator = "logical://recovery/large-source"
+    source_hash = sha256_bytes(b"large recovery baseline")
+    session = store.begin_source(
+        run=run,
+        source_locator=source_locator,
+        source_content_hash=source_hash,
+        source_version_hash=source_hash,
+        source_size_bytes=393216,
+        adapter_name="large-recovery-fixture",
+        adapter_version="1",
+    )
+    document = ("[](){}.*+?^$\\| large managed row\n" * 16384)[:393216]
+    metadata = stamp_output_metadata({"source_file": source_locator}, session, document)
+    client = chromadb.PersistentClient(path=str(palace_path))
+    collection = client.get_or_create_collection("drawers")
+    collection.add(
+        ids=["large-baseline-row"],
+        documents=[document],
+        metadatas=[metadata],
+        embeddings=[[0.1, 0.2, 0.3]],
+    )
+    session.record_output("large-baseline-row", document)
+    session.set_expected(drawers=1)
+    baseline = session.complete()
+    snapshot = snapshot_managed_source_rows(
+        collection,
+        source_file=source_locator,
+        source_identity=baseline["source"]["identity"],
+        local_path=False,
+    )
+    _, recovery_path = _begin_recovery_rewrite(store, source_locator, baseline, snapshot)
+
+    with _managed_write_scope(store):
+        deleted = purge_managed_source_snapshot(
+            collection,
+            snapshot,
+            recovery_path=recovery_path,
+            collection_name="drawers",
+            source_file=source_locator,
+            source_identity=baseline["source"]["identity"],
+            local_path=False,
+        )
+
+    assert deleted == ["large-baseline-row"]
+    assert collection.get(ids=["large-baseline-row"])["ids"] == []
 
 
 def test_private_purge_boundary_rejects_forged_capability_without_mutation(tmp_path):
@@ -2740,11 +2898,53 @@ def test_managed_source_adapter_emits_receipts_and_reuses_unchanged_output(tmp_p
     current = store.find_current(store.source_identity(source.uri))
     assert current is not None
     assert first.drawers_written == 2
+    assert first.receipt_verification_statuses == ("represented",)
+    assert first.receipt_validation_errors == (None,)
     assert second.sources_unchanged == 1
+    assert second.receipt_verification_statuses == ("represented",)
+    assert second.receipt_validation_errors == (None,)
     assert collection.upsert_calls == first_writes
     assert collection.update_calls == first_updates + 1
     assert current["disposition"] == "UNCHANGED"
     assert verify_receipt(current, collection, store=store).status == "represented"
+
+
+def test_managed_adapter_default_post_commit_verification_failure_still_raises(
+    tmp_path, monkeypatch
+):
+    palace, store, _ = _store_and_run(tmp_path)
+    collection = _MemoryCollection()
+    context = PalaceContext(
+        drawer_collection=collection,
+        knowledge_graph=_FakeKnowledgeGraph(),
+        palace_path=str(palace),
+        adapter_name="receipt-fixture",
+        adapter_version="1.0",
+    )
+    source = SourceRef(uri="logical://adapter/default-terminal-error")
+
+    def fail_terminal_verification(*args, **kwargs):
+        raise RuntimeError("injected default terminal verification failure")
+
+    monkeypatch.setattr(
+        provenance_module,
+        "_verify_context_receipt",
+        fail_terminal_verification,
+    )
+    with pytest.raises(RuntimeError, match="injected default terminal verification failure"):
+        managed_adapter_ingest(
+            adapter=_ReceiptAdapter(),
+            source=source,
+            palace=context,
+            receipt_store=store,
+            caller="test-runner",
+            config={"fixture": True},
+        )
+
+    current = store.find_current(store.source_identity(source.uri))
+    assert current is not None
+    assert current["state"] == "COMPLETE"
+    assert len(list(store._pending_recovery_paths())) == 1
 
 
 def test_managed_adapter_raw_collection_write_is_stamped_and_receipted(tmp_path):
@@ -3149,6 +3349,145 @@ def test_managed_write_retries_supported_exact_embedding_readback(tmp_path):
 
     assert collection.exact_reads == 2
     assert [item["id"] for item in session.outputs] == ["stable-row"]
+
+
+def test_exact_snapshot_retries_supported_delayed_embedding_visibility():
+    class DelayedSnapshotCollection(_MemoryCollection):
+        def __init__(self):
+            super().__init__()
+            self.exact_reads = 0
+
+        def get_exact_embeddings(self, ids):
+            self.exact_reads += 1
+            if self.exact_reads == 1:
+                raise EmbeddingVisibilityError("Nothing found on disk")
+            return {item_id: (0.25, 0.5) for item_id in ids}
+
+    collection = DelayedSnapshotCollection()
+    collection.upsert(
+        documents=["stable output"],
+        ids=["stable-row"],
+        metadatas=[{"source_file": "logical://snapshot/delayed"}],
+    )
+
+    rows = write_receipts_module._collection_rows_for_ids(
+        collection,
+        ["stable-row"],
+        include_embeddings=True,
+    )
+
+    assert collection.exact_reads == 2
+    assert rows["stable-row"][2] == (0.25, 0.5)
+
+
+def test_exact_snapshot_fails_closed_when_embedding_visibility_never_arrives(monkeypatch):
+    class MissingSnapshotCollection(_MemoryCollection):
+        def get_exact_embeddings(self, _ids):
+            raise EmbeddingVisibilityError("Nothing found on disk")
+
+    collection = MissingSnapshotCollection()
+    collection.upsert(
+        documents=["stable output"],
+        ids=["stable-row"],
+        metadatas=[{"source_file": "logical://snapshot/missing"}],
+    )
+    monkeypatch.setattr(
+        write_receipts_module,
+        "_MANAGED_WRITE_READBACK_TIMEOUT_SECONDS",
+        0.0,
+    )
+
+    with pytest.raises(ReceiptIdentityError, match="exact embeddings did not stabilize"):
+        write_receipts_module._collection_rows_for_ids(
+            collection,
+            ["stable-row"],
+            include_embeddings=True,
+        )
+
+
+@pytest.mark.parametrize(
+    "raw", ["0", "0.001", "0.5", "0.999", "-1", "nan", "inf", "1e300", "60.01", "not-a-number"]
+)
+def test_readback_timeout_env_rejects_non_positive_non_finite_and_invalid_values(monkeypatch, raw):
+    monkeypatch.setenv("MEMPALACE_MANAGED_WRITE_READBACK_TIMEOUT_SECONDS", raw)
+
+    assert (
+        write_receipts_module._read_positive_finite_timeout_from_env(
+            "MEMPALACE_MANAGED_WRITE_READBACK_TIMEOUT_SECONDS", 5.0
+        )
+        == 5.0
+    )
+
+
+def test_readback_timeout_env_accepts_a_positive_finite_value(monkeypatch):
+    monkeypatch.setenv("MEMPALACE_MANAGED_WRITE_READBACK_TIMEOUT_SECONDS", "12.5")
+
+    assert (
+        write_receipts_module._read_positive_finite_timeout_from_env(
+            "MEMPALACE_MANAGED_WRITE_READBACK_TIMEOUT_SECONDS", 5.0
+        )
+        == 12.5
+    )
+
+
+def test_readback_timeout_env_accepts_its_reviewed_upper_bound(monkeypatch):
+    monkeypatch.setenv("MEMPALACE_MANAGED_WRITE_READBACK_TIMEOUT_SECONDS", "60")
+
+    assert (
+        write_receipts_module._read_positive_finite_timeout_from_env(
+            "MEMPALACE_MANAGED_WRITE_READBACK_TIMEOUT_SECONDS", 5.0
+        )
+        == 60.0
+    )
+
+
+def test_readback_timeout_invalid_env_log_does_not_echo_the_raw_value(monkeypatch, caplog):
+    raw = "private-config-value"
+    monkeypatch.setenv("MEMPALACE_MANAGED_WRITE_READBACK_TIMEOUT_SECONDS", raw)
+
+    with caplog.at_level("WARNING", logger="mempalace.write_receipts"):
+        assert (
+            write_receipts_module._read_positive_finite_timeout_from_env(
+                "MEMPALACE_MANAGED_WRITE_READBACK_TIMEOUT_SECONDS", 5.0
+            )
+            == 5.0
+        )
+
+    assert raw not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (None, 5.0),
+        ("12.5", 12.5),
+        ("0", 5.0),
+        ("0.999", 5.0),
+        ("nan", 5.0),
+        ("inf", 5.0),
+        ("1e300", 5.0),
+        ("not-a-number", 5.0),
+    ],
+)
+def test_readback_timeout_env_is_applied_during_a_fresh_module_import(monkeypatch, raw, expected):
+    """The import-time constant must use the bounded parser, not just expose it."""
+    module_name = "mempalace._test_write_receipts_import_config"
+    spec = importlib.util.spec_from_file_location(module_name, write_receipts_module.__file__)
+    assert spec is not None
+    assert spec.loader is not None
+    fresh_module = importlib.util.module_from_spec(spec)
+
+    with monkeypatch.context() as environment:
+        if raw is None:
+            environment.delenv("MEMPALACE_MANAGED_WRITE_READBACK_TIMEOUT_SECONDS", raising=False)
+        else:
+            environment.setenv("MEMPALACE_MANAGED_WRITE_READBACK_TIMEOUT_SECONDS", raw)
+        sys.modules[module_name] = fresh_module
+        try:
+            spec.loader.exec_module(fresh_module)
+            assert fresh_module._MANAGED_WRITE_READBACK_TIMEOUT_SECONDS == expected
+        finally:
+            sys.modules.pop(module_name, None)
 
 
 def test_exact_embedding_readback_propagates_unrelated_backend_errors():
@@ -4307,3 +4646,54 @@ def test_managed_adapter_palace_lock_serializes_cross_source_writes(tmp_path, mo
         "content for logical://adapter/cross-source-one",
         "content for logical://adapter/cross-source-two",
     }
+
+
+def test_embedding_readback_matches_across_float32_round_trip():
+    match = write_receipts_module._embedding_matches_stored
+    float64_vector = (0.12345678901234567, -0.9876543210987654, 1.5e-3)
+    import struct as _struct
+
+    float32_round_trip = tuple(
+        _struct.unpack("<f", _struct.pack("<f", value))[0] for value in float64_vector
+    )
+    assert float32_round_trip != float64_vector
+    assert match(float32_round_trip, float64_vector)
+    assert match(float64_vector, float64_vector)
+    assert match(None, None)
+    assert not match(None, float64_vector)
+    assert not match(float64_vector, None)
+    assert not match(float32_round_trip[:2], float64_vector)
+    perturbed = (float64_vector[0] + 1e-3,) + float64_vector[1:]
+    assert not match(perturbed, float64_vector)
+    assert not match(("not-a-number", 0.0, 0.0), float64_vector)
+    # Re-embedding identical text can shift stored float32 components by one
+    # ULP (observed in production recovery 8787515f); that noise must match.
+    one_ulp_pairs = (
+        (-0.05243675038218498, -0.052436746656894684),
+        (-0.116607666015625, -0.1166076585650444),
+        (0.0036799798253923655, 0.003679979592561722),
+    )
+    assert match(
+        tuple(a for a, _ in one_ulp_pairs),
+        tuple(b for _, b in one_ulp_pairs),
+    )
+
+
+def test_row_matches_snapshot_tolerates_float32_quantization_noise():
+    import struct as _struct
+
+    exact = (0.111111111111111, 0.222222222222222)
+    quantized = tuple(_struct.unpack("<f", _struct.pack("<f", value))[0] for value in exact)
+    snapshot = write_receipts_module.ManagedSourceSnapshot(
+        ids=("row-1",),
+        documents=("doc",),
+        metadatas=({"k": "v"},),
+        embeddings=((exact),),
+    )
+    assert write_receipts_module._row_matches_snapshot(("doc", {"k": "v"}, quantized), snapshot, 0)
+    assert not write_receipts_module._row_matches_snapshot(
+        ("doc", {"k": "v"}, (exact[0] + 0.5, exact[1])), snapshot, 0
+    )
+    assert not write_receipts_module._row_matches_snapshot(
+        ("other", {"k": "v"}, quantized), snapshot, 0
+    )

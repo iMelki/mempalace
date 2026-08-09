@@ -20,6 +20,27 @@ There are three mining modes:
 
 Mines code files, documentation, and notes from a project directory.
 
+For a long or restartable project mine, persist the immutable plan and its
+verified next-source cursor outside the source directory:
+
+    mempalace mine <dir> \
+      --plan-out <run-dir>/source-manifest.json \
+      --progress-jsonl <run-dir>/progress.jsonl
+
+After an interruption, consume the same manifest and progress file:
+
+    mempalace mine <dir> \
+      --manifest <run-dir>/source-manifest.json \
+      --progress-jsonl <run-dir>/progress.jsonl
+
+The restart chooses the highest contiguous progress prefix. If supplied,
+`--start-index` must equal that prefix; it cannot skip unverified work.
+A torn non-newline tail is discarded back to the last committed record;
+manifest drift or complete corrupt/divergent progress fails closed. Progress
+records contain no source path, filename, or content and advance only after
+exact managed-receipt readback. Exit code `75` means another process currently
+owns the target palace and the caller should retry later.
+
 ### Conversation mining
 
     mempalace mine <dir> --mode convos

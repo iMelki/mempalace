@@ -10,6 +10,273 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Same-filename-only cross-source dedup APPLY path, built but not applied (#19).**
+  The 2026-08-06 cross-source audit measured 8,145 duplicate sets (21,017 redundant
+  drawers on the coding wing) where every contributing drawer's source_file shares
+  one filename — the copied-directory signature. The operator approved cleanup of
+  exactly that scope (2026-08-07) and PERMANENTLY excluded the other 256 sets, where
+  different filenames merely share a boilerplate chunk. This ships the delete path
+  for that decision:
+
+  - `plan_same_filename_deletions()` hashes document text across the scoped set
+    (like `count_cross_source_duplicates()`, but keeping drawer ids) and builds a
+    deletion candidate list. A digest's set is a candidate **only if** it spans 2+
+    distinct source paths **and** every one of those paths reduces to the same
+    basename. There is no parameter anywhere in this call chain that can widen that
+    filter — no "force" or "include mixed filenames" switch, even under `--apply`.
+    Within a qualifying set, one drawer is kept per `dedup_source_group()`'s
+    keep-longest convention (all entries tie on length, since byte-identical
+    content is why they hashed together, so the deterministic tiebreak is lowest
+    drawer id).
+  - `check_backup_freshness()` is a new, code-enforced precondition:
+    `dedup_palace()`'s docstring has always *described* a 2-day-backup requirement
+    (iMelki/mempalace#19) without ever *checking* it — the 2026-07-05 incident
+    happened with that requirement stated and unenforced. It reads
+    `<backup_dir>/palace-*.tar.gz.receipt.json` generation receipts (schema
+    `knowledge-backup-generation-receipt.v1`, iMelki/agent-settings#456) and only
+    counts a backup as usable if creation, structural validation, offsite copy,
+    and disposable restore are all verified, the run terminated cleanly, and the
+    receipt is within the age window (default 2 days). Fails closed on any
+    missing/unreadable/stale/unverified receipt.
+  - `apply_same_filename_dedup()` wires it together: dry-run is the unconditional
+    default; live deletion requires `dry_run=False` (CLI: `--same-filename-cleanup
+    --apply-same-filename`) **and** a passing `check_backup_freshness()`. A blocked
+    gate is reported (reason + per-archive problems), not silently skipped, and
+    still returns the full plan it would have applied. A successful live run
+    auto-warms the palace afterward, same as `dedup --apply`.
+  - **Not run against the live palace.** `check_backup_freshness()` against this
+    workspace's real `~/.mempalace/backups` right now reports `ok=false`: all 6
+    local archives have `offsite.status: "pending"` (offsite backup is gated
+    behind agent-settings#457, still in progress). That refusal is demonstrated in
+    `tests/test_dedup.py` as proof the gate works, not worked around.
+  - 45 new tests in `tests/test_dedup.py`, including a fixture with both a
+    same-filename set and a mixed-filename set that asserts only the former is
+    ever a deletion candidate, dry-run-by-default, the backup gate blocking a
+    live run, and keep-longest/deterministic tie-break selection.
+
+- **`dedup --progress` now covers every long pass, and every dedup run ends with
+  completion metrics (#32).** `--progress` previously only instrumented the
+  exact-duplicate content scan, leaving the two passes an operator actually
+  waits on silent. Both are covered now:
+
+  - the metadata pass (`get_source_groups()`), whose 1000-row page loop is
+    itself the slow part on a ~1M-drawer palace, *before* any duplicate work
+    starts;
+  - the embedding-distance dry-run (`dedup_palace()` /
+    `dedup_source_group()`), which runs one throttled `col.query` per drawer.
+    Its heartbeat is per drawer, not per source, because a single large source
+    can dominate an entire run and per-source reporting would sit silent
+    through it. This is the pass that precedes any `--apply`, so it is the one
+    that most needed visibility.
+
+  Every run now also prints a one-line `Metrics:` summary — duration, an
+  outcome, a status, and processed/changed counts — which both entry points also
+  return as a dict for programmatic callers. `drawers_flagged` and
+  `drawers_removed` are reported separately, so a dry-run states what it found
+  while being explicit that it changed nothing (`drawers_removed=0` until
+  `--apply`); a count no pass computed prints as `not-computed` rather than `0`.
+  A failed post-mutation warm downgrades the outcome to `ok-with-warnings`
+  instead of passing silently.
+
+  Progress is opt-in and off by default, and is written to **stderr only** —
+  matching `backup_snapshot.py`, and keeping stdout a clean report channel so a
+  heartbeat can never interleave into a structured document. The two scans added
+  in #33 wrote the same shape to stdout and were moved to stderr.
+
+- **Mining declines generated and vendored content, and reports backup/variant
+  directory candidates (#36).** A `wing=coding` audit found ~6,900+ drawers of
+  machine-generated `pnpm-lock.yaml` chunks and one project ingested from five
+  on-disk copies. Deduplicating afterwards is the bandaid; declining to ingest
+  is the durable and safe direction, because deletion is irreversible in a
+  store whose requirement is verbatim 100% recall while not ingesting costs
+  nothing.
+
+  This extends the mechanisms that already existed rather than adding a fourth
+  one. `.gitignore` respect is untouched (it never covered lockfiles — those
+  are committed on purpose, which is why they reached the palace); the
+  previously hardcoded `palace.SKIP_DIRS` and `miner.SKIP_FILENAMES` sets are
+  now one configurable, documented policy in `mempalace/mine_exclusions.py`,
+  seeded from the old sets so nothing that was skipped before becomes mineable
+  now, and extended with the ecosystems that were missing — most importantly
+  `obj/` and `bin/` (a single `CategoriesAPI.Tests/obj` tree contributed 418
+  drawers) plus the dependency lockfiles of 12 ecosystems.
+
+  Every default is reversible from the project's `mempalace.yaml` without a
+  code change (`exclude.generated_files: false`, or individual names under
+  `exclude.allow_files` / `exclude.allow_dirs`), and `--include-ignored` still
+  overrides per path. **Whether lockfiles should be excluded at all is the
+  operator's policy call** — exclusion is the default because a lockfile's
+  recall value is close to zero, not because the recall case was ruled out.
+
+  Backup/variant directories (`*_backup_250522`, `backend-backup-git_broke`,
+  `*-alpha-ver`, and directories that are suffixed forms of a sibling) are
+  **reported and never auto-excluded**: a directory named `backup` can hold
+  the only surviving copy of something, which is exactly why blanket
+  exclusion is unsafe. New `mempalace variants DIR [--json]` and
+  `mempalace exclusions DIR [--json]` surfaces, plus a report-only advisory in
+  the `mempalace mine` header (`--no-variant-report` silences it).
+
+  Nothing already in the palace is deleted or modified — this is purely about
+  future ingest. Cleanup of existing duplicates stays under #19 and remains
+  gated on a verified offsite backup. Documented in
+  [`docs/MINE_EXCLUSIONS.md`](docs/MINE_EXCLUSIONS.md).
+
+### Fixed
+
+- **Test-process cache cleanup and bounded #41 diagnostics (#41; relates to
+  #24).** The test fixture resets the default Chroma backend and known-entity
+  cache between units, bounds the managed-write readback configuration to
+  1–60 seconds, and adds pseudonymous per-test metrics to pytest's report
+  only on failure—never a separate local traceback artifact. `mine_lock`
+  records both successful and failed acquisition attempts, including the
+  elapsed time needed to diagnose the Windows retry cliff.
+- **Advisory lock sentinel safety is documented and regression-tested (#41).**
+  Existing lock paths deliberately persist after descriptor close: deleting a
+  path while another contender has the prior file identity open can split the
+  cross-process exclusion boundary. The originally proposed gitignore entry
+  for raw failure artifacts is intentionally not retained; safe lock-path
+  retention remains a separate, evidence-gated task.
+
+- **Project-scanner Git subprocesses now ignore an enclosing hook's
+  repository-local environment (#43).** Disposable test repositories use an
+  allowlisted environment, scanner reads strip Git's repository-local variables,
+  and Git text is decoded as UTF-8, so the full suite can run from a real pre-push
+  hook without accidentally reading the outer repository.
+
+- **Public documentation and dedup fixtures no longer expose workstation-specific
+  filesystem roots (#42).** Historical operational examples now use portable
+  placeholders, while dedup test fixtures use synthetic project paths that retain
+  the original basename and grouping behavior.
+
+- **A redirected `dedup` run no longer dies on the module's own decoration
+  (#32).** `_printable()` protected the arbitrary user content dedup prints, but
+  was never applied to dedup's own literals: the horizontal rules and `->`
+  arrows were literal `U+2500`/`U+2192`. Redirecting a run to a file on Windows
+  (`python -m mempalace.dedup --progress > run.log`) gives a cp1252 stream, so
+  the dry-run path aborted with `UnicodeEncodeError` immediately after the
+  header — before a single result line and before the completion metrics. The
+  module's own decoration is now ASCII, and an AST-level test asserts no printed
+  literal in `dedup.py` needs a non-ASCII codepage. Found by running the real
+  entry point with redirected streams, which `capsys` does not reproduce.
+
+- **`dedup --stats` no longer dies on drawer text a cp1252 console cannot
+  encode.** A live cross-source audit aborted with `UnicodeEncodeError` while
+  printing a CSS chunk containing CJK font names, after the scan had already
+  completed — losing the report. Printed source paths and text previews are now
+  rendered through the active stdout encoding with replacement; returned data
+  keeps the original text. The top-15 source listing had the same latent
+  failure and is covered too.
+
+- **SQLite-locked BM25 fallback completes as a degraded result (#28).** A
+  temporary `locked`/`busy` error from the final read-only metadata query no
+  longer escapes through the MCP HTTP request and consumes the caller's full
+  transport timeout. The result is explicit and retryable; it does not change
+  lock ownership, journal configuration, or stored data.
+
+- **Conversation recovery now binds both managed collections.** Conversation
+  mining can now reconcile a pending filesystem rewrite that spans drawers and
+  closets without creating a closet collection on a fresh conversation-only
+  palace. The prior drawers-only binding caused a safe fail-closed error even
+  when the live closet collection existed; regression coverage and the live
+  evidence are documented in
+  `docs/research/conversation-recovery-collection-binding-2026-07-29.md`.
+
+- **Conversation-mode palace-lock contention is a temporary failure (#26).**
+  `mempalace mine --mode convos` now gives the CLI the same fail-closed lock
+  contract as project mining: when another writer owns the palace lock, the
+  command returns temporary-failure exit code `75` with a sanitized retry
+  message. Library callers retain the historical clean-return behavior unless
+  they explicitly request lock-conflict propagation. A live empty-source probe
+  against an active writer returned `75` with zero input files, and the CLI
+  regression suite passes `59` tests.
+
+### Added
+
+- **Read-only cross-source exact-duplicate audit for dedup (#19).**
+  `python -m mempalace.dedup --stats --cross-source-duplicates` (alias
+  `--cross-source`) hashes drawer text across the whole scoped set and groups by
+  content hash *regardless of* `source_file`, then reports duplicate-set count,
+  total redundant drawers (`N-1` per set), and the contributing source paths for
+  each set. The existing `--exact-duplicates` mode groups within a single
+  `source_file` and is therefore structurally blind to this palace's dominant
+  duplication mode — the same project mined from several on-disk copies, each
+  with its own source path. Measured on `--wing coding` (41,934 drawers, 102s):
+  8,416 duplicate sets and 22,300 redundant drawers, of which 22,227 span 2+
+  distinct source paths (21,017 of those in sets whose paths all share one
+  filename, i.e. one file mined from several trees) and only 73 sit inside one
+  path; the intra-source mode reports 83 redundant drawers over the same wing
+  (0.21%). Each set also reports its distinct-filename count, separating a
+  copied directory from different files that share a chunk (CSS boilerplate) —
+  same byte-identical storage cost, very different deletion policy. The two
+  figures are
+  related but not interchangeable: intra-source redundancy that also appears in
+  another source merges into one cross-path set instead of staying in the
+  single-path bucket. Scoping now includes sources below `min_count`, because
+  five copies of one file can be one drawer each. The mode is read-only: it
+  never deletes, is rejected outside `--stats`, and deliberately does **not**
+  choose a canonical copy — `redundant` is `N-1`, but which copy to keep is an
+  operator policy decision, not a tool output. Document text is read in
+  500-row batches and released, so the corpus is never resident and nothing
+  spills to disk. `--progress` and `--max-sets` bound the output.
+
+- **Immutable evaluation-corpus identity for MemSys gold baselines (#31).**
+  - Added the read-only manifest producer. It snapshots `chroma.sqlite3` through SQLite's online backup API, hashes sorted logical drawer rows, validates the strict startup contract, and emits a separate provenance attestation without source rows, paths, or credentials. The producer now persists a completed, integrity-checked snapshot before scanning; the scan writes a source-revision- and snapshot-bound private id/hash shard chain that resumes safely after interruption. Finalization externally merges the shards and streams the historical canonical inventory hash, so incomplete/tampered work cannot publish a public identity and the full logical inventory is never retained in memory.
+  - Snapshot-creator and scan/finalizer processor revisions are distinct,
+    strict identities. This permits a completed immutable snapshot to be scanned
+    after a compatible evaluator release while preventing a scanner/finalizer
+    revision change mid-scan from silently altering a published result.
+  Native MCP can now accept one startup-only, strict, secret-free evaluation
+  manifest bound to its data-plane identity. It exposes only hashed corpus
+  provenance after validating the manifest; omitted, malformed, tampered, or
+  cross-palace manifests retain the existing fail-closed state or prevent
+  startup. This adds no live palace scan, memory mutation, or path disclosure.
+
+- **Crash-resumable source-manifest planning (#25).** Added
+  `--plan-progress-jsonl` for project `--dry-run --plan-out` operations. The
+  fsynced, hash-chained journal checkpoints directory discovery and every
+  completed file descriptor, validates immutable planning identity, repairs
+  only a torn non-newline tail, and resumes at the exact next directory/file
+  without repeating already committed hashing. Normal append keeps a validated
+  in-memory prefix so planning remains linear. Focused progress proof now passes
+  `14` tests; the final repository gate passes `1,756` tests with `7` skipped
+  and `106` intentionally deselected in `203.30s`. The design and community
+  evidence are documented in
+  `docs/research/resumable-source-plan-contract-2026-07-29.md`.
+
+- **Crash-resumable deterministic project mining (#25).** Project sources are
+  now ordered by normalized project-relative path and can be bound to an
+  immutable `--plan-out` / `--manifest` source plan containing exact stat,
+  content, parser/config, and miner-revision identities. `--progress-jsonl`
+  appends one hash-chained, fsynced, path-free cursor record only after the
+  source's managed `COMPLETE`/`ZERO_OUTPUT` receipt is reloaded and exactly
+  represented; restart re-verifies the entire prefix against the selected
+  palace before skipping it. `--start-index` cannot guess beyond or replay
+  behind that prefix. A non-newline torn final append is truncated to the last
+  committed record and replayed; complete corrupt/divergent progress, source
+  drift, and cross-palace reuse fail closed. CLI palace-lock contention now
+  exits with temporary-failure code `75` and a sanitized message. Focused
+  hard-exit/restart, drift, lock, idempotency, no-secret, and uninterrupted-
+  output-equivalence tests use only disposable palaces. The progress journal
+  caches its validated prefix and invalidates that cache on file identity
+  change, so repeated durable appends stay linear rather than rereading the
+  entire JSONL prefix for every source (`11` focused tests passed); the
+  expanded miner, lock, receipt, CLI, and progress regression passes `223`
+  tests in `63.98s`.
+
+- **Receipt-required project and conversation miner helpers (#22).** Retired
+  the low-level non-dry fallback that could purge or upsert when
+  `ReceiptStore` or `ManagedRunIdentity` was omitted. Both public and locked
+  helper layers now fail before collection mutation unless the pair is valid
+  and bound to the same receipt root; `ReceiptStore.begin_source()` enforces
+  the same binding. Dry runs remain receipt-free, top-level CLI mining already
+  supplies the managed pair, and the batched benchmark now creates a disposable
+  run instead of relying on the retired bypass. The focused requirement and
+  real-Chroma batch proof passes `5` tests in `1.31s` and preserves `2,2,1`
+  bounded writes. The expanded receipt/miner/conversation/CLI proof passes
+  `209` tests in `69.91s`; the final repository gate passes `1,735` tests with
+  `7` skipped and `106` intentionally deselected in `211.25s`. No configured
+  palace was opened.
+
 - **Native authenticated Streamable HTTP MCP transport (#21).** Added
   `mempalace-mcp-http`, built on the stable Python MCP SDK 1.x low-level
   server/session manager. It binds to loopback by default, requires the
@@ -35,6 +302,76 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   identity. Fresh transport decision
   `mempalace-bridge-transport-readiness-20260714T061355Z` is
   `native-transport-ready`; supergateway remains rollback-only.
+
+- **Receipt-managed MCP drawer and diary writes (#22).** Added one private
+  `ManagedMcpMutationService` over the existing managed adapter transaction.
+  Drawer add, update, and delete now require a stable logical `source_id`,
+  publish exact create/supersession/zero-output receipts, invalidate deleted
+  predecessors, verify current collection state, and restore the prior row on
+  a failed replacement. Legacy unreceipted rows remain readable but cannot be
+  updated or deleted by assigning a new identity after the fact. MCP diary
+  writes now publish the same receipts; callers may supply `source_id` as an
+  idempotency key scoped by agent and wing, while omitted IDs preserve append
+  behavior. Receipts now attest meaning-bearing metadata as well as document
+  bytes, source locators are opaque, tombstone retries prove the target ID is
+  absent, and old positional add calls cannot silently bind the wrong identity.
+  Read/status cache misses no longer create collections or retrofit HNSW
+  settings. The transport still exposes a direct read-capable Chroma handle, so
+  full cache/facade retirement remains open. The focused receipt, HTTP,
+  dispatch, source, and MCP-server suite passes 270 tests with one platform
+  skip; the final repository gate passes 1,695 tests with 7 skips and 106
+  intentional deselections.
+
+- **Receipt-managed diary-file drawer and closet ingestion (#22).** Replaced
+  size-only incremental checks and direct Chroma upserts with one managed
+  source transaction per dated Markdown file. Exact source bytes and an
+  output-affecting entity-registry/language digest now govern reuse; changes
+  replace the complete day drawer and closet set, semantic small-file removal
+  publishes a verified `ZERO_OUTPUT` successor, and handled failures restore
+  the exact prior drawers, closets, embeddings, receipt head, and state file.
+  State publication is atomic convenience state after receipt completion,
+  malformed legacy scalar entries self-repair, and duplicate `(wing, date)`
+  files fail before palace mutation, while undated-only input returns before
+  palace creation. Missing or renamed files remain
+  deliberately unpruned until an explicit deletion policy is approved. The
+  same language snapshot governs drawer and closet extraction, non-object
+  state roots self-repair after the managed commit, and the focused diary proof
+  passes 13 tests. Exact snapshot/reuse reads now retry Chroma's classified
+  delayed-vector visibility for at most two seconds, while unrelated errors or
+  permanent absence still fail closed. The expanded receipt/diary proof passes
+  207 tests, and the final repository gate passes 1,706 tests with 7 skips and
+  106 intentional deselections.
+
+- **Receipt-managed JSONL sweeper ingestion (#22).** Replaced direct
+  timestamp-cursor upserts with one complete managed source transaction per
+  physical JSONL file. An isolated sweeper URI prevents message rows from
+  claiming or purging primary-miner chunks, while exact file bytes,
+  source-namespaced deterministic message IDs, and a source-derived semantic
+  metadata hash govern reuse and repair. Invalid UTF-8 and malformed or
+  incomplete message records fail before replacement, an existing source
+  cannot remove every row without explicit `--allow-zero-output`, and legacy
+  unmanaged sweeper rows fail before receipt storage is initialized. Copied or
+  renamed sources use disjoint lanes rather than colliding with the retained
+  old path. Palace locking now precedes Chroma/receipt access, legacy detection
+  covers conservative relative path equivalents for empty sources, and mixed
+  JSON content blocks are preserved rather than dropped. Failable semantic
+  checks occur before completion; after `COMPLETE`, the driver reloads the
+  durable terminal journal event and verifies exact current representation
+  before recovery cleanup. A verifier or finalization failure is reported as
+  committed-but-unverified instead of throwing as though irreversible success
+  rolled back. Terminal-manifest expected rows are reported separately from
+  verifier-confirmed represented rows, so a committed-unverified result cannot
+  inflate the represented count. Mixed directory runs retain a partial
+  per-file-verifier count while zeroing the whole-run represented claim; the
+  CLI prints both. Semantic updates, full rewrites, receipt
+  rebindings, and total physical mutations are reported separately. Source
+  changes during extraction and injected second-batch failures restore the full
+  ID-joined predecessor
+  lane with no replacement survivors. Windows path-case aliases reuse the same
+  source and output semantics. The focused sweeper/CLI proof passes 35 tests;
+  the expanded sweeper/CLI/receipt proof passes 204 tests in 100.85 seconds with
+  no stderr. The full repository gate passes 1,733 tests with 7 skips and 106
+  intentional deselections in 232.05 seconds, also with no stderr.
 
 - **Managed source-write receipts and exact verification foundation (#22).**
   Managed project, conversation, and RFC 002 adapter outputs now emit local
@@ -69,9 +406,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   hashes and exact bytes. Legacy `mempalace migrate` now refuses a non-dry run
   when managed receipt state exists because that rebuild path cannot preserve
   the journal yet. Other unmanaged mutation paths remain explicitly tracked in
-  #22. Independent receipt re-review found no remaining implementation blocker.
-  No live historical recovery or cutover was performed; recovery remains gated
-  on disposable interruption/restart proof and separate operator approval.
+  #22. Managed recovery deletion no longer sends a full-document regex to
+  Chroma when the stored receipt content hash exactly matches the fetched
+  document. It instead binds deletion to the validated row ID plus source,
+  receipt, and content-hash metadata. This avoids Chroma/SQLite extended error
+  `1043` for large provider-chat documents while preserving exact-regex checks
+  for legacy or stale-hash rows and failing closed for an empty stale-hash row.
+  A disposable real-Chroma regression deletes exactly one `393,216`-byte
+  receipt-stamped row; the full receipt module passes `110` tests. Chroma
+  `1.5.9` still reproduces the oversized-regex failure, so this is a managed
+  compatibility boundary rather than an asserted upstream fix. Independent
+  receipt re-review found no remaining implementation blocker. A new
+  `python -m mempalace.receipt_restart_probe --json` operator probe now creates
+  a synthetic Chroma database and uses four strictly sequential processes to
+  prove the real hard-exit boundary: the rewrite child exits with code `73`
+  after durable recovery publication and a partial replacement, a fresh child
+  restores the exact document, metadata, and embedding, and another fresh child
+  proves vector retrieval, zero residual recovery state, and SQLite integrity.
+  The final guarded operator artifact completed in `7.3s` on Chroma `1.5.9`; it never
+  opened a configured palace and removed its disposable database. No live
+  historical recovery or cutover was performed. The proof does not claim
+  power-loss durability, authorize the 18-source cohort, or make unmanaged
+  writers receipt-aware.
+  The remaining write boundary is now a tested machine-readable decision
+  manifest: 21 surfaces resolve to 10 managed-receipt adaptations, six
+  retirements of unmanaged mutation entry points, and five explicit separate
+  contracts for non-drawer state. A second tested plan freezes the privacy-safe
+  18-source historical cohort and its 22,220 projected rows. It remains `NO-GO`
+  with eight pending gates, one-source attended checkpoints, no automatic
+  advance, and no claim that a future replay can recreate old write-time
+  provenance.
 
 - **`mempalace warm [--json]` — pre-pay the post-mutation first-open cost.**
   Bulk mutations (dedup `--apply`, sqlite-replay) can leave heavy one-time

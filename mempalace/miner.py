@@ -16,11 +16,10 @@ from contextlib import nullcontext
 from pathlib import Path
 from datetime import datetime
 from collections import defaultdict
-from typing import Optional
+from typing import Mapping, Optional
 
 from .palace import (
     NORMALIZE_VERSION,
-    SKIP_DIRS,
     MineAlreadyRunning,
     build_closet_lines,
     file_already_mined,
@@ -31,7 +30,30 @@ from .palace import (
     purge_file_closets,
     upsert_closet_lines,
 )
+from .mine_exclusions import (
+    ExclusionPolicy,
+    detect_variant_directories,
+    format_variant_report,
+    load_exclusion_policy,
+    load_variant_settings,
+    read_project_config,
+)
 from .receipt_verifier import ReceiptVerificationError, verify_receipt
+from .mine_progress import (
+    MineManifestDrift,
+    MinePlanJournal,
+    MinePlanError,
+    MineProgressJournal,
+    build_source_manifest,
+    build_source_manifest_from_descriptors,
+    load_source_manifest,
+    miner_revision,
+    publish_source_manifest,
+    source_descriptor,
+    source_path_for_item,
+    validate_manifest_context,
+    validate_source_bytes,
+)
 from .write_receipts import (
     ManagedRunIdentity,
     ReceiptError,
@@ -39,9 +61,11 @@ from .write_receipts import (
     ReceiptStore,
     SourceWriteReceiptSession,
     canonical_source_locator,
+    config_hash,
     complete_reused_receipt,
     managed_write_scope,
     purge_managed_source_snapshot,
+    require_managed_receipts,
     rollback_managed_source_rows,
     sha256_bytes,
     snapshot_managed_source_rows,
@@ -81,12 +105,17 @@ SKIP_FILENAMES = {
     ".gitignore",
     "package-lock.json",
 }
+# MemPalace's own per-project artifacts. Generated/vendored content is NOT
+# listed here — that policy lives in `mempalace/mine_exclusions.py`, is
+# configurable per project via the `exclude:` block of mempalace.yaml, and
+# is seeded with this set so the miner keeps one decision point (#36).
 
 CHUNK_SIZE = 800  # chars per drawer
 CHUNK_OVERLAP = 100  # overlap between chunks
 MIN_CHUNK_SIZE = 50  # skip tiny chunks
 DRAWER_UPSERT_BATCH_SIZE = 1000
 MAX_FILE_SIZE = 500 * 1024 * 1024  # 500 MB — skip files larger than this.
+MINE_LOCK_CONFLICT_EXIT_CODE = 75
 # Long Claude Code sessions and large transcript exports routinely exceed
 # 10 MB. The cap exists as a defensive rail against pathological binary
 # files, not as a limit on legitimate text. Per-drawer size is bounded
@@ -234,9 +263,50 @@ def is_gitignored(path: Path, matchers: list, is_dir: bool = False) -> bool:
     return ignored
 
 
-def should_skip_dir(dirname: str) -> bool:
-    """Skip known generated/cache directories before gitignore matching."""
-    return dirname in SKIP_DIRS or dirname.endswith(".egg-info")
+_DEFAULT_POLICY_CACHE: Optional[ExclusionPolicy] = None
+
+
+def default_exclusion_policy() -> ExclusionPolicy:
+    """The built-in policy, seeded with MemPalace's own project artifacts.
+
+    Cached: the walk consults it once per directory entry, and the pattern
+    split is pure work over constant data.
+    """
+    global _DEFAULT_POLICY_CACHE
+    if _DEFAULT_POLICY_CACHE is None:
+        _DEFAULT_POLICY_CACHE = load_exclusion_policy(None, artifact_files=SKIP_FILENAMES)
+    return _DEFAULT_POLICY_CACHE
+
+
+def resolve_mine_exclusion_policy(
+    project_dir: str,
+    config: Optional[Mapping] = None,
+) -> ExclusionPolicy:
+    """Resolve the effective exclusion policy for one project directory.
+
+    ``config`` may be an already-parsed ``mempalace.yaml`` mapping (the mine
+    path has one in hand); otherwise the file is re-read quietly.
+    """
+    parsed = config if isinstance(config, Mapping) else read_project_config(project_dir)
+    return load_exclusion_policy(parsed, artifact_files=SKIP_FILENAMES)
+
+
+def should_skip_dir(dirname: str, policy: Optional[ExclusionPolicy] = None) -> bool:
+    """Skip known generated/cache directories before gitignore matching.
+
+    The membership test now lives in the configurable exclusion policy
+    (``mempalace/mine_exclusions.py``); ``SKIP_DIRS`` seeds its default set,
+    so behaviour with no project config is a strict superset of the previous
+    hardcoded check.
+    """
+    active = policy if policy is not None else default_exclusion_policy()
+    return active.excludes_dir(dirname)
+
+
+def should_skip_file(filename: str, policy: Optional[ExclusionPolicy] = None) -> bool:
+    """Return True when a filename must not be ingested."""
+    active = policy if policy is not None else default_exclusion_policy()
+    return active.excludes_file(filename)
 
 
 def normalize_include_paths(include_ignored: list) -> set:
@@ -352,10 +422,13 @@ def detect_room(filepath: Path, content: str, rooms: list, project_path: Path) -
     content_lower = content[:2000].lower()
 
     # Priority 1: folder path matches room name or keywords
+    # str() coercion: YAML parses bare numeric keywords (e.g. 2024) as ints.
     path_parts = relative.replace("\\", "/").split("/")
     for part in path_parts[:-1]:  # skip filename itself
         for room in rooms:
-            candidates = [room["name"].lower()] + [k.lower() for k in room.get("keywords", [])]
+            candidates = [str(room["name"]).lower()] + [
+                str(k).lower() for k in room.get("keywords", [])
+            ]
             if any(part == c or c in part or part in c for c in candidates):
                 return room["name"]
 
@@ -369,7 +442,7 @@ def detect_room(filepath: Path, content: str, rooms: list, project_path: Path) -
     for room in rooms:
         keywords = room.get("keywords", []) + [room["name"]]
         for kw in keywords:
-            count = content_lower.count(kw.lower())
+            count = content_lower.count(str(kw).lower())
             scores[room["name"]] += count
 
     if scores:
@@ -437,6 +510,25 @@ _ENTITY_REGISTRY_PATH = os.path.join(os.path.expanduser("~"), ".mempalace", "kno
 _ENTITY_REGISTRY_CACHE: dict = {"mtime": None, "names": frozenset(), "raw": {}}
 _ENTITY_EXTRACT_WINDOW = 5000  # chars of content scanned for capitalized words
 _ENTITY_METADATA_LIMIT = 25  # max entities packed into the metadata field
+
+
+def reset_entity_registry_cache() -> None:
+    """Clear the in-process known-entities cache.
+
+    ``_ENTITY_REGISTRY_PATH`` is resolved once at import time against
+    whatever ``HOME`` was at that moment, and ``_ENTITY_REGISTRY_CACHE`` is a
+    module-level dict gated only by that path's mtime — nothing ever resets
+    it between units of work in a long-lived process. mempalace#41: in the
+    test suite this let a predecessor test's `known_entities.json` write
+    change a later, unrelated test's closet documents and receipt config,
+    since all tests in a session share one temp ``HOME``. Mirrors the
+    inline invalidation `add_to_known_entities` already does on write; call
+    this directly when a caller (notably the test suite's autouse fixture)
+    needs the cache empty regardless of whether a write happened.
+    """
+    _ENTITY_REGISTRY_CACHE["mtime"] = None
+    _ENTITY_REGISTRY_CACHE["names"] = frozenset()
+    _ENTITY_REGISTRY_CACHE["raw"] = {}
 
 
 def _refresh_known_entities_cache() -> None:
@@ -648,9 +740,7 @@ def add_to_known_entities(entities_by_category: dict, wing: str = None) -> str:
         pass
 
     # Invalidate in-process cache so later calls in the same run see the write.
-    _ENTITY_REGISTRY_CACHE["mtime"] = None
-    _ENTITY_REGISTRY_CACHE["names"] = frozenset()
-    _ENTITY_REGISTRY_CACHE["raw"] = {}
+    reset_entity_registry_cache()
 
     return str(registry_path)
 
@@ -704,7 +794,12 @@ def detect_hall(content: str) -> str:
     return "general"
 
 
-def _extract_entities_for_metadata(content: str) -> str:
+def _extract_entities_for_metadata(
+    content: str,
+    *,
+    known_entities=None,
+    entity_languages=None,
+) -> str:
     """Extract entity names from content for metadata tagging.
 
     Combines the user's known-entity registry (cached across calls) with
@@ -722,7 +817,7 @@ def _extract_entities_for_metadata(content: str) -> str:
 
     matched: set = set()
 
-    known = _load_known_entities()
+    known = _load_known_entities() if known_entities is None else frozenset(known_entities)
     for name in known:
         if re.search(r"(?<!\w)" + re.escape(name) + r"(?!\w)", content):
             matched.add(name)
@@ -730,7 +825,7 @@ def _extract_entities_for_metadata(content: str) -> str:
     from .palace import _candidate_entity_words
 
     window = content[:_ENTITY_EXTRACT_WINDOW]
-    words = _candidate_entity_words(window)
+    words = _candidate_entity_words(window, entity_languages=entity_languages)
     freq: dict = {}
     for w in words:
         if w in _ENTITY_STOPLIST:
@@ -823,8 +918,15 @@ def process_file(
     closets_col=None,
     receipt_store: Optional[ReceiptStore] = None,
     receipt_run: Optional[ManagedRunIdentity] = None,
+    expected_source: Optional[Mapping] = None,
 ) -> tuple:
     """Lock before reading so a waiting invocation cannot retain stale bytes."""
+    require_managed_receipts(
+        dry_run=dry_run,
+        receipt_store=receipt_store,
+        receipt_run=receipt_run,
+        operation="project process_file",
+    )
     raw_source_alias = os.fspath(filepath)
     source_file = canonical_source_locator(filepath, local_path=True)
     managed = not dry_run and receipt_store is not None and receipt_run is not None
@@ -847,6 +949,7 @@ def process_file(
                 receipt_store=receipt_store,
                 receipt_run=receipt_run,
                 source_aliases=(raw_source_alias,),
+                expected_source=expected_source,
             )
 
 
@@ -862,8 +965,16 @@ def _process_file_locked(
     receipt_store: Optional[ReceiptStore] = None,
     receipt_run: Optional[ManagedRunIdentity] = None,
     source_aliases: tuple[str, ...] = (),
+    expected_source: Optional[Mapping] = None,
 ) -> tuple:
     """Read, chunk, route, and file one file. Returns (drawer_count, room_name)."""
+
+    require_managed_receipts(
+        dry_run=dry_run,
+        receipt_store=receipt_store,
+        receipt_run=receipt_run,
+        operation="project _process_file_locked",
+    )
 
     source_file = str(filepath)
     managed = not dry_run and receipt_store is not None and receipt_run is not None
@@ -875,9 +986,24 @@ def _process_file_locked(
         return 0, "general"
 
     try:
+        stat_before = filepath.stat()
         raw_content = filepath.read_bytes()
-    except OSError:
+        stat_after = filepath.stat()
+    except OSError as exc:
+        if expected_source is not None:
+            raise MineManifestDrift(
+                f"source index {expected_source.get('index')} is no longer readable"
+            ) from exc
         return 0, "general"
+    if expected_source is not None:
+        validate_source_bytes(
+            path=filepath,
+            project_path=project_path,
+            item=expected_source,
+            content=raw_content,
+            stat_before=stat_before,
+            stat_after=stat_after,
+        )
 
     # Match Path.read_text's universal-newline behavior while binding the
     # receipt to the exact retained source bytes, before any transformation.
@@ -1469,9 +1595,17 @@ def scan_project(
     project_dir: str,
     respect_gitignore: bool = True,
     include_ignored: list = None,
+    policy: Optional[ExclusionPolicy] = None,
 ) -> list:
-    """Return list of all readable file paths."""
+    """Return list of all readable file paths.
+
+    ``policy`` is the resolved mine-time exclusion policy. When omitted the
+    project's own ``mempalace.yaml`` ``exclude:`` block is read, falling back
+    to the documented defaults — so a caller that only knows the directory
+    still gets the same file set the mine will use.
+    """
     project_path = Path(project_dir).expanduser().resolve()
+    active_policy = policy if policy is not None else resolve_mine_exclusion_policy(project_dir)
     files = []
     active_matchers = []
     matcher_cache = {}
@@ -1490,26 +1624,35 @@ def scan_project(
             if current_matcher is not None:
                 active_matchers.append(current_matcher)
 
-        dirs[:] = [
-            d
-            for d in dirs
-            if is_force_included(root_path / d, project_path, include_paths)
-            or not should_skip_dir(d)
-        ]
-        if respect_gitignore and active_matchers:
-            dirs[:] = [
+        dirs[:] = sorted(
+            [
                 d
                 for d in dirs
                 if is_force_included(root_path / d, project_path, include_paths)
-                or not is_gitignored(root_path / d, active_matchers, is_dir=True)
-            ]
+                or not active_policy.excludes_dir(d)
+            ],
+            key=lambda value: (os.path.normcase(value), value),
+        )
+        if respect_gitignore and active_matchers:
+            dirs[:] = sorted(
+                [
+                    d
+                    for d in dirs
+                    if is_force_included(root_path / d, project_path, include_paths)
+                    or not is_gitignored(root_path / d, active_matchers, is_dir=True)
+                ],
+                key=lambda value: (os.path.normcase(value), value),
+            )
 
-        for filename in filenames:
+        for filename in sorted(
+            filenames,
+            key=lambda value: (os.path.normcase(value), value),
+        ):
             filepath = root_path / filename
             force_include = is_force_included(filepath, project_path, include_paths)
             exact_force_include = is_exact_force_include(filepath, project_path, include_paths)
 
-            if not force_include and filename in SKIP_FILENAMES:
+            if not force_include and active_policy.excludes_file(filename):
                 continue
             if filepath.suffix.lower() not in READABLE_EXTENSIONS and not exact_force_include:
                 continue
@@ -1526,12 +1669,454 @@ def scan_project(
             except OSError:
                 continue
             files.append(filepath)
-    return files
+    return sorted(
+        files,
+        key=lambda path: (
+            os.path.normcase(path.relative_to(project_path).as_posix()),
+            path.relative_to(project_path).as_posix(),
+        ),
+    )
+
+
+def _plan_gitignore_matchers(
+    project_path: Path,
+    root_path: Path,
+    matcher_cache: dict,
+) -> list:
+    """Rebuild one directory's matcher chain without mutable traversal state."""
+    relative = root_path.relative_to(project_path)
+    directories = [project_path]
+    cursor = project_path
+    for part in relative.parts:
+        cursor = cursor / part
+        directories.append(cursor)
+    return [
+        matcher
+        for directory in directories
+        for matcher in [load_gitignore_matcher(directory, matcher_cache)]
+        if matcher is not None
+    ]
+
+
+def _discover_plan_directory(
+    *,
+    project_path: Path,
+    relative_dir: str,
+    respect_gitignore: bool,
+    include_paths: list,
+    excluded_artifacts: set[Path],
+    matcher_cache: dict,
+    policy: ExclusionPolicy,
+) -> tuple[list[str], list[str]]:
+    root_path = (project_path / relative_dir).resolve()
+    try:
+        root_path.relative_to(project_path)
+    except ValueError as exc:
+        raise MinePlanError("mine plan directory escapes the project root") from exc
+    active_matchers = (
+        _plan_gitignore_matchers(project_path, root_path, matcher_cache)
+        if respect_gitignore
+        else []
+    )
+    try:
+        entries = sorted(
+            list(os.scandir(root_path)),
+            key=lambda entry: (os.path.normcase(entry.name), entry.name),
+        )
+    except OSError as exc:
+        raise MineManifestDrift("source directory became unreadable during planning") from exc
+
+    child_dirs: list[str] = []
+    files: list[str] = []
+    for entry in entries:
+        path = Path(entry.path)
+        force_include = is_force_included(path, project_path, include_paths)
+        exact_force_include = is_exact_force_include(path, project_path, include_paths)
+        try:
+            is_directory = entry.is_dir(follow_symlinks=False)
+            is_file = entry.is_file(follow_symlinks=False)
+        except OSError as exc:
+            raise MineManifestDrift("source changed during plan discovery") from exc
+        if is_directory:
+            if not force_include and policy.excludes_dir(entry.name):
+                continue
+            if (
+                respect_gitignore
+                and active_matchers
+                and not force_include
+                and is_gitignored(path, active_matchers, is_dir=True)
+            ):
+                continue
+            child_dirs.append(path.relative_to(project_path).as_posix())
+            continue
+        if not is_file:
+            continue
+        if not force_include and policy.excludes_file(entry.name):
+            continue
+        if path.suffix.lower() not in READABLE_EXTENSIONS and not exact_force_include:
+            continue
+        if (
+            respect_gitignore
+            and active_matchers
+            and not force_include
+            and is_gitignored(path, active_matchers, is_dir=False)
+        ):
+            continue
+        if path.resolve() in excluded_artifacts:
+            continue
+        try:
+            if path.stat().st_size > MAX_FILE_SIZE:
+                continue
+        except OSError as exc:
+            raise MineManifestDrift("source changed during plan discovery") from exc
+        files.append(path.relative_to(project_path).as_posix())
+    return child_dirs, files
+
+
+def build_resumable_source_manifest(
+    *,
+    project_path: Path,
+    contract: Mapping,
+    plan_progress_jsonl: str,
+    respect_gitignore: bool,
+    include_ignored: list,
+    excluded_artifacts: set[Path],
+    limit: int,
+    policy: Optional[ExclusionPolicy] = None,
+) -> dict:
+    """Resume directory discovery and byte hashing from a fsynced per-file cursor.
+
+    The active exclusion policy is bound through ``contract`` (which carries
+    its digest), so a plan discovered under one policy can never be resumed
+    under another.
+    """
+    include_paths = normalize_include_paths(include_ignored)
+    active_policy = policy if policy is not None else default_exclusion_policy()
+    identity = {
+        "schema": "mempalace-mine-plan-identity/v1",
+        "project_identity": sha256_bytes(os.path.normcase(str(project_path)).encode("utf-8")),
+        "contract": dict(contract),
+        "respect_gitignore": bool(respect_gitignore),
+        "include_ignored": sorted(include_paths),
+        "limit": int(limit),
+        "excluded_artifacts": sorted(
+            path.relative_to(project_path).as_posix()
+            for path in excluded_artifacts
+            if path == project_path or project_path in path.parents
+        ),
+    }
+    matcher_cache: dict = {}
+    with mine_lock(os.path.normcase(str(Path(plan_progress_jsonl).resolve()))):
+        journal = MinePlanJournal(plan_progress_jsonl, identity=identity)
+        state = journal.replay()
+        while state["pending_dirs"]:
+            relative_dir = state["pending_dirs"][0]
+            discovery = state["discovered"].get(relative_dir)
+            if discovery is None:
+                child_dirs, files = _discover_plan_directory(
+                    project_path=project_path,
+                    relative_dir=relative_dir,
+                    respect_gitignore=respect_gitignore,
+                    include_paths=include_paths,
+                    excluded_artifacts=excluded_artifacts,
+                    matcher_cache=matcher_cache,
+                    policy=active_policy,
+                )
+                journal.append(
+                    "directory-discovered",
+                    {
+                        "relative_dir": relative_dir,
+                        "child_dirs": child_dirs,
+                        "files": files,
+                    },
+                )
+                discovery = {"child_dirs": child_dirs, "files": files}
+                state["discovered"][relative_dir] = discovery
+            for relative_path in discovery["files"]:
+                if relative_path in state["described"]:
+                    continue
+                path = (project_path / relative_path).resolve()
+                descriptor = source_descriptor(
+                    path=path,
+                    relative_path=relative_path,
+                    normalized_path=os.path.normcase(relative_path).replace("\\", "/"),
+                )
+                journal.append(
+                    "file-described",
+                    {
+                        "relative_dir": relative_dir,
+                        "relative_path": relative_path,
+                        "descriptor": descriptor,
+                    },
+                )
+                state["described"][relative_path] = descriptor
+            journal.append("directory-complete", {"relative_dir": relative_dir})
+            state["completed"].add(relative_dir)
+            state["pending_dirs"].pop(0)
+            state["pending_dirs"].extend(discovery["child_dirs"])
+
+        descriptors = sorted(
+            state["described"].values(),
+            key=lambda item: (item["normalized_path"], item["relative_path"]),
+        )
+        if limit > 0:
+            descriptors = descriptors[:limit]
+        return build_source_manifest_from_descriptors(
+            project_path=project_path,
+            descriptors=descriptors,
+            contract=contract,
+        )
 
 
 # =============================================================================
 # MAIN: MINE
 # =============================================================================
+
+
+def _project_run_config(
+    *,
+    wing: str,
+    rooms: list,
+    respect_gitignore: bool,
+    include_ignored: list,
+    limit: int,
+) -> dict:
+    return {
+        "pipeline": "filesystem",
+        "wing": wing,
+        "rooms": rooms,
+        "normalize_version": NORMALIZE_VERSION,
+        "chunk_size": CHUNK_SIZE,
+        "chunk_overlap": CHUNK_OVERLAP,
+        "managed_output_collections": ["closets", "drawers"],
+        "respect_gitignore": respect_gitignore,
+        "include_ignored": sorted(normalize_include_paths(include_ignored)),
+        "limit": limit,
+    }
+
+
+def _source_plan_contract(
+    run_config: Mapping,
+    *,
+    exclusion_policy: Optional[ExclusionPolicy] = None,
+) -> dict:
+    """Bind a source plan to the exact configuration that produced it.
+
+    The exclusion policy is bound here (plan contract) rather than in
+    ``run_config`` (receipt config digest) on purpose. Exclusions only ever
+    *remove* future sources; they never change how an already-ingested
+    source was chunked or stored. Binding here makes a manifest built under
+    one policy unusable under another — the safety property we want —
+    without invalidating every existing per-source write receipt and forcing
+    a palace-wide re-mine of content that is already correct (#36).
+    """
+    policy = exclusion_policy if exclusion_policy is not None else default_exclusion_policy()
+    return {
+        "mode": "project",
+        "parser": "filesystem",
+        "receipt_config_digest": config_hash(run_config),
+        "miner_revision": miner_revision(__file__),
+        "exclusion_policy_digest": policy.digest(),
+    }
+
+
+def _verify_manifest_source_receipt(
+    *,
+    receipt_store: ReceiptStore,
+    receipt_run: ManagedRunIdentity,
+    filepath: Path,
+    item: Mapping,
+    collection,
+    closets_col,
+) -> tuple[dict, object]:
+    """Reload and exactly verify the source head before cursor advancement."""
+    source_identity = receipt_store.source_identity(str(filepath), local_path=True)
+    receipt = receipt_store.find_current_read_only(
+        source_identity,
+        content_hash=item["content_hash"],
+        version_digest=item["content_hash"],
+        config_digest=receipt_run.config_digest,
+    )
+    if receipt is None or receipt.get("state") != "COMPLETE":
+        raise MineProgressJournalError(
+            f"source index {item['index']} has no matching terminal managed receipt"
+        )
+    if receipt.get("disposition") not in {"WRITE", "UNCHANGED", "ZERO_OUTPUT"}:
+        raise MineProgressJournalError(
+            f"source index {item['index']} has an unsupported terminal disposition"
+        )
+    try:
+        verification = verify_receipt(
+            receipt,
+            collections={"drawers": collection, "closets": closets_col},
+            current_source_content_hash=item["content_hash"],
+            store=receipt_store,
+        )
+    except (ReceiptVerificationError, ReceiptIdentityError, ValueError) as exc:
+        raise MineProgressJournalError(
+            f"source index {item['index']} terminal receipt could not be verified"
+        ) from exc
+    if verification.status != "represented":
+        raise MineProgressJournalError(
+            f"source index {item['index']} terminal receipt is not represented"
+        )
+    return receipt, verification
+
+
+def _verify_progress_prefix_against_palace(
+    *,
+    progress: MineProgressJournal,
+    receipt_store: ReceiptStore,
+    receipt_run: ManagedRunIdentity,
+    project_path: Path,
+    manifest_items: list,
+    collection,
+    closets_col,
+) -> int:
+    """Re-prove every persisted cursor entry against the selected palace."""
+    records = progress.records()
+    for source_index, record in enumerate(records):
+        item = manifest_items[source_index]
+        filepath = source_path_for_item(project_path, item)
+        expected_identity = receipt_store.source_identity(str(filepath), local_path=True)
+        if record["source_identity"] != expected_identity:
+            raise MineProgressJournalError(
+                "mine progress belongs to a different palace or source identity"
+            )
+        try:
+            with mine_lock(os.path.normcase(str(filepath))):
+                stat_before = filepath.stat()
+                source_bytes = filepath.read_bytes()
+                stat_after = filepath.stat()
+                validate_source_bytes(
+                    path=filepath,
+                    project_path=project_path,
+                    item=item,
+                    content=source_bytes,
+                    stat_before=stat_before,
+                    stat_after=stat_after,
+                )
+        except OSError as exc:
+            raise MineManifestDrift(f"source index {source_index} is no longer readable") from exc
+        receipt, verification = _verify_manifest_source_receipt(
+            receipt_store=receipt_store,
+            receipt_run=receipt_run,
+            filepath=filepath,
+            item=item,
+            collection=collection,
+            closets_col=closets_col,
+        )
+        if receipt["receipt_id"] != record["receipt_id"]:
+            raise MineProgressJournalError(
+                f"source index {source_index} progress no longer names the current receipt"
+            )
+        if len(verification.represented) != record["represented_count"]:
+            raise MineProgressJournalError(f"source index {source_index} represented count changed")
+    return len(records)
+
+
+class MineProgressJournalError(MinePlanError):
+    """Raised when a terminal per-source receipt cannot authorize progress."""
+
+
+def _prepare_mine_source_plan(
+    *,
+    project_path: Path,
+    project_dir: str,
+    run_config: Mapping,
+    limit: int,
+    dry_run: bool,
+    respect_gitignore: bool,
+    include_ignored: list,
+    files: Optional[list],
+    plan_out: Optional[str],
+    plan_progress_jsonl: Optional[str],
+    manifest_path: Optional[str],
+    start_index: Optional[int],
+    progress_jsonl: Optional[str],
+    policy: Optional[ExclusionPolicy] = None,
+) -> tuple[dict, list[Path], Optional[MineProgressJournal], int, int]:
+    if plan_out and manifest_path:
+        raise MinePlanError("--plan-out and --manifest are mutually exclusive")
+    if plan_progress_jsonl and not plan_out:
+        raise MinePlanError("--plan-progress-jsonl requires --plan-out")
+    if start_index is not None and (
+        not isinstance(start_index, int) or isinstance(start_index, bool) or start_index < 0
+    ):
+        raise MinePlanError("--start-index must be a non-negative integer")
+    if progress_jsonl and dry_run:
+        raise MinePlanError("--progress-jsonl requires a managed non-dry mine")
+
+    active_policy = policy if policy is not None else resolve_mine_exclusion_policy(project_dir)
+    plan_contract = _source_plan_contract(run_config, exclusion_policy=active_policy)
+    if manifest_path:
+        manifest = load_source_manifest(manifest_path)
+        validate_manifest_context(
+            manifest,
+            project_path=project_path,
+            contract=plan_contract,
+        )
+    else:
+        discovered = files
+        excluded_artifacts = {
+            Path(path).expanduser().resolve()
+            for path in (plan_out, plan_progress_jsonl, progress_jsonl)
+            if path
+        }
+        if files is None and plan_progress_jsonl:
+            manifest = build_resumable_source_manifest(
+                project_path=project_path,
+                contract=plan_contract,
+                plan_progress_jsonl=plan_progress_jsonl,
+                respect_gitignore=respect_gitignore,
+                include_ignored=include_ignored,
+                excluded_artifacts=excluded_artifacts,
+                limit=limit,
+                policy=active_policy,
+            )
+        else:
+            if discovered is None:
+                discovered = scan_project(
+                    project_dir,
+                    respect_gitignore=respect_gitignore,
+                    include_ignored=include_ignored,
+                    policy=active_policy,
+                )
+            discovered = [
+                Path(path).expanduser().resolve()
+                for path in discovered
+                if Path(path).expanduser().resolve() not in excluded_artifacts
+            ]
+            try:
+                discovered = sorted(
+                    discovered,
+                    key=lambda path: (
+                        os.path.normcase(path.relative_to(project_path).as_posix()),
+                        path.relative_to(project_path).as_posix(),
+                    ),
+                )
+            except ValueError as exc:
+                raise MinePlanError("source plan contains a path outside the project root") from exc
+            if limit > 0:
+                discovered = discovered[:limit]
+            manifest = build_source_manifest(
+                project_path=project_path,
+                files=discovered,
+                contract=plan_contract,
+            )
+        if plan_out:
+            manifest = publish_source_manifest(plan_out, manifest)
+
+    manifest_items = manifest["items"]
+    planned_files = [source_path_for_item(project_path, item) for item in manifest_items]
+    progress = MineProgressJournal(progress_jsonl, manifest=manifest) if progress_jsonl else None
+    verified_prefix = progress.verified_prefix() if progress is not None else 0
+    if start_index is not None and start_index != verified_prefix:
+        raise MinePlanError("--start-index must equal the contiguous verified progress prefix")
+    effective_start = (
+        start_index if start_index is not None else (verified_prefix if progress is not None else 0)
+    )
+    return manifest, planned_files, progress, verified_prefix, effective_start
 
 
 def mine(
@@ -1544,6 +2129,13 @@ def mine(
     respect_gitignore: bool = True,
     include_ignored: list = None,
     files: list = None,
+    plan_out: str = None,
+    plan_progress_jsonl: str = None,
+    manifest_path: str = None,
+    start_index: Optional[int] = None,
+    progress_jsonl: str = None,
+    raise_on_lock_conflict: bool = False,
+    report_variants: bool = True,
 ):
     """Mine a project directory into the palace.
 
@@ -1565,6 +2157,12 @@ def mine(
             respect_gitignore=respect_gitignore,
             include_ignored=include_ignored,
             files=files,
+            plan_out=plan_out,
+            plan_progress_jsonl=plan_progress_jsonl,
+            manifest_path=manifest_path,
+            start_index=start_index,
+            progress_jsonl=progress_jsonl,
+            report_variants=report_variants,
         )
 
     try:
@@ -1579,14 +2177,57 @@ def mine(
                 respect_gitignore=respect_gitignore,
                 include_ignored=include_ignored,
                 files=files,
+                plan_out=plan_out,
+                plan_progress_jsonl=plan_progress_jsonl,
+                manifest_path=manifest_path,
+                start_index=start_index,
+                progress_jsonl=progress_jsonl,
+                report_variants=report_variants,
             )
     except MineAlreadyRunning:
+        if raise_on_lock_conflict:
+            raise
         print(
-            f"mempalace: another `mine` is already running against "
-            f"{palace_path} — exiting cleanly.",
+            "mempalace: another `mine` already holds the requested palace; retry later.",
             file=sys.stderr,
         )
         return
+
+
+#: How many variant candidates the inline mine advisory prints before
+#: truncating. The full list is available from ``mempalace variants``.
+VARIANT_ADVISORY_LIMIT = 8
+
+
+def _variant_advisory_lines(
+    project_dir: str,
+    config: Optional[Mapping] = None,
+    *,
+    enabled: bool = True,
+) -> list:
+    """Build the report-only backup/variant advisory for the mine header.
+
+    Nothing here changes what gets mined. Detection is read-only and must
+    never fail a mine, so every error degrades to silence — an advisory that
+    could abort an ingest would be worse than no advisory.
+    """
+    if not enabled:
+        return []
+    try:
+        settings = load_variant_settings(config)
+        if not settings["enabled"]:
+            return []
+        candidates = detect_variant_directories(
+            project_dir,
+            max_depth=settings["max_depth"],
+            policy=resolve_mine_exclusion_policy(project_dir, config),
+            globs=settings["globs"],
+        )
+        if not candidates:
+            return []
+        return format_variant_report(candidates, limit=VARIANT_ADVISORY_LIMIT)
+    except Exception:
+        return []
 
 
 def _mine_impl(
@@ -1599,21 +2240,43 @@ def _mine_impl(
     respect_gitignore: bool = True,
     include_ignored: list = None,
     files: list = None,
+    plan_out: str = None,
+    plan_progress_jsonl: str = None,
+    manifest_path: str = None,
+    start_index: Optional[int] = None,
+    progress_jsonl: str = None,
+    report_variants: bool = True,
 ):
     project_path = Path(project_dir).expanduser().resolve()
     config = load_config(project_dir)
 
     wing = wing_override or config["wing"]
     rooms = config.get("rooms", [{"name": "general", "description": "All project files"}])
-
-    if files is None:
-        files = scan_project(
-            project_dir,
-            respect_gitignore=respect_gitignore,
-            include_ignored=include_ignored,
-        )
-    if limit > 0:
-        files = files[:limit]
+    policy = resolve_mine_exclusion_policy(project_dir, config)
+    run_config = _project_run_config(
+        wing=wing,
+        rooms=rooms,
+        respect_gitignore=respect_gitignore,
+        include_ignored=include_ignored,
+        limit=limit,
+    )
+    manifest, files, progress, verified_prefix, effective_start = _prepare_mine_source_plan(
+        project_path=project_path,
+        project_dir=project_dir,
+        run_config=run_config,
+        limit=limit,
+        dry_run=dry_run,
+        respect_gitignore=respect_gitignore,
+        include_ignored=include_ignored,
+        files=files,
+        plan_out=plan_out,
+        plan_progress_jsonl=plan_progress_jsonl,
+        manifest_path=manifest_path,
+        start_index=start_index,
+        progress_jsonl=progress_jsonl,
+        policy=policy,
+    )
+    manifest_items = manifest["items"]
 
     from .embedding import describe_device
 
@@ -1623,7 +2286,12 @@ def _mine_impl(
     print(f"  Wing:    {wing}")
     print(f"  Rooms:   {', '.join(r['name'] for r in rooms)}")
     print(f"  Files:   {len(files)}")
-    print(f"  Palace:  {palace_path}")
+    print(f"  Start:   {effective_start}")
+    print(f"  Plan:    {manifest['manifest_digest']}")
+    if progress is not None and progress.recovered_torn_bytes:
+        print(f"  Progress recovery: {progress.recovered_torn_bytes} torn tail byte(s) discarded")
+    if not (plan_out or manifest_path or progress_jsonl):
+        print(f"  Palace:  {palace_path}")
     print(f"  Device:  {describe_device()}")
     if dry_run:
         print("  DRY RUN — nothing will be filed")
@@ -1631,6 +2299,9 @@ def _mine_impl(
         print("  .gitignore: DISABLED")
     if include_ignored:
         print(f"  Include: {', '.join(sorted(normalize_include_paths(include_ignored)))}")
+    print(f"  Exclude: {policy.summary()}")
+    for line in _variant_advisory_lines(project_dir, config, enabled=report_variants):
+        print(line)
     print(f"{'-' * 55}\n")
 
     if not dry_run:
@@ -1641,19 +2312,22 @@ def _mine_impl(
         receipt_run = receipt_store.create_run(
             caller=agent,
             mode="project",
-            config={
-                "pipeline": "filesystem",
-                "wing": wing,
-                "rooms": rooms,
-                "normalize_version": NORMALIZE_VERSION,
-                "chunk_size": CHUNK_SIZE,
-                "chunk_overlap": CHUNK_OVERLAP,
-                "managed_output_collections": ["closets", "drawers"],
-                "respect_gitignore": respect_gitignore,
-                "include_ignored": sorted(normalize_include_paths(include_ignored)),
-                "limit": limit,
-            },
+            config=run_config,
         )
+        if progress is not None and verified_prefix:
+            verified_against_palace = _verify_progress_prefix_against_palace(
+                progress=progress,
+                receipt_store=receipt_store,
+                receipt_run=receipt_run,
+                project_path=project_path,
+                manifest_items=manifest_items,
+                collection=collection,
+                closets_col=closets_col,
+            )
+            if verified_against_palace != verified_prefix:
+                raise MineProgressJournalError(
+                    "mine progress prefix changed during palace verification"
+                )
     else:
         collection = None
         closets_col = None
@@ -1667,7 +2341,10 @@ def _mine_impl(
     room_counts = defaultdict(int)
 
     try:
-        for i, filepath in enumerate(files, 1):
+        for source_index in range(effective_start, len(files)):
+            filepath = files[source_index]
+            item = manifest_items[source_index]
+            display_index = source_index + 1
             try:
                 drawers, room = process_file(
                     filepath=filepath,
@@ -1680,21 +2357,46 @@ def _mine_impl(
                     closets_col=closets_col,
                     receipt_store=receipt_store,
                     receipt_run=receipt_run,
+                    expected_source=item,
                 )
             except KeyboardInterrupt:
                 # Re-raise so the outer handler prints the summary; we
                 # capture the last-attempted file via last_file below.
                 last_file = filepath.name
                 raise
-            files_processed = i
+            files_processed += 1
             last_file = filepath.name
+            if not dry_run and progress is not None:
+                receipt, verification = _verify_manifest_source_receipt(
+                    receipt_store=receipt_store,
+                    receipt_run=receipt_run,
+                    filepath=filepath,
+                    item=item,
+                    collection=collection,
+                    closets_col=closets_col,
+                )
+                progress.append_verified(
+                    source_index=source_index,
+                    source_identity=receipt["source"]["identity"],
+                    receipt=receipt,
+                    represented_count=len(verification.represented),
+                )
             if drawers == 0 and not dry_run:
                 files_skipped += 1
             else:
                 total_drawers += drawers
                 room_counts[room] += 1
                 if not dry_run:
-                    print(f"  + [{i:4}/{len(files)}] {filepath.name[:50]:50} +{drawers}")
+                    if plan_out or manifest_path or progress_jsonl:
+                        print(
+                            f"  + [{display_index:4}/{len(files)}] "
+                            f"source-index:{source_index} +{drawers}"
+                        )
+                    else:
+                        print(
+                            f"  + [{display_index:4}/{len(files)}] "
+                            f"{filepath.name[:50]:50} +{drawers}"
+                        )
 
         if not dry_run:
             # Cross-wing topic tunnels: after every file in this wing has been
@@ -1714,7 +2416,7 @@ def _mine_impl(
 
         print(f"\n{'=' * 55}")
         print("  Done.")
-        print(f"  Files processed: {len(files) - files_skipped}")
+        print(f"  Files processed: {files_processed - files_skipped}")
         print(f"  Files skipped (already filed): {files_skipped}")
         print(f"  Drawers filed: {total_drawers}")
         print("\n  By room:")
@@ -1729,9 +2431,12 @@ def _mine_impl(
         # propagates to the default handler — we don't try to catch
         # everything.
         print("\n\n  Mine interrupted.")
-        print(f"    files_processed: {files_processed}/{len(files)}")
+        print(f"    files_processed: {files_processed}/{len(files) - effective_start}")
         print(f"    drawers_filed:   {total_drawers}")
-        print(f"    last_file:       {last_file or '<none>'}")
+        if plan_out or manifest_path or progress_jsonl:
+            print("    last_source:     sanitized; inspect the verified cursor")
+        else:
+            print(f"    last_file:       {last_file or '<none>'}")
         print(
             f"\n  Re-run `mempalace mine {shlex.quote(project_dir)}` to resume — "
             "already-filed drawers are\n  upserted idempotently and will not duplicate.\n"

@@ -39,3 +39,12 @@ venv/
 *.sqlite3-journal
 !.env.example
 !.env.example.*
+
+# Local agent run artifacts (logs, PIDs, run receipts).
+# Anchored with a leading slash so only the repo-root directory matches, and
+# with a trailing slash so a *file* named .local-logs is not silently ignored.
+# NOT `.local-logs/**`: that ignores the contents while leaving the directory
+# walkable, and gitignore(5) notes a file cannot be re-included once a parent
+# directory is excluded.
+/.local-logs/
+/.tmp/

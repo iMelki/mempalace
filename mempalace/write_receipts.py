@@ -22,7 +22,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Optional, Union
@@ -57,7 +57,51 @@ _DIRECTORY_DURABILITY_BYTES = b"mempalace-directory-durability/v1\n"
 _DIRECTORY_SYNC_BARRIER = ".mempalace-directory-sync-barrier-v1"
 _PURGE_AUTHORITY = object()
 _MANAGED_WRITE_AUTHORITY = object()
-_MANAGED_WRITE_READBACK_TIMEOUT_SECONDS = 2.0
+
+
+def _read_positive_finite_timeout_from_env(
+    name: str,
+    default: float,
+    *,
+    minimum: float = 1.0,
+    maximum: float = 60.0,
+) -> float:
+    """Read one bounded timeout without allowing an invalid env value to hang startup.
+
+    A zero timeout remains useful as a direct test monkeypatch after import,
+    but an environment setting is an operator-facing configuration boundary and
+    must fall within the reviewed 1–60 second wall-clock range. Invalid values
+    keep the known-safe default and never echo their raw contents into logs.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        configured = float(raw)
+    except (TypeError, ValueError):
+        _LOGGER.warning("Ignoring invalid configured timeout for %s; using the default.", name)
+        return default
+    if not math.isfinite(configured) or configured < minimum or configured > maximum:
+        _LOGGER.warning("Ignoring out-of-range configured timeout for %s; using the default.", name)
+        return default
+    return configured
+
+
+# A readback that verifies an already-committed write is bookkeeping, not
+# work — capping it with a constant unrelated to the caller's real budget
+# converts finished work into failure under host load (memsys#370's lesson,
+# cited explicitly in mempalace#41/#24). Caller-configurable via env var
+# rather than hard-coded so a slow/loaded environment (e.g. the test suite
+# under a full-suite run) can raise it without editing source. Individual
+# tests may still `monkeypatch.setattr` this module attribute directly to
+# force a specific budget (including 0.0, to exercise the deadline path) —
+# that continues to take precedence since it runs after this env-var read.
+_MANAGED_WRITE_READBACK_TIMEOUT_SECONDS = _read_positive_finite_timeout_from_env(
+    "MEMPALACE_MANAGED_WRITE_READBACK_TIMEOUT_SECONDS",
+    5.0,
+    minimum=1.0,
+    maximum=60.0,
+)
 _MANAGED_WRITE_READBACK_INITIAL_RETRY_SECONDS = 0.01
 _MANAGED_WRITE_READBACK_MAX_RETRY_SECONDS = 0.25
 _MANAGED_WRITE_READBACK_BACKOFF = 2.0
@@ -245,6 +289,7 @@ class ManagedRunIdentity:
     mode: str
     config_digest: str
     producer: dict
+    _receipt_root: Path = field(repr=False, compare=False)
 
     def as_dict(self) -> dict:
         return {
@@ -377,6 +422,7 @@ class ReceiptStore:
             mode=mode,
             config_digest=config_hash(config),
             producer=_producer_identity(),
+            _receipt_root=self.root,
         )
 
     def source_identity(self, locator: str, *, local_path: bool = False) -> str:
@@ -399,6 +445,8 @@ class ReceiptStore:
         local_path: bool = False,
     ) -> "SourceWriteReceiptSession":
         """Persist START and return the mutable in-process receipt session."""
+        if not isinstance(run, ManagedRunIdentity) or run._receipt_root != self.root:
+            raise ReceiptIdentityError("managed run belongs to a different ReceiptStore")
         _require_sha256(source_content_hash, "source content hash")
         _require_sha256(source_version_hash, "source version hash")
         _require_text(adapter_name, "adapter name")
@@ -1050,6 +1098,28 @@ class ReceiptStore:
             hashlib.sha256,
         ).hexdigest()
         return f"hmac-sha256:{digest}"
+
+
+def require_managed_receipts(
+    *,
+    dry_run: bool,
+    receipt_store: Optional[ReceiptStore],
+    receipt_run: Optional[ManagedRunIdentity],
+    operation: str,
+) -> None:
+    """Reject non-dry core writes that would bypass durable receipts."""
+    if dry_run:
+        return
+    if not isinstance(receipt_store, ReceiptStore) or not isinstance(
+        receipt_run, ManagedRunIdentity
+    ):
+        raise ReceiptIdentityError(
+            f"{operation} non-dry writes require both ReceiptStore and "
+            "ManagedRunIdentity; use the managed top-level mine API or supply "
+            "an explicit receipt run"
+        )
+    if receipt_run._receipt_root != receipt_store.root:
+        raise ReceiptIdentityError(f"{operation} receipt run belongs to a different ReceiptStore")
 
 
 class SourceWriteReceiptSession:
@@ -2197,7 +2267,55 @@ def _collection_rows_for_ids(
     require_all: bool = True,
     include_embeddings: bool = False,
 ) -> dict[str, tuple[str, dict, Optional[tuple[Any, ...]]]]:
-    """Read stable row identity, fetching embeddings only when explicitly required."""
+    """Read stable row identity with bounded retry for delayed exact vectors."""
+    if not include_embeddings:
+        return _collection_rows_for_ids_once(
+            collection,
+            item_ids,
+            require_all=require_all,
+            include_embeddings=False,
+        )
+
+    from .backends.base import EmbeddingVisibilityError
+
+    started = time.monotonic()
+    deadline = started + _MANAGED_WRITE_READBACK_TIMEOUT_SECONDS
+    retry_seconds = _MANAGED_WRITE_READBACK_INITIAL_RETRY_SECONDS
+    attempts = 0
+    while True:
+        attempts += 1
+        try:
+            return _collection_rows_for_ids_once(
+                collection,
+                item_ids,
+                require_all=require_all,
+                include_embeddings=True,
+            )
+        except ReceiptIdentityError as exc:
+            if not isinstance(exc.__cause__, EmbeddingVisibilityError):
+                raise
+            if time.monotonic() >= deadline:
+                elapsed = time.monotonic() - started
+                raise ReceiptIdentityError(
+                    "collection exact embeddings did not stabilize "
+                    f"after {attempts} attempts in {elapsed:.3f}s"
+                ) from exc
+            remaining = max(0.0, deadline - time.monotonic())
+            time.sleep(min(retry_seconds, remaining))
+            retry_seconds = min(
+                retry_seconds * _MANAGED_WRITE_READBACK_BACKOFF,
+                _MANAGED_WRITE_READBACK_MAX_RETRY_SECONDS,
+            )
+
+
+def _collection_rows_for_ids_once(
+    collection: Any,
+    item_ids: list[str],
+    *,
+    require_all: bool,
+    include_embeddings: bool,
+) -> dict[str, tuple[str, dict, Optional[tuple[Any, ...]]]]:
+    """Read one exact document, metadata, and optional embedding snapshot."""
     rows: dict[str, tuple[str, dict, Optional[tuple[Any, ...]]]] = {}
     for start in range(0, len(item_ids), 1000):
         expected = item_ids[start : start + 1000]
@@ -2387,7 +2505,9 @@ def _verify_managed_write_readback(collection: Any, kwargs: Mapping[str, Any]) -
                     break
                 if embeddings is not None:
                     expected_embedding = tuple(embeddings[index])
-                    if actual_embeddings[item_id] != expected_embedding:
+                    if not _embedding_matches_stored(
+                        actual_embeddings[item_id], expected_embedding
+                    ):
                         mismatch = "managed write embedding readback did not match"
                         break
             if mismatch is None:
@@ -2430,6 +2550,46 @@ def _recovery_snapshot_for_collection(
     return stored
 
 
+# Embeddings are derived data (mempalace repair rebuilds them wholesale), so
+# recovery verification tolerates float32 storage quantization and the
+# 1-ULP-scale nondeterminism of re-embedding identical text. Documents and
+# metadata stay bitwise-exact. Genuinely different text moves normalized
+# embedding components by orders of magnitude more than these bounds.
+_EMBEDDING_MATCH_REL_TOL = 1e-5
+_EMBEDDING_MATCH_ABS_TOL = 1e-8
+
+
+def _embedding_matches_stored(
+    actual: Optional[tuple[Any, ...]],
+    expected: Optional[tuple[Any, ...]],
+) -> bool:
+    """Compare an embedding readback against the values supplied to the store.
+
+    The storage backend persists vectors as float32 and identical text can
+    re-embed with 1-ULP numeric noise, so exact `==` wedges recovery in a
+    permanent verification loop. Values match within a tight numeric
+    tolerance; anything larger than derived-vector noise still fails.
+    """
+    if actual is None or expected is None:
+        return actual is None and expected is None
+    if len(actual) != len(expected):
+        return False
+    if tuple(actual) == tuple(expected):
+        return True
+    try:
+        return all(
+            math.isclose(
+                float(a),
+                float(b),
+                rel_tol=_EMBEDDING_MATCH_REL_TOL,
+                abs_tol=_EMBEDDING_MATCH_ABS_TOL,
+            )
+            for a, b in zip(actual, expected)
+        )
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
 def _row_matches_snapshot(
     row: tuple[str, dict, Optional[tuple[Any, ...]]],
     snapshot: ManagedSourceSnapshot,
@@ -2440,7 +2600,7 @@ def _row_matches_snapshot(
     return (
         document == snapshot.documents[index]
         and metadata == snapshot.metadatas[index]
-        and embedding == expected_embedding
+        and _embedding_matches_stored(embedding, expected_embedding)
     )
 
 
@@ -2484,19 +2644,31 @@ def _delete_filters_for_validated_row(
         conditions.append({META_RECEIPT_ID: receipt_id})
 
     content_hash = metadata.get(META_OUTPUT_CONTENT_HASH)
+    content_hash_matches_document = False
     if content_hash is not None:
         try:
             _require_sha256(content_hash, "validated row content hash")
         except ReceiptIdentityError as exc:
             raise ReceiptRecoveryError("validated row content identity is invalid") from exc
         conditions.append({META_OUTPUT_CONTENT_HASH: content_hash})
+        content_hash_matches_document = hmac.compare_digest(
+            content_hash,
+            sha256_bytes(row.document.encode("utf-8")),
+        )
     elif not row.document:
         raise ReceiptRecoveryError(
             "legacy empty row cannot be content-bound for conditional deletion"
         )
 
     where = conditions[0] if len(conditions) == 1 else {"$and": conditions}
-    where_document = {"$regex": f"(?s)^{re.escape(row.document)}$"} if row.document else None
+    if content_hash_matches_document:
+        where_document = None
+    elif row.document:
+        where_document = {"$regex": f"(?s)^{re.escape(row.document)}$"}
+    else:
+        raise ReceiptRecoveryError(
+            "stale content hash on empty row cannot be content-bound for conditional deletion"
+        )
     return where, where_document
 
 
@@ -3888,6 +4060,7 @@ __all__ = [
     "managed_write_scope",
     "output_identity",
     "purge_managed_source_snapshot",
+    "require_managed_receipts",
     "rollback_managed_source_rows",
     "sha256_bytes",
     "sha256_text",

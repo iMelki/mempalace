@@ -471,26 +471,52 @@ def test_status_handles_none_metadata_without_crash(tmp_path, capsys):
     assert "WING: proj" in out
 
 
-def test_process_file_uses_bounded_upsert_batches(tmp_path, monkeypatch):
+def test_process_file_uses_bounded_upsert_batches(tmp_path, monkeypatch, test_embedding_function):
     from mempalace import miner
+    from mempalace.write_receipts import ReceiptStore
 
-    class FakeCol:
-        def __init__(self):
+    class RecordingCollection:
+        def __init__(self, collection):
+            self._collection = collection
             self.batch_sizes = []
 
-        def get(self, *args, **kwargs):
-            return {"ids": []}
+        def __getattr__(self, name):
+            return getattr(self._collection, name)
 
-        def delete(self, *args, **kwargs):
-            pass
-
-        def upsert(self, documents, ids, metadatas):
+        def add(self, *, documents, ids, metadatas, **kwargs):
             self.batch_sizes.append(len(documents))
+            return self._collection.add(
+                documents=documents,
+                ids=ids,
+                metadatas=metadatas,
+                **kwargs,
+            )
+
+        def upsert(self, *, documents, ids, metadatas, **kwargs):
+            self.batch_sizes.append(len(documents))
+            return self._collection.upsert(
+                documents=documents,
+                ids=ids,
+                metadatas=metadatas,
+                **kwargs,
+            )
 
     source = tmp_path / "src.py"
     source.write_text("print('hello')\n" * 20, encoding="utf-8")
     chunks = [{"content": f"chunk {i} " * 20, "chunk_index": i} for i in range(5)]
-    col = FakeCol()
+    palace = tmp_path / "palace"
+    client = chromadb.PersistentClient(path=str(palace))
+    raw_col = client.get_or_create_collection(
+        "mempalace_drawers",
+        embedding_function=test_embedding_function,
+    )
+    col = RecordingCollection(raw_col)
+    receipt_store = ReceiptStore(palace)
+    receipt_run = receipt_store.create_run(
+        caller="test-runner",
+        mode="bounded-batch-test",
+        config={"managed_output_collections": ["drawers"]},
+    )
     monkeypatch.setattr(miner, "DRAWER_UPSERT_BATCH_SIZE", 2)
     monkeypatch.setattr(miner, "chunk_text", lambda content, source_file: chunks)
     monkeypatch.setattr(miner, "detect_hall", lambda content: "code")
@@ -504,6 +530,8 @@ def test_process_file_uses_bounded_upsert_batches(tmp_path, monkeypatch):
         [{"name": "general", "description": "General"}],
         "agent",
         False,
+        receipt_store=receipt_store,
+        receipt_run=receipt_run,
     )
 
     assert drawers == 5

@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import pickle
 import sqlite3
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -429,6 +430,49 @@ def test_bm25_fallback_handles_short_query(palace_with_drawers):
     # Falls back to recency window; returns whatever it can rank.
     assert out["fallback"]["mode"] == "bm25_only_via_sqlite"
     assert isinstance(out["results"], list)
+
+
+def test_bm25_fallback_returns_retryable_receipt_when_metadata_read_is_locked(
+    palace_with_drawers, monkeypatch
+):
+    """A late SQLite lock must not crash the MCP Streamable HTTP request."""
+    import mempalace.searcher as searcher
+
+    first_rows = MagicMock()
+    first_rows.fetchall.return_value = [(1,)]
+    connection = MagicMock()
+    connection.execute.side_effect = [first_rows, sqlite3.OperationalError("database is locked")]
+    monkeypatch.setattr(searcher.sqlite3, "connect", lambda *args, **kwargs: connection)
+
+    result = _bm25_only_via_sqlite("locked fallback", str(palace_with_drawers))
+
+    assert result["error"] == "sqlite database is temporarily locked"
+    assert result["status"] == "degraded"
+    assert result["reason"] == "sqlite_locked"
+    assert result["retryable"] is True
+    assert result["retryAfterMs"] == 250
+    assert result["fallback"]["reason"] == "sqlite_locked"
+    assert result["diagnostics"]["operation"] == "metadata"
+    connection.close.assert_called_once()
+
+
+def test_bm25_fallback_returns_retryable_receipt_when_fts_read_is_locked(
+    palace_with_drawers, monkeypatch
+):
+    """A candidate-selection lock must not masquerade as no candidates."""
+    import mempalace.searcher as searcher
+
+    connection = MagicMock()
+    connection.execute.side_effect = sqlite3.OperationalError("database is busy")
+    monkeypatch.setattr(searcher.sqlite3, "connect", lambda *args, **kwargs: connection)
+
+    result = _bm25_only_via_sqlite("locked fallback", str(palace_with_drawers))
+
+    assert result["status"] == "degraded"
+    assert result["reason"] == "sqlite_locked"
+    assert result["retryable"] is True
+    assert result["diagnostics"]["operation"] == "fts_candidates"
+    connection.close.assert_called_once()
 
 
 # ── repair.status CLI command ─────────────────────────────────────────

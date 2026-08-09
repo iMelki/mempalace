@@ -1,10 +1,20 @@
 name: Tests
 
 on:
+  # `develop` has been stale since 2026-05-12 while all work happens on `dev`, so
+  # these filters meant NOTHING ran on a dev push -- 31 commits accumulated with no
+  # CI between 2026-07-14 and 2026-08-06. The repository default branch was also
+  # still `develop`, which is why `origin/HEAD` kept resolving there; that has been
+  # changed to `main`. See iMelki/mempalace#34.
   push:
-    branches: [main, develop]
+    branches: [main, dev]
   pull_request:
-    branches: [main, develop]
+    branches: [main, dev]
+  # Escape hatch: on 2026-08-06 a push event for d9fe96a was silently dropped by
+  # GitHub (Actions enabled, nothing queued, zero runs for the sha) and there was
+  # no way to run the suite short of pushing another commit. Manual dispatch
+  # closes that dead-end.
+  workflow_dispatch:
 
 jobs:
   test-linux:
@@ -50,6 +60,6 @@ jobs:
         with:
           python-version: "3.11"
           cache: 'pip'
-      - run: pip install "ruff>=0.4.0,<0.5"
+      - run: pip install "ruff>=0.15.9,<0.16"
       - run: ruff check .
       - run: ruff format --check .

@@ -18,6 +18,7 @@ from mempalace.cli import (
     cmd_search,
     cmd_split,
     cmd_status,
+    cmd_sweep,
     cmd_wakeup,
     main,
 )
@@ -105,14 +106,18 @@ def test_cmd_hook_calls_run_hook():
 @patch("mempalace.cli.MempalaceConfig")
 def test_cmd_init_no_entities(mock_config_cls, tmp_path):
     args = argparse.Namespace(dir=str(tmp_path), yes=True)
+    provider = MagicMock()
+    provider.check_available.return_value = (False, "unavailable in unit test")
     with (
         patch("mempalace.entity_detector.scan_for_detection", return_value=[]),
         patch("mempalace.room_detector_local.detect_rooms_local") as mock_rooms,
         patch("mempalace.cli._maybe_run_mine_after_init"),
+        patch("mempalace.cli.get_provider", return_value=provider),
     ):
         cmd_init(args)
         mock_rooms.assert_called_once_with(project_dir=str(tmp_path), yes=True)
         mock_config_cls.return_value.init.assert_called_once()
+        provider.check_available.assert_called_once()
 
 
 @patch("mempalace.cli.MempalaceConfig")
@@ -120,7 +125,7 @@ def test_cmd_init_with_entities(mock_config_cls, tmp_path):
     fake_files = [tmp_path / "a.txt"]
     detected = {"people": [{"name": "Alice"}], "projects": [], "uncertain": []}
     confirmed = {"people": ["Alice"], "projects": []}
-    args = argparse.Namespace(dir=str(tmp_path), yes=True)
+    args = argparse.Namespace(dir=str(tmp_path), yes=True, no_llm=True)
     with (
         patch("mempalace.entity_detector.scan_for_detection", return_value=fake_files),
         patch("mempalace.entity_detector.detect_entities", return_value=detected),
@@ -153,7 +158,7 @@ def test_cmd_init_normalizes_wing_name_for_topics_registry(mock_config_cls, tmp_
         "uncertain": [],
     }
     confirmed = {"people": ["Alice"], "projects": [], "topics": ["Bun"]}
-    args = argparse.Namespace(dir=str(project), yes=True)
+    args = argparse.Namespace(dir=str(project), yes=True, no_llm=True)
     with (
         patch("mempalace.entity_detector.scan_for_detection", return_value=fake_files),
         patch("mempalace.entity_detector.detect_entities", return_value=detected),
@@ -201,6 +206,7 @@ def test_cmd_init_honors_palace_flag(tmp_path, monkeypatch):
         palace=str(palace),
         yes=True,
         auto_mine=False,
+        no_llm=True,
     )
 
     captured = {}
@@ -234,7 +240,7 @@ def test_cmd_init_with_entities_zero_total(mock_config_cls, tmp_path, capsys):
     """When entities detected but total is 0, prints 'No entities' message."""
     fake_files = [tmp_path / "a.txt"]
     detected = {"people": [], "projects": [], "uncertain": []}
-    args = argparse.Namespace(dir=str(tmp_path), yes=False)
+    args = argparse.Namespace(dir=str(tmp_path), yes=False, no_llm=True)
     with (
         patch("mempalace.entity_detector.scan_for_detection", return_value=fake_files),
         patch("mempalace.entity_detector.detect_entities", return_value=detected),
@@ -500,7 +506,36 @@ def test_cmd_mine_projects_mode(mock_config_cls):
             dry_run=False,
             respect_gitignore=True,
             include_ignored=[],
+            plan_out=None,
+            plan_progress_jsonl=None,
+            manifest_path=None,
+            start_index=None,
+            progress_jsonl=None,
+            raise_on_lock_conflict=True,
+            report_variants=True,
         )
+
+
+@patch("mempalace.cli.MempalaceConfig")
+def test_cmd_mine_suppresses_the_variant_report_on_request(mock_config_cls):
+    """`--no-variant-report` silences the report-only advisory (#36)."""
+    mock_config_cls.return_value.palace_path = "/fake/palace"
+    args = argparse.Namespace(
+        dir="/src",
+        palace=None,
+        mode="projects",
+        wing=None,
+        agent="mempalace",
+        limit=0,
+        dry_run=False,
+        no_gitignore=False,
+        include_ignored=[],
+        extract="exchange",
+        no_variant_report=True,
+    )
+    with patch("mempalace.miner.mine") as mock_mine:
+        cmd_mine(args)
+    assert mock_mine.call_args.kwargs["report_variants"] is False
 
 
 @patch("mempalace.cli.MempalaceConfig")
@@ -528,7 +563,39 @@ def test_cmd_mine_convos_mode(mock_config_cls):
             limit=10,
             dry_run=True,
             extract_mode="general",
+            raise_on_lock_conflict=True,
         )
+
+
+@patch("mempalace.cli.MempalaceConfig")
+def test_cmd_mine_convos_lock_conflict_exits_tempfail(mock_config_cls, capsys):
+    from mempalace.miner import MINE_LOCK_CONFLICT_EXIT_CODE
+    from mempalace.palace import MineAlreadyRunning
+
+    mock_config_cls.return_value.palace_path = "/fake/palace"
+    args = argparse.Namespace(
+        dir="/chats",
+        palace=None,
+        mode="convos",
+        wing="mywing",
+        agent="me",
+        limit=1,
+        dry_run=False,
+        no_gitignore=False,
+        include_ignored=[],
+        extract="general",
+    )
+    with (
+        patch(
+            "mempalace.convo_miner.mine_convos",
+            side_effect=MineAlreadyRunning("busy"),
+        ),
+        pytest.raises(SystemExit) as exc_info,
+    ):
+        cmd_mine(args)
+
+    assert exc_info.value.code == MINE_LOCK_CONFLICT_EXIT_CODE
+    assert "retry later" in capsys.readouterr().err
 
 
 @patch("mempalace.cli.MempalaceConfig")
@@ -650,6 +717,90 @@ def test_main_split_dispatches():
     ):
         main()
         mock_cmd.assert_called_once()
+
+
+def test_main_sweep_parses_zero_output_approval():
+    with (
+        patch(
+            "sys.argv",
+            ["mempalace", "sweep", "/some/session.jsonl", "--allow-zero-output"],
+        ),
+        patch("mempalace.cli.cmd_sweep") as mock_cmd,
+    ):
+        main()
+
+    args = mock_cmd.call_args.args[0]
+    assert args.target == "/some/session.jsonl"
+    assert args.allow_zero_output is True
+
+
+def test_cmd_sweep_forwards_zero_output_approval(tmp_path, capsys):
+    source = tmp_path / "session.jsonl"
+    source.write_text("", encoding="utf-8")
+    palace = tmp_path / "palace"
+    result = {
+        "drawers_added": 0,
+        "drawers_already_present": 0,
+        "drawers_updated": 0,
+        "drawers_semantically_unchanged": 0,
+        "drawers_rebound": 0,
+        "drawers_upserted": 0,
+        "drawers_physical_mutations": 0,
+        "drawers_removed": 4,
+        "drawers_expected": 0,
+        "drawers_represented": 0,
+        "receipt_id": "receipt-1",
+        "verification_status": "represented",
+        "verification_error": None,
+    }
+    args = argparse.Namespace(
+        palace=str(palace),
+        target=str(source),
+        allow_zero_output=True,
+    )
+
+    with patch("mempalace.sweeper.sweep", return_value=result) as mock_sweep:
+        cmd_sweep(args)
+
+    mock_sweep.assert_called_once_with(
+        str(source),
+        str(palace),
+        allow_zero_output=True,
+    )
+    assert "-4 removed" in capsys.readouterr().out
+
+
+def test_cmd_sweep_reports_committed_unverified_as_nonzero(tmp_path, capsys):
+    source = tmp_path / "session.jsonl"
+    source.write_text("", encoding="utf-8")
+    result = {
+        "drawers_added": 4,
+        "drawers_updated": 0,
+        "drawers_semantically_unchanged": 0,
+        "drawers_removed": 0,
+        "drawers_rebound": 0,
+        "drawers_physical_mutations": 4,
+        "drawers_expected": 4,
+        "drawers_represented": 0,
+        "receipt_id": "receipt-committed",
+        "verification_status": "committed-unverified",
+        "verification_error": "terminal receipt readback unavailable",
+    }
+    args = argparse.Namespace(
+        palace=str(tmp_path / "palace"),
+        target=str(source),
+        allow_zero_output=False,
+    )
+
+    with patch("mempalace.sweeper.sweep", return_value=result):
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_sweep(args)
+
+    assert exc_info.value.code == 3
+    captured = capsys.readouterr()
+    assert "0/4 represented/expected" in captured.out
+    assert "committed-unverified" in captured.out
+    assert "the sweep committed" in captured.err
 
 
 def test_mcp_command_prints_setup_guidance(monkeypatch, capsys):
@@ -984,9 +1135,9 @@ def test_cmd_compress_stores_results(mock_config_cls, capsys):
     # Verify the compress output goes to the closets collection so that
     # palace.get_closets_collection() / searcher can read it back (#1244).
     (call_args, _kwargs) = mock_backend.get_or_create_collection.call_args
-    assert (
-        call_args[1] == "mempalace_closets"
-    ), f"compress should write to mempalace_closets, got {call_args[1]!r}"
+    assert call_args[1] == "mempalace_closets", (
+        f"compress should write to mempalace_closets, got {call_args[1]!r}"
+    )
     assert "mempalace_closets" in out
 
 
