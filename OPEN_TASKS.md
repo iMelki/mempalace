@@ -185,7 +185,7 @@ This file is the durable local index for active `mempalace` issues.
     `status=completed`, `replayed=856,510 == planned_reembed_count`,
     `verified_count=856,510`, `warnings=[]`, duration `18,621.7s` (~5h10m).
     Result artifact:
-    `C:\Users\Milky\.mempalace\repair-runs\sqlite-replay-final-20260703T130250Z\result.json`.
+    `<user-home>/.mempalace/repair-runs/sqlite-replay-final-20260703T130250Z/result.json`.
     Follow-up `repair-status` (2026-07-04): drawers `sqlite=861,715`,
     `hnsw=850,000`, divergence `11,715`, `status=OK`; closets
     `sqlite=12,107`, `hnsw=11,826`, divergence `281`, `status=OK`. Divergence
