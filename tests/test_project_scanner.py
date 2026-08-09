@@ -263,11 +263,23 @@ def _git_commit(
 def _init_git_repo(path: Path, name: str = "Jane Doe", email: str = "jane@example.com"):
     """Helper: init a git repo with one commit."""
     _require_git()
-    subprocess.run(_git("init", "-q"), cwd=path, check=True)
-    subprocess.run(_git("config", "user.name", name), cwd=path, check=True)
-    subprocess.run(_git("config", "user.email", email), cwd=path, check=True)
-    subprocess.run(_git("config", "commit.gpgsign", "false"), cwd=path, check=True)
+    env = _git_test_env(name, email)
+    subprocess.run(_git("init", "-q"), cwd=path, check=True, env=env)
+    subprocess.run(_git("config", "user.name", name), cwd=path, check=True, env=env)
+    subprocess.run(_git("config", "user.email", email), cwd=path, check=True, env=env)
+    subprocess.run(_git("config", "commit.gpgsign", "false"), cwd=path, check=True, env=env)
     _git_commit(path, "README.md", "hello", "initial", name, email)
+
+
+def test_init_git_repo_ignores_inherited_repo_local_git_environment(tmp_path, monkeypatch):
+    repo = tmp_path / "fixture-repo"
+    repo.mkdir()
+    monkeypatch.setenv("GIT_DIR", str(tmp_path / "outer.git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(tmp_path / "outer-worktree"))
+
+    _init_git_repo(repo)
+
+    assert (repo / ".git").is_dir()
 
 
 def test_scan_project_from_package_json(tmp_path):

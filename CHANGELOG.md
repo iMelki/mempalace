@@ -123,6 +123,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **Temporary Git repositories used by project-scanner tests now ignore an
+  enclosing hook's repository-local environment (#43).** The existing allowlisted
+  test environment is applied to initialization and configuration as well as
+  add/commit, so the full suite can run from a real pre-push hook.
+
 - **Public documentation and dedup fixtures no longer expose workstation-specific
   filesystem roots (#42).** Historical operational examples now use portable
   placeholders, while dedup test fixtures use synthetic project paths that retain

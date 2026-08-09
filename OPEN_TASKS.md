@@ -487,6 +487,12 @@ This file is the durable local index for active `mempalace` issues.
 
 ## Recently Closed
 
+- [#43 - Pre-push Git environment breaks temporary-repository tests](https://github.com/iMelki/mempalace/issues/43)
+  - Closed 2026-08-09 after applying the existing allowlisted environment to every
+    Git subprocess that creates and configures disposable project-scanner repos.
+    The focused project-scanner and palace-lock tranche passes `53` tests, including
+    a regression for inherited repository-local Git variables.
+
 - [#42 - Sanitize personal paths from public documentation](https://github.com/iMelki/mempalace/issues/42)
   - Closed 2026-08-09 after replacing workstation-specific roots in the changelog,
     task index, and dedup fixtures with portable placeholders or synthetic paths.
