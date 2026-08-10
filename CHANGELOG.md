@@ -10,6 +10,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Sanitized exact-vector visibility evidence for the diary-ingest flake family
+  (#41).** A recovered private diagnostic proves that unchanged diary reuse can
+  exhaust 84 exact-vector attempts over 20 seconds when Chroma's HNSW segment
+  reader is unavailable. The raw diagnostic remains ignored and unpublished.
+  Issue #46 is closed as a duplicate, not fixed; #41 now owns a first-write
+  embedding-visibility barrier, deterministic delayed/never-visible tests, and
+  the required repeated hosted proof.
+
 - **Same-filename-only cross-source dedup APPLY path, built but not applied (#19).**
   The 2026-08-06 cross-source audit measured 8,145 duplicate sets (21,017 redundant
   drawers on the coding wing) where every contributing drawer's source_file shares

@@ -1,12 +1,18 @@
 # MemPalace Open Tasks
 
-Last updated: 2026-08-09
+Last updated: 2026-08-11
 
 This file is the durable local index for active `mempalace` issues.
 
 ## Active Issues
 
 - [#41 - Stabilize the load-sensitive managed-write test family](https://github.com/iMelki/mempalace/issues/41)
+  - A recovered, privacy-sanitized third diary-ingest occurrence disproves the
+    former mtime/order-state explanation in closed duplicate #46. Chroma's HNSW
+    reader remained unavailable for 84 exact-vector attempts over 20 seconds
+    during unchanged receipt reuse. The first write can still publish COMPLETE
+    after document/metadata readback without requiring its automatically
+    generated exact embedding to be visible.
   - The initial bounded fix slice resets the process-wide Chroma client and
     known-entity caches between tests, makes the managed-write readback budget
     configurable only within the 1–60 second operational range, records
@@ -18,10 +24,11 @@ This file is the durable local index for active `mempalace` issues.
     exclusion across two files; lock retention needs a separately serialized,
     evidence-backed policy rather than an automatic unlink.
   - This issue remains open: use the next failure's bounded pytest report
-    section to identify the shared root cause with
-    [#24](https://github.com/iMelki/mempalace/issues/24), add the remaining
-    repeated-suite proof, and design safe lock-path retention without
-    weakening cross-process exclusion.
+    section and the new exact-vector evidence to repair the shared root cause
+    with [#24](https://github.com/iMelki/mempalace/issues/24). Require a
+    first-write exact-vector visibility barrier, add deterministic delayed and
+    never-visible regressions plus the remaining repeated-suite proof, and
+    design safe lock-path retention without weakening cross-process exclusion.
 
 - [#31 - Bind immutable evaluation corpus identity for MemSys gold baselines](https://github.com/iMelki/mempalace/issues/31)
   - The HTTP consumer is shipped. The producer now has a durable three-phase
