@@ -136,7 +136,7 @@
   description: "Publishing, content, community automation, or media workflows."
 - name: "domain:trading"
   color: "b60205"
-  description: "Asimtop or trading-system work."
+  description: "Trading-system work."
 - name: "domain:infrastructure"
   color: "1d76db"
   description: "Shared infrastructure, observability, analytics, or config."
