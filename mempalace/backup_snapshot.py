@@ -66,8 +66,28 @@ from typing import Any, Iterator
 from .palace import MineAlreadyRunning, mine_palace_lock
 
 SNAPSHOT_RECEIPT_SCHEMA = "mempalace-backup-snapshot-receipt/v1"
+SNAPSHOT_RECEIPT_FILENAME = "backup-snapshot-receipt.json"
 SNAPSHOT_METHOD = "sqlite-online-backup+catalog-scoped-segment-copy/v1"
 LEASE_KIND = "mempalace-clean-client-lease/v1"
+
+#: Interim status written by ``stage_palace_snapshot(..., verify=False)``. A
+#: growing palace makes ``PRAGMA integrity_check`` plus full-tree hashing take
+#: non-linearly longer (memsys#423: 26 minutes on a 25 GiB database), which can
+#: blow a bounded copy-timeout budget even though the copy itself finished
+#: cleanly. This status lets the copy phase finish and hand off the slow
+#: proof work to a separately scheduled, separately timed verification pass
+#: (:func:`verify_staged_snapshot`) without ever claiming a proof that was
+#: never actually run.
+SNAPSHOT_STATUS_AWAITING_VERIFICATION = "staged-awaiting-verification"
+
+#: Sidecar written next to an awaiting-verification receipt. Carries exactly
+#: what the deferred verification pass needs and cannot re-derive without the
+#: lease: the source drawer/closet counts captured live, under lease, at copy
+#: time. Re-reading the live palace later would compare against a
+#: potentially-mutated palace state instead of the moment the snapshot was
+#: actually taken.
+STAGING_MANIFEST_SCHEMA = "mempalace-backup-snapshot-staging-manifest/v1"
+STAGING_MANIFEST_FILENAME = "staging-manifest.json"
 
 #: Live SQLite sidecars.  Their presence in the *staged* snapshot would mean the
 #: snapshot was taken from a database with uncommitted or unmerged state.
@@ -445,12 +465,28 @@ def stage_palace_snapshot(
     use_maintenance_marker: bool = True,
     maintenance_marker: Path | None = None,
     progress: bool = False,
+    verify: bool = True,
 ) -> dict[str, Any]:
-    """Produce a staged, consistent, content-identity-proven palace snapshot.
+    """Produce a staged, consistent palace snapshot, optionally deferring proof.
 
     Returns the receipt dict, which is also written to
     ``<staging_dir>/backup-snapshot-receipt.json``.  The staged restore set
     itself lives in ``<staging_dir>/palace``.
+
+    ``verify=True`` (default) is the original, self-contained behavior: the
+    sqlite ``PRAGMA integrity_check`` and the full-tree content-identity hash
+    both run inline, and the receipt is written with ``status="complete"``
+    and all three proof flags true.
+
+    ``verify=False`` performs only the clean-client-lease copy -- the sqlite
+    online-backup copy, catalog-scoped segment copy, and writer-quiescence
+    witness -- then returns and writes an interim receipt with
+    ``status=SNAPSHOT_STATUS_AWAITING_VERIFICATION`` and
+    ``snapshotConsistencyProven=False`` / ``contentIdentityProven=False``
+    (never a false claim of proof). A sibling ``staging-manifest.json`` is
+    written alongside it carrying everything :func:`verify_staged_snapshot`
+    needs to finish the proof later, out of process, without re-touching the
+    live palace or re-acquiring the lease.
     """
 
     started = time.monotonic()
@@ -466,7 +502,7 @@ def stage_palace_snapshot(
         raise PalaceSnapshotError("palace SQLite catalog is a link; refusing to snapshot")
 
     staged_root = staging / "palace"
-    receipt_path = staging / "backup-snapshot-receipt.json"
+    receipt_path = staging / SNAPSHOT_RECEIPT_FILENAME
 
     with clean_client_lease(
         palace_root,
@@ -489,7 +525,12 @@ def stage_palace_snapshot(
             sqlite_result = _snapshot_sqlite(
                 source_sqlite, staged_root / "chroma.sqlite3", progress=progress
             )
-            integrity = _sqlite_integrity_check(staged_root / "chroma.sqlite3")
+            # A growing palace makes this non-linearly slower (memsys#423: 26
+            # minutes on a 25 GiB database) and is exactly what verify=False
+            # defers to the separate Verify-PalaceSnapshotStaging lane.
+            integrity = (
+                _sqlite_integrity_check(staged_root / "chroma.sqlite3") if verify else "deferred"
+            )
 
             # The snapshot's own catalog decides what else belongs in the
             # restore set. Reading the live catalog instead would let a
@@ -574,9 +615,76 @@ def stage_palace_snapshot(
         finally:
             witness.close()
 
-        snapshot_counts = _counts_payload(staged_root)
+        snapshot_counts = _counts_payload(staged_root) if verify else None
 
-    # Lease released. Everything below reads only the staged copy.
+    # Lease released. Everything below reads only the staged copy, so none of
+    # it needs to happen while the exclusive lease is held.
+    lease_record = {
+        **lease,
+        "sourceJournalMode": witness.journal_mode,
+        "sourcePageSize": witness.page_size,
+        "sourcePageCount": witness.page_count,
+        "initialDataVersion": witness.initial,
+        "finalDataVersion": final_data_version,
+        "writerQuiescenceProven": True,
+    }
+
+    if not verify:
+        staging.mkdir(parents=True, exist_ok=True)
+        generated_at = _utc_now()
+        copy_duration = round(time.monotonic() - started, 3)
+        manifest: dict[str, Any] = {
+            "schema": STAGING_MANIFEST_SCHEMA,
+            "generatedAt": generated_at,
+            "palaceRoot": str(palace_root),
+            "stagedRoot": str(staged_root),
+            "snapshotMethod": SNAPSHOT_METHOD,
+            # Captured live, under lease, at copy time. The deferred verify
+            # pass compares against THIS value, never a fresh live re-read,
+            # because the palace may have moved on by the time it runs.
+            "sourceCounts": source_counts,
+            "collections": collections,
+            "lease": lease_record,
+            "sqliteSnapshot": sqlite_result,
+            "stagedEntries": staged_entries,
+            "copyDurationSeconds": copy_duration,
+        }
+        manifest_path = staging / STAGING_MANIFEST_FILENAME
+        with manifest_path.open("x", encoding="utf-8", newline="\n") as stream:
+            json.dump(manifest, stream, ensure_ascii=True, indent=2, sort_keys=True)
+            stream.write("\n")
+
+        interim_receipt: dict[str, Any] = {
+            "schema": SNAPSHOT_RECEIPT_SCHEMA,
+            "status": SNAPSHOT_STATUS_AWAITING_VERIFICATION,
+            "generatedAt": generated_at,
+            "snapshotMethod": SNAPSHOT_METHOD,
+            "palaceRoot": str(palace_root),
+            "stagedRoot": str(staged_root),
+            "lease": lease_record,
+            "sqliteSnapshot": {**sqlite_result, "integrityCheck": "deferred"},
+            "stagedEntries": staged_entries,
+            "contentIdentity": None,
+            "contentIdentityDigest": None,
+            # The copy phase DID prove the lease (reaching this line means the
+            # clean-client lease context manager completed without raising).
+            # It deliberately did NOT run integrity_check or hashing.
+            "leaseProven": True,
+            "snapshotConsistencyProven": False,
+            "contentIdentityProven": False,
+            "verification": {
+                "status": "pending",
+                "manifestPath": str(manifest_path),
+            },
+            "durationSeconds": copy_duration,
+        }
+        with receipt_path.open("x", encoding="utf-8", newline="\n") as stream:
+            json.dump(interim_receipt, stream, ensure_ascii=True, indent=2, sort_keys=True)
+            stream.write("\n")
+        interim_receipt["receiptPath"] = str(receipt_path)
+        interim_receipt["manifestPath"] = str(manifest_path)
+        return interim_receipt
+
     if _identity_comparable(source_counts) != _identity_comparable(snapshot_counts):
         raise PalaceSnapshotError(
             "content identity failed: staged snapshot drawer/closet counts differ from the source"
@@ -608,15 +716,7 @@ def stage_palace_snapshot(
         "snapshotMethod": SNAPSHOT_METHOD,
         "palaceRoot": str(palace_root),
         "stagedRoot": str(staged_root),
-        "lease": {
-            **lease,
-            "sourceJournalMode": witness.journal_mode,
-            "sourcePageSize": witness.page_size,
-            "sourcePageCount": witness.page_count,
-            "initialDataVersion": witness.initial,
-            "finalDataVersion": final_data_version,
-            "writerQuiescenceProven": True,
-        },
+        "lease": lease_record,
         "sqliteSnapshot": {
             **sqlite_result,
             "integrityCheck": integrity,
@@ -631,6 +731,155 @@ def stage_palace_snapshot(
     }
     staging.mkdir(parents=True, exist_ok=True)
     with receipt_path.open("x", encoding="utf-8", newline="\n") as stream:
+        json.dump(receipt, stream, ensure_ascii=True, indent=2, sort_keys=True)
+        stream.write("\n")
+    receipt["receiptPath"] = str(receipt_path)
+    return receipt
+
+
+def verify_staged_snapshot(staging_dir: str | os.PathLike[str]) -> dict[str, Any]:
+    """Finish a deferred verification: sqlite integrity_check + first hashing.
+
+    Companion to ``stage_palace_snapshot(..., verify=False)``. That call
+    copies the palace and writes an interim receipt with
+    ``status=SNAPSHOT_STATUS_AWAITING_VERIFICATION`` plus a sibling
+    ``staging-manifest.json`` carrying everything this function needs to
+    finish the proof without re-touching the live palace or re-acquiring the
+    lease: the source drawer/closet counts captured live, under lease, at
+    copy time, the lease record, and the sqlite copy result.
+
+    This function reads that manifest, runs the sqlite integrity check and
+    the full-tree content-identity hash the copy phase deliberately skipped,
+    and rewrites the SAME receipt file in place with the final verdict --
+    ``status="complete"`` with all three proof flags true on success,
+    ``status="error"`` with the proof flags false on failure. Either way the
+    generation is left with a receipt that says what happened: never left
+    silently unverified forever, and never silently marked proven.
+
+    Precondition failures -- a missing manifest, a missing staged sqlite file
+    -- raise :class:`PalaceSnapshotError` without touching whatever receipt is
+    already on disk, because they mean verification could not even be
+    attempted, which is a different fact than "attempted and failed".
+    """
+
+    staging = Path(staging_dir).expanduser().resolve(strict=True)
+    staged_root = staging / "palace"
+    manifest_path = staging / STAGING_MANIFEST_FILENAME
+    receipt_path = staging / SNAPSHOT_RECEIPT_FILENAME
+
+    if not manifest_path.is_file():
+        raise PalaceSnapshotError(
+            f"staging manifest is missing; cannot verify (was verify=False ever run here?): {manifest_path}"
+        )
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise PalaceSnapshotError(
+            f"staging manifest is unreadable: {manifest_path}: {exc}"
+        ) from exc
+    if manifest.get("schema") != STAGING_MANIFEST_SCHEMA:
+        raise PalaceSnapshotError(f"unexpected staging manifest schema: {manifest.get('schema')}")
+
+    staged_sqlite = staged_root / "chroma.sqlite3"
+    if not staged_sqlite.is_file():
+        raise PalaceSnapshotError(f"staged SQLite catalog is unavailable: {staged_sqlite}")
+
+    started = time.monotonic()
+    source_counts = manifest.get("sourceCounts") or {}
+    lease_record = manifest.get("lease") or {}
+    sqlite_result = manifest.get("sqliteSnapshot") or {}
+    staged_entries = manifest.get("stagedEntries") or []
+    palace_root_text = str(manifest.get("palaceRoot", ""))
+    staged_root_text = str(manifest.get("stagedRoot", str(staged_root)))
+
+    def _write_failure(message: str, *, integrity_result: str) -> dict[str, Any]:
+        failure: dict[str, Any] = {
+            "schema": SNAPSHOT_RECEIPT_SCHEMA,
+            "status": "error",
+            "generatedAt": _utc_now(),
+            "snapshotMethod": SNAPSHOT_METHOD,
+            "palaceRoot": palace_root_text,
+            "stagedRoot": staged_root_text,
+            "lease": lease_record,
+            "sqliteSnapshot": {**sqlite_result, "integrityCheck": integrity_result},
+            "stagedEntries": staged_entries,
+            "contentIdentity": None,
+            "contentIdentityDigest": None,
+            # A valid manifest existing at all is itself proof the copy-phase
+            # lease succeeded; only the two slow proofs are what verification
+            # decides here.
+            "leaseProven": True,
+            "snapshotConsistencyProven": False,
+            "contentIdentityProven": False,
+            "verification": {
+                "status": "failed",
+                "message": message,
+                "manifestPath": str(manifest_path),
+            },
+            "durationSeconds": round(time.monotonic() - started, 3),
+        }
+        with receipt_path.open("w", encoding="utf-8", newline="\n") as stream:
+            json.dump(failure, stream, ensure_ascii=True, indent=2, sort_keys=True)
+            stream.write("\n")
+        failure["receiptPath"] = str(receipt_path)
+        return failure
+
+    try:
+        integrity = _sqlite_integrity_check(staged_sqlite)
+    except PalaceSnapshotError as exc:
+        return _write_failure(str(exc), integrity_result="failed")
+
+    snapshot_counts = _counts_payload(staged_root)
+    if _identity_comparable(source_counts) != _identity_comparable(snapshot_counts):
+        return _write_failure(
+            "content identity failed: staged snapshot drawer/closet counts differ from the "
+            "source counts captured at copy time",
+            integrity_result=integrity,
+        )
+
+    staged_files, staged_bytes = _hash_staged_tree(staged_root)
+    collections = manifest.get("collections") or read_catalog(staged_sqlite)
+    content_identity = {
+        "algorithm": "sha256",
+        "canonicalization": "json-sort-keys-ascii-v1",
+        "fileCount": len(staged_files),
+        "totalBytes": staged_bytes,
+        "files": staged_files,
+        "counts": snapshot_counts,
+        "collections": collections,
+    }
+    identity_digest = canonical_identity_digest(
+        {
+            "files": [
+                {"relativePath": f["relativePath"], "sha256": f["sha256"]} for f in staged_files
+            ],
+            "counts": _identity_comparable(snapshot_counts),
+        }
+    )
+
+    receipt: dict[str, Any] = {
+        "schema": SNAPSHOT_RECEIPT_SCHEMA,
+        "status": "complete",
+        "generatedAt": _utc_now(),
+        "snapshotMethod": SNAPSHOT_METHOD,
+        "palaceRoot": palace_root_text,
+        "stagedRoot": staged_root_text,
+        "lease": lease_record,
+        "sqliteSnapshot": {**sqlite_result, "integrityCheck": integrity},
+        "stagedEntries": staged_entries,
+        "contentIdentity": content_identity,
+        "contentIdentityDigest": identity_digest,
+        "leaseProven": True,
+        "snapshotConsistencyProven": True,
+        "contentIdentityProven": True,
+        "verification": {
+            "status": "complete",
+            "manifestPath": str(manifest_path),
+            "hashesComputed": len(staged_files),
+        },
+        "durationSeconds": round(time.monotonic() - started, 3),
+    }
+    with receipt_path.open("w", encoding="utf-8", newline="\n") as stream:
         json.dump(receipt, stream, ensure_ascii=True, indent=2, sort_keys=True)
         stream.write("\n")
     receipt["receiptPath"] = str(receipt_path)
@@ -725,7 +974,21 @@ def _print(payload: dict[str, Any], as_json: bool) -> None:
         print(json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True))
         return
     if payload.get("schema") == SNAPSHOT_RECEIPT_SCHEMA:
-        identity = payload.get("contentIdentity", {})
+        status = payload.get("status")
+        if status == SNAPSHOT_STATUS_AWAITING_VERIFICATION:
+            print("MemPalace staged backup snapshot: copied, awaiting verification")
+            print(f"  Staged root:    {payload.get('stagedRoot')}")
+            print(f"  Receipt:        {payload.get('receiptPath')}")
+            print(f"  Manifest:       {payload.get('manifestPath')}")
+            print(f"  Duration:       {payload.get('durationSeconds')}s")
+            return
+        if status == "error" and payload.get("verification"):
+            verification = payload.get("verification") or {}
+            print("MemPalace staged backup snapshot verification: FAILED")
+            print(f"  Staged root:    {payload.get('stagedRoot')}")
+            print(f"  Message:        {verification.get('message')}")
+            return
+        identity = payload.get("contentIdentity") or {}
         counts = identity.get("counts", {})
         print("MemPalace staged backup snapshot: complete")
         print(f"  Staged root:    {payload.get('stagedRoot')}")
@@ -751,9 +1014,26 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--staged-root", default="", help="Override staged root during verification"
     )
+    parser.add_argument(
+        "--verify-staged-dir",
+        default="",
+        help=(
+            "Finish a deferred verification (integrity_check + first hashing) for a "
+            "generation staged earlier with --defer-verification"
+        ),
+    )
     parser.add_argument("--skip-hash-verification", action="store_true")
     parser.add_argument("--no-maintenance-marker", action="store_true")
     parser.add_argument("--progress", action="store_true")
+    parser.add_argument(
+        "--defer-verification",
+        action="store_true",
+        help=(
+            "Copy the palace only; skip PRAGMA integrity_check and content-identity "
+            "hashing so a separately scheduled, separately timed lane can run "
+            "--verify-staged-dir against this generation afterward"
+        ),
+    )
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
 
@@ -766,6 +1046,10 @@ def main(argv: list[str] | None = None) -> int:
             )
             _print(result, args.json)
             return 0 if result["valid"] else 2
+        if args.verify_staged_dir:
+            receipt = verify_staged_snapshot(args.verify_staged_dir)
+            _print(receipt, args.json)
+            return 0 if receipt.get("status") == "complete" else 2
         if not args.staging_dir:
             raise PalaceSnapshotError("--staging-dir is required when creating a snapshot")
         receipt = stage_palace_snapshot(
@@ -773,6 +1057,7 @@ def main(argv: list[str] | None = None) -> int:
             args.staging_dir,
             use_maintenance_marker=not args.no_maintenance_marker,
             progress=args.progress,
+            verify=not args.defer_verification,
         )
         _print(receipt, args.json)
         return 0
