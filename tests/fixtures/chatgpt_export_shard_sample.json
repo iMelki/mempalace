@@ -1,0 +1,242 @@
+[
+  {
+    "conversation_id": "11111111-1111-4111-8111-111111111111",
+    "id": "11111111-1111-4111-8111-111111111111",
+    "title": "Sourdough starter troubleshooting",
+    "create_time": 1735689600.0,
+    "update_time": 1735693200.0,
+    "default_model_slug": "gpt-fixture",
+    "is_archived": false,
+    "is_starred": false,
+    "current_node": "a5",
+    "mapping": {
+      "root": {
+        "id": "root",
+        "message": null,
+        "parent": null
+      },
+      "u1": {
+        "id": "u1",
+        "parent": "root",
+        "message": {
+          "id": "u1",
+          "author": {"role": "user", "name": null},
+          "create_time": 1735689601.0,
+          "content": {
+            "content_type": "text",
+            "parts": ["My sourdough starter smells like nail polish remover. Is it dead?"]
+          },
+          "metadata": {}
+        }
+      },
+      "a1": {
+        "id": "a1",
+        "parent": "u1",
+        "message": {
+          "id": "a1",
+          "author": {"role": "assistant", "name": null},
+          "create_time": 1735689602.0,
+          "content": {
+            "content_type": "thoughts",
+            "source_analysis_msg_id": "a1-analysis",
+            "thoughts": [
+              {
+                "summary": "Weighing hooch versus spoilage",
+                "content": "The acetone note usually means the culture is hungry, not dead. Check for mould before saying anything reassuring.",
+                "finished": true,
+                "chunks": []
+              }
+            ]
+          },
+          "metadata": {}
+        }
+      },
+      "a2": {
+        "id": "a2",
+        "parent": "a1",
+        "message": {
+          "id": "a2",
+          "author": {"role": "assistant", "name": null},
+          "create_time": 1735689603.0,
+          "content": {
+            "content_type": "text",
+            "parts": ["Almost certainly alive. That acetone smell is hooch, which means the culture has eaten all its flour and is hungry. Pour off the grey liquid and feed it."]
+          },
+          "metadata": {}
+        }
+      },
+      "u2_abandoned": {
+        "id": "u2_abandoned",
+        "parent": "a2",
+        "message": {
+          "id": "u2_abandoned",
+          "author": {"role": "user", "name": null},
+          "create_time": 1735689604.0,
+          "content": {
+            "content_type": "text",
+            "parts": ["Never mind, I threw it out."]
+          },
+          "metadata": {}
+        }
+      },
+      "a3_abandoned": {
+        "id": "a3_abandoned",
+        "parent": "u2_abandoned",
+        "message": {
+          "id": "a3_abandoned",
+          "author": {"role": "assistant", "name": null},
+          "create_time": 1735689605.0,
+          "content": {
+            "content_type": "text",
+            "parts": ["No problem, starting a new starter takes about a week."]
+          },
+          "metadata": {}
+        }
+      },
+      "u3": {
+        "id": "u3",
+        "parent": "a2",
+        "message": {
+          "id": "u3",
+          "author": {"role": "user", "name": null},
+          "create_time": 1735689606.0,
+          "content": {
+            "content_type": "text",
+            "parts": ["How often should I feed it while I rescue it?"]
+          },
+          "metadata": {}
+        }
+      },
+      "a4": {
+        "id": "a4",
+        "parent": "u3",
+        "message": {
+          "id": "a4",
+          "author": {"role": "assistant", "name": null},
+          "create_time": 1735689607.0,
+          "content": {
+            "content_type": "reasoning_recap",
+            "content": "Thought for 5 seconds"
+          },
+          "metadata": {}
+        }
+      },
+      "a5": {
+        "id": "a5",
+        "parent": "a4",
+        "message": {
+          "id": "a5",
+          "author": {"role": "assistant", "name": null},
+          "create_time": 1735689608.0,
+          "content": {
+            "content_type": "text",
+            "parts": ["Twice a day at room temperature, equal weights of starter, flour and water, until it doubles reliably within six hours."]
+          },
+          "metadata": {}
+        }
+      }
+    }
+  },
+  {
+    "conversation_id": "22222222-2222-4222-8222-222222222222",
+    "id": "22222222-2222-4222-8222-222222222222",
+    "title": "Voice note about the garage shelf",
+    "create_time": 1735776000.0,
+    "update_time": 1735776600.0,
+    "default_model_slug": "gpt-fixture",
+    "is_archived": false,
+    "is_starred": false,
+    "current_node": "vb2",
+    "mapping": {
+      "vroot": {
+        "id": "vroot",
+        "message": null,
+        "parent": null
+      },
+      "vu1": {
+        "id": "vu1",
+        "parent": "vroot",
+        "message": {
+          "id": "vu1",
+          "author": {"role": "user", "name": null},
+          "create_time": 1735776001.0,
+          "content": {
+            "content_type": "multimodal_text",
+            "parts": [
+              {
+                "content_type": "real_time_user_audio_video_asset_pointer",
+                "audio_asset_pointer": {
+                  "content_type": "audio_asset_pointer",
+                  "asset_pointer": "file-service://file-FIXTUREAUDIO0001"
+                },
+                "audio_start_timestamp": 0.0,
+                "expiry_datetime": null,
+                "frames_asset_pointers": [],
+                "video_container_asset_pointer": null
+              },
+              {
+                "content_type": "audio_transcription",
+                "decoding_id": "fixture-decode-1",
+                "direction": "in",
+                "text": "Remind me to buy longer shelf brackets before the weekend."
+              }
+            ]
+          },
+          "metadata": {}
+        }
+      },
+      "vb1": {
+        "id": "vb1",
+        "parent": "vu1",
+        "message": {
+          "id": "vb1",
+          "author": {"role": "assistant", "name": null},
+          "create_time": 1735776002.0,
+          "content": {
+            "content_type": "text",
+            "parts": ["Noted: longer shelf brackets before the weekend. Do you know the span you need to cover?"]
+          },
+          "metadata": {}
+        }
+      },
+      "vu2": {
+        "id": "vu2",
+        "parent": "vb1",
+        "message": {
+          "id": "vu2",
+          "author": {"role": "user", "name": null},
+          "create_time": 1735776003.0,
+          "content": {
+            "content_type": "multimodal_text",
+            "parts": [
+              {
+                "content_type": "image_asset_pointer",
+                "asset_pointer": "file-service://file-FIXTUREIMAGE0001",
+                "size_bytes": 12345,
+                "width": 800,
+                "height": 600,
+                "fovea": null,
+                "metadata": null
+              }
+            ]
+          },
+          "metadata": {}
+        }
+      },
+      "vb2": {
+        "id": "vb2",
+        "parent": "vu2",
+        "message": {
+          "id": "vb2",
+          "author": {"role": "assistant", "name": null},
+          "create_time": 1735776004.0,
+          "content": {
+            "content_type": "text",
+            "parts": ["From the photo the span looks close to 90 cm, so buy brackets rated for at least that depth plus the load."]
+          },
+          "metadata": {}
+        }
+      }
+    }
+  }
+]
