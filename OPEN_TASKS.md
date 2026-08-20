@@ -6,6 +6,20 @@ This file is the durable local index for active `mempalace` issues.
 
 ## Active Issues
 
+- [#49 - Preserve question context and identity in bounded conversation chunks](https://github.com/iMelki/mempalace/issues/49)
+  - The code slice adds isolated structured ChatGPT conversation/turn records,
+    privacy-safe scoped identities, parent-question context on long-answer and
+    regenerated-answer chunks, exact bounded legacy slices, a scalar metadata
+    allowlist, and a receipt-bound chunk schema.
+  - Synthetic positive proof, the deliberately broken negative fixture,
+    independent review, Ruff, and the full local suite are complete. No
+    configured palace, provider, or live corpus was mutated.
+  - Remaining: qualify the exact non-truncating active-tokenizer contract. A
+    supervised live re-mine remains separately gated by
+    [memsys#529](https://github.com/iMelki/memsys/issues/529).
+  - Design and rollback boundary:
+    `docs/research/conversation-chunk-context-contract-2026-08-20.md`.
+
 - [#41 - Stabilize the load-sensitive managed-write test family](https://github.com/iMelki/mempalace/issues/41)
   - A recovered, privacy-sanitized third diary-ingest occurrence disproves the
     former mtime/order-state explanation in closed duplicate #46. Chroma's HNSW

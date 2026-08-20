@@ -10,6 +10,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Bounded conversation chunks retain their parent question and stable identity
+  (#49).** ChatGPT exports now have an additive per-conversation/per-turn path
+  that preserves current-node and multimodal behavior while hashing provider
+  identities into conversation-scoped tokens. Long and regenerated answers carry
+  bounded labelled question context on every continuation; assistant payloads
+  reconstruct exactly; conversations cannot cross; legacy text is bounded without
+  dropping preambles, blank lines, or trailing data. The chunk schema and explicit
+  `structure-aware-chars-v1` compatibility budget are bound to managed receipts.
+  No live corpus re-mine was performed; that remains gated by memsys#529 and an
+  exact active-model tokenizer proof. The changed context gate has a recorded
+  fail-for-the-right-reason fixture in `.gate-evidence.json`.
+
 - **Sanitized exact-vector visibility evidence for the diary-ingest flake family
   (#41).** A recovered private diagnostic proves that unchanged diary reuse can
   exhaust 84 exact-vector attempts over 20 seconds when Chroma's HNSW segment

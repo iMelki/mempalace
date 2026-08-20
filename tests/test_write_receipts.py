@@ -853,6 +853,101 @@ def test_zero_output_conversation_has_exact_sentinel_identity(tmp_path):
     assert verify_receipt(receipt, collection, store=store).status == "represented"
 
 
+@pytest.mark.parametrize(
+    ("config_change", "policy_change"),
+    [
+        ({"conversation_chunk_schema_version": 2}, {}),
+        ({"min_chunk_size": 31}, {}),
+        ({"chatgpt_all_branches": True}, {"chatgpt_all_branches": True}),
+        ({"chatgpt_include_thoughts": True}, {"chatgpt_include_thoughts": True}),
+    ],
+)
+def test_conversation_chunk_config_change_rejects_unchanged_receipt_reuse(
+    tmp_path,
+    config_change,
+    policy_change,
+):
+    source_dir = tmp_path / "conversations"
+    source_dir.mkdir()
+    source = source_dir / "chatgpt.json"
+    source.write_text(
+        json.dumps(
+            [
+                {
+                    "conversation_id": "fixture-conversation",
+                    "current_node": "a1",
+                    "mapping": {
+                        "root": {"parent": None, "message": None},
+                        "u1": {
+                            "parent": "root",
+                            "message": {
+                                "id": "u1",
+                                "author": {"role": "user"},
+                                "content": {"content_type": "text", "parts": ["Question"]},
+                            },
+                        },
+                        "a1": {
+                            "parent": "u1",
+                            "message": {
+                                "id": "a1",
+                                "author": {"role": "assistant"},
+                                "content": {
+                                    "content_type": "text",
+                                    "parts": ["Answer with enough content. " * 20],
+                                },
+                            },
+                        },
+                    },
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    first_config = {
+        "pipeline": "conversations",
+        "extract_mode": "exchange",
+        "conversation_chunk_schema_version": 1,
+        "min_chunk_size": 30,
+        "chatgpt_all_branches": False,
+        "chatgpt_include_thoughts": False,
+    }
+    _, store, first_run = _store_and_run(
+        tmp_path,
+        mode="conversations:exchange",
+        config=first_config,
+    )
+    collection = _MemoryCollection()
+    kwargs = {
+        "filepath": source,
+        "collection": collection,
+        "wing": "conversations",
+        "agent": "test-runner",
+        "extract_mode": "exchange",
+        "dry_run": False,
+        "index": 1,
+        "total_files": 1,
+        "receipt_store": store,
+        "chatgpt_all_branches": False,
+        "chatgpt_include_thoughts": False,
+    }
+
+    _process_conversation_file(receipt_run=first_run, **kwargs)
+    first = _current_for_path(store, source)
+    writes_after_first = collection.upsert_calls
+    second_run = store.create_run(
+        caller="test-runner",
+        mode="conversations:exchange",
+        config={**first_config, **config_change},
+    )
+    _process_conversation_file(receipt_run=second_run, **{**kwargs, **policy_change})
+    second = _current_for_path(store, source)
+
+    assert collection.upsert_calls > writes_after_first
+    assert second["receipt_id"] != first["receipt_id"]
+    assert second["disposition"] != "UNCHANGED"
+    assert second["relations"]["supersedes"]["receipt_id"] == first["receipt_id"]
+
+
 def test_changed_conversation_to_zero_output_replaces_every_prior_row(tmp_path):
     source_dir = tmp_path / "conversations"
     source_dir.mkdir()
