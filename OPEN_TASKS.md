@@ -1,6 +1,6 @@
 # MemPalace Open Tasks
 
-Last updated: 2026-08-11
+Last updated: 2026-08-20
 
 This file is the durable local index for active `mempalace` issues.
 
@@ -428,6 +428,23 @@ This file is the durable local index for active `mempalace` issues.
   - Status: Open (preserved branch `agent/codex/mempalace-search-mcp-wip`).
 
 ## Recently Completed
+
+- [#48 - Reconcile divergent `dev` histories without replaying superseded work](https://github.com/iMelki/mempalace/issues/48)
+  - Closed locally on 2026-08-20 after correcting the original assumption that
+    `7a9a5bb` contained unique behavior that should be replayed. Five of its
+    nine paths were already patch-equivalent on `origin/dev`; the remaining
+    deltas were superseded by safer privacy, locking, environment-parsing, and
+    diagnostic handling. Replaying the commit would have conflicted with or
+    regressed those safeguards.
+  - Both divergent tips remain recoverable through dedicated preservation refs
+    and a complete verified bundle under
+    `%LOCALAPPDATA%/MemSys/backups/git-history/mempalace-issue-48-20260820/`.
+    Local `dev` was aligned to `origin/dev` with a compare-and-swap ref update;
+    no reset, rebase, force-push, stash, or cherry-pick was used.
+  - Focused parser, backup/snapshot, deduplication, locking, restart-receipt,
+    and write-receipt validation passed `449` tests with `1` platform skip in
+    `60.56s`. Pre-existing `.pytest-diagnostics/` evidence that became visible
+    under the newer ignore policy was preserved and not staged or deleted.
 
 <!-- Cured 2026-08-06 via the workspace issue-state audit (projects-ops#101/#73): issue closed while listed active. -->
 - [#29 - Prevent Windows WFP timeout warnings from leaking out of the CLI test](https://github.com/iMelki/mempalace/issues/29)
