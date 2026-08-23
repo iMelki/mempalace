@@ -89,3 +89,60 @@ def test_public_help_hides_internal_child_phase_controls():
     assert "--workspace" not in help_text
     assert "--phase-artifact-dir" not in help_text
     assert "--phase-token" not in help_text
+
+
+# ── Child launch is not allowed to depend on what the token looks like ──────
+#
+# The probe launches four child processes. Values used to be passed as two
+# separate command-line words ("--phase-token", token). Whenever the token
+# happened to begin with "-", the child's argument parser read it as the next
+# option and exited with "expected one argument", so the probe reported
+# failure with no phase evidence at all. The token came from
+# secrets.token_urlsafe, whose alphabet contains "-", making this roughly a
+# one-in-sixty-four coin flip on every run — which is exactly what an
+# intermittent pre-push failure looks like.
+
+
+def test_child_command_survives_a_token_that_starts_with_a_hyphen(tmp_path):
+    hostile_token = "-starts-with-a-hyphen"
+    command = probe_module._child_command(
+        "seed",
+        workspace=tmp_path / "workspace",
+        artifact_dir=tmp_path / "artifacts",
+        phase_token=hostile_token,
+    )
+
+    # Everything after the interpreter and "-m module" is what the child parses.
+    parsed = probe_module._parser().parse_args(command[3:])
+
+    assert parsed.phase == "seed"
+    assert parsed.phase_token == hostile_token
+    assert parsed.workspace == tmp_path / "workspace"
+    assert parsed.phase_artifact_dir == tmp_path / "artifacts"
+
+
+def test_generated_phase_tokens_can_never_start_with_a_hyphen(monkeypatch, tmp_path):
+    """Second, independent defence: the generated token has no hyphens at all."""
+    captured = {}
+
+    def _capture(phase, *, workspace, artifact_dir, phase_token, timeout_seconds):
+        captured["token"] = phase_token
+        return {
+            "phase": phase,
+            "exitCode": 9,
+            "timedOut": False,
+            "durationSeconds": 0.01,
+            "stdoutLog": str(artifact_dir / "phase-seed.stdout.log"),
+            "stderrLog": str(artifact_dir / "phase-seed.stderr.log"),
+        }
+
+    monkeypatch.setattr(probe_module, "_run_child", _capture)
+    run_probe(
+        artifact_root=tmp_path / "artifacts",
+        scratch_parent=tmp_path / "scratch",
+        phase_timeout_seconds=12,
+    )
+
+    token = captured["token"]
+    assert token
+    assert all(character in "0123456789abcdef" for character in token), token

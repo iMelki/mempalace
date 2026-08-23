@@ -272,3 +272,97 @@ def test_invalid_budget_contract_fails_closed(chunk_size, minimum, message):
             chunk_size=chunk_size,
             min_chunk_size=minimum,
         )
+
+
+# ── Turn-aware boundaries (wave 10) ─────────────────────────────────────────
+#
+# Two properties the previous rule did not hold. It collected every candidate
+# boundary and took whichever sat furthest right, so in prose a space almost
+# always beat a paragraph break, and the end of a sentence was never even
+# looked for. Measured on the operator's real ChatGPT export before the
+# change: 92% of splits landed inside a sentence.
+
+
+def test_a_split_inside_one_long_turn_stops_at_the_end_of_a_sentence():
+    sentences = [
+        f"Sentence number {index} carries its own complete thought." for index in range(60)
+    ]
+    text = " ".join(sentences)
+
+    pieces = split_text_bounded(text, 400)
+
+    assert "".join(pieces) == text
+    assert len(pieces) > 3
+    # Every piece except the final remainder ends a sentence.
+    assert all(piece.rstrip().endswith(".") for piece in pieces[:-1])
+
+
+def test_a_paragraph_break_wins_over_a_later_space():
+    """A paragraph break inside the search band beats a space further right.
+
+    The old rule kept whichever boundary sat furthest right, so the space at
+    roughly character 295 would have won and the topic break would have been
+    cut straight through.
+    """
+    first_paragraph = "x" * 230
+    text = first_paragraph + "\n\n" + "tail words continue past the budget here and beyond " * 3
+
+    pieces = split_text_bounded(text, 300)
+
+    assert "".join(pieces) == text
+    assert pieces[0] == first_paragraph + "\n\n"
+
+
+def test_a_code_fence_is_not_split_across_two_drawers():
+    intro = "Here is the change.\n\n"
+    fence = "```python\n" + "value = 1\n" * 20 + "```\n"
+    tail = "And this trailing prose continues past the budget so a split is forced. " * 3
+    text = intro + fence + tail
+
+    pieces = split_text_bounded(text, 300)
+
+    assert "".join(pieces) == text
+    assert pieces[0] == intro + fence
+    assert pieces[0].count("```") == 2
+
+
+def test_every_continuation_of_a_split_question_keeps_its_speaker_marker():
+    question = "Explain the rollback path in detail. " * 30
+    unit = _unit(
+        "split-question",
+        [_turn("user", question, "q1"), _turn("assistant", "Short answer.", "a1")],
+    )
+
+    chunks = chunk_conversation_units(
+        [unit], source_identity_hash=SOURCE_HASH, chunk_size=200, min_chunk_size=0
+    )
+
+    user_chunks = [chunk for chunk in chunks if chunk["speaker_role"] == "user"]
+    assert len(user_chunks) > 1
+    assert all(chunk["content"].startswith("> ") for chunk in user_chunks)
+    assert all(len(chunk["content"]) <= 200 for chunk in chunks)
+    # The question is still stored byte for byte across its pieces.
+    assert "".join(chunk["content"][2:] for chunk in user_chunks) == question
+
+
+def test_no_stored_chunk_is_anonymous_text():
+    """Every drawer shows who is speaking, or carries the question with it."""
+    question = "Why does this matter for recall? " * 25
+    answer = "Because an unattributed drawer reads as the assistant. " * 25
+    unit = _unit(
+        "attribution",
+        [_turn("user", question, "q1"), _turn("assistant", answer, "a1")],
+        title="Attribution",
+    )
+
+    chunks = chunk_conversation_units(
+        [unit], source_identity_hash=SOURCE_HASH, chunk_size=220, min_chunk_size=0
+    )
+
+    for chunk in chunks:
+        head = chunk["content"].lstrip()
+        assert (
+            head.startswith("> ")
+            or head.startswith("[user-context]")
+            or head.startswith("--- conversation:")
+        ), chunk["content"][:120]

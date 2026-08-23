@@ -9,11 +9,21 @@ from dataclasses import dataclass
 import hashlib
 import re
 import unicodedata
-from typing import Dict, Iterable, List, Tuple, Union
+from typing import Dict, Iterable, List, Optional, Tuple, Union
 
 
-CONVERSATION_CHUNK_SCHEMA_VERSION = 1
-CONVERSATION_CHUNK_BUDGET_METHOD = "structure-aware-chars-v1"
+# v2 (2026-08): two changes to what a stored drawer contains, so drawers built
+#               under v1 must be rebuilt to benefit.
+#               1. A split inside one long turn now stops at the strongest
+#                  nearby structural boundary (closed code fence, paragraph,
+#                  end of sentence, line, word) instead of at whichever
+#                  boundary happened to sit furthest right — which in practice
+#                  was almost always a space, i.e. mid-sentence.
+#               2. Every continuation piece of a split user turn keeps its
+#                  "> " speaker marker, so no stored drawer is anonymous text
+#                  that reads as if the assistant said it.
+CONVERSATION_CHUNK_SCHEMA_VERSION = 2
+CONVERSATION_CHUNK_BUDGET_METHOD = "structure-aware-chars-v2"
 
 CONVERSATION_CHUNK_METADATA_FIELDS = (
     "source_identity_hash",
@@ -36,6 +46,14 @@ CONVERSATION_CHUNK_METADATA_FIELDS = (
 _CONTEXT_HEADER = "[user-context]\n"
 _CONTEXT_FOOTER = "\n[/user-context]\n"
 _FENCE_RE = re.compile(r"(?m)^ {0,3}```[^\n]*(?:\n|$)")
+# End of a sentence: closing punctuation, any closing quote or bracket that
+# trails it, then the whitespace that separates it from the next sentence.
+_SENTENCE_BREAK_RE = re.compile("[.!?…。！？][\"'’”)\\]]*\\s+")
+# How much of the budget a split is allowed to give up in exchange for a
+# stronger boundary. Boundaries are looked for in the top quarter of the
+# budget first, then in the top half, and only then does an exact character
+# cut apply. Half is the same floor the previous implementation used.
+_BOUNDARY_SEARCH_FLOORS = (0.75, 0.5)
 
 ScalarMetadata = Union[str, int, float, bool]
 
@@ -115,10 +133,14 @@ def chunk_conversation_units(
 ) -> List[dict]:
     """Chunk conversations without crossing conversation or exchange boundaries.
 
-    ``structure-aware-chars-v1`` is an explicit compatibility budget, not a
-    model-token guarantee.  It prefers complete code fences, paragraphs,
-    newlines, and words before using an exact character boundary.  Every
-    returned ``content`` is bounded by ``chunk_size``.
+    ``structure-aware-chars-v2`` is an explicit compatibility budget, not a
+    model-token guarantee.  A turn is never merged with another turn and a
+    conversation is never merged with another conversation; a single turn is
+    split only when it does not fit on its own, and then it stops at the
+    strongest structural boundary available near the budget — a closed code
+    fence, a paragraph break, the end of a sentence, a line break, and only
+    then a word break.  Every returned ``content`` is bounded by
+    ``chunk_size``.
     """
     if chunk_size < 64:
         raise ValueError("conversation chunk_size must be at least 64 characters")
@@ -333,6 +355,11 @@ def _emit_standalone_turn(
     title_prefix = _title_prefix(unit, include_title, chunk_size)
     role_prefix = "> " if turn.role == "user" else ""
     first_prefix = title_prefix + role_prefix
+    # Every later piece of a split question keeps the "> " marker. Without it
+    # a continuation drawer is anonymous text that a reader — and the legacy
+    # transcript chunker — attributes to the assistant, which is the exact
+    # mis-attribution the ChatGPT parser fix had to correct once already.
+    continuation_prefix = role_prefix
     remaining = turn.text
     payloads: List[str] = []
 
@@ -340,8 +367,11 @@ def _emit_standalone_turn(
     if first_budget > 0:
         payload, remaining = _take_bounded(remaining, first_budget)
         payloads.append(payload)
+    continuation_budget = chunk_size - len(continuation_prefix)
+    if continuation_budget <= 0:
+        raise ValueError("conversation speaker marker leaves no payload budget")
     while remaining:
-        payload, remaining = _take_bounded(remaining, chunk_size)
+        payload, remaining = _take_bounded(remaining, continuation_budget)
         payloads.append(payload)
 
     if len(turn.text.strip()) <= min_chunk_size and len(first_prefix.strip()) <= min_chunk_size:
@@ -352,7 +382,7 @@ def _emit_standalone_turn(
             output,
             unit,
             payload=payload,
-            content=(first_prefix if part_index == 0 else "") + payload,
+            content=(first_prefix if part_index == 0 else continuation_prefix) + payload,
             source_identity_hash=source_identity_hash,
             user_turn=turn if turn.role == "user" else None,
             assistant_turn=turn if turn.role == "assistant" else None,
@@ -511,25 +541,60 @@ def _context_envelope(user_text: str, chunk_size: int) -> Tuple[str, bool]:
 
 
 def _take_bounded(text: str, limit: int) -> Tuple[str, str]:
-    """Take one exact prefix, preferring structural boundaries near ``limit``."""
+    """Take one exact prefix, stopping at the strongest boundary near ``limit``.
+
+    Boundary strength, strongest first: a closed code fence, a paragraph break,
+    the end of a sentence, a line break, a space between two words. A stronger
+    boundary wins even when a weaker one sits further to the right, so a drawer
+    ends at the end of a thought rather than at the last space before the
+    character budget runs out. The previous rule took whichever boundary sat
+    furthest right, which in prose is nearly always a space, so almost every
+    split landed mid-sentence.
+
+    Nothing is dropped or added: the two returned pieces always concatenate
+    back to ``text``.
+    """
     if limit <= 0:
         raise ValueError("chunk payload limit must be positive")
     if len(text) <= limit:
         return text, ""
 
-    minimum_cut = max(1, limit // 2)
     window = text[:limit]
-    candidates: List[int] = []
+    for fraction in _BOUNDARY_SEARCH_FLOORS:
+        floor = max(1, int(limit * fraction))
+        cut = _strongest_boundary(window, floor)
+        if cut is not None:
+            return text[:cut], text[cut:]
+    return text[:limit], text[limit:]
 
-    # Prefer a complete fenced block when one closes inside the window.
+
+def _strongest_boundary(window: str, floor: int) -> Optional[int]:
+    """Return the best cut position at or after ``floor``, or None if there is none.
+
+    Classes are tried in order of strength, and the last usable occurrence of
+    the first available class wins.
+    """
+    # A fenced code block that opens and closes inside the window: never split
+    # a code block across two drawers when the whole block fits.
     fences = list(_FENCE_RE.finditer(window))
-    for index, match in enumerate(fences, 1):
-        if index % 2 == 0 and match.end() >= minimum_cut:
-            candidates.append(match.end())
-    for boundary in ("\n\n", "\n", " "):
-        position = window.rfind(boundary)
-        if position >= minimum_cut:
-            candidates.append(position + len(boundary))
+    for index in range(len(fences), 0, -1):
+        match = fences[index - 1]
+        if index % 2 == 0 and match.end() >= floor:
+            return match.end()
 
-    cut = max(candidates) if candidates else limit
-    return text[:cut], text[cut:]
+    position = window.rfind("\n\n")
+    if position != -1 and position + 2 >= floor:
+        return position + 2
+
+    sentence_cut = -1
+    for match in _SENTENCE_BREAK_RE.finditer(window):
+        if match.end() >= floor:
+            sentence_cut = match.end()
+    if sentence_cut != -1:
+        return sentence_cut
+
+    for boundary in ("\n", " "):
+        position = window.rfind(boundary)
+        if position != -1 and position + len(boundary) >= floor:
+            return position + len(boundary)
+    return None

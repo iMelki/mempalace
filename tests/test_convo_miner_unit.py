@@ -328,9 +328,9 @@ def test_convo_miner_reconciles_both_managed_collections(tmp_path, monkeypatch):
     )
 
     assert captured["collections"] == {"drawers": drawers, "closets": closets}
-    assert captured["run_config"]["conversation_chunk_schema_version"] == 1
+    assert captured["run_config"]["conversation_chunk_schema_version"] == 2
     assert captured["run_config"]["conversation_chunk_budget_method"] == (
-        "structure-aware-chars-v1"
+        "structure-aware-chars-v2"
     )
     assert captured["run_config"]["min_chunk_size"] == 30
     assert captured["run_config"]["chatgpt_all_branches"] is True

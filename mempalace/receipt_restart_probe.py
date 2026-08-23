@@ -442,6 +442,35 @@ def _phase_verify(workspace: Path, artifact_dir: Path) -> None:
         _close_client(client)
 
 
+def _child_command(
+    phase: str,
+    *,
+    workspace: Path,
+    artifact_dir: Path,
+    phase_token: str,
+) -> list[str]:
+    """Build the command line for one child phase.
+
+    Every value is attached to its option with ``=``. Separating them with a
+    space breaks whenever a value begins with a hyphen, because the argument
+    parser then reads that value as the next option and reports
+    ``expected one argument``. That is not hypothetical: the phase token used
+    to be generated with ``secrets.token_urlsafe``, whose alphabet includes
+    ``-``, so roughly one run in sixty-four launched a child that refused to
+    start and failed the whole probe. The token is now hexadecimal as well, so
+    the two defences are independent.
+    """
+    return [
+        sys.executable,
+        "-m",
+        "mempalace.receipt_restart_probe",
+        f"--phase={phase}",
+        f"--workspace={workspace}",
+        f"--phase-artifact-dir={artifact_dir}",
+        f"--phase-token={phase_token}",
+    ]
+
+
 def _run_child(
     phase: str,
     *,
@@ -450,19 +479,12 @@ def _run_child(
     phase_token: str,
     timeout_seconds: int,
 ) -> dict[str, Any]:
-    command = [
-        sys.executable,
-        "-m",
-        "mempalace.receipt_restart_probe",
-        "--phase",
+    command = _child_command(
         phase,
-        "--workspace",
-        str(workspace),
-        "--phase-artifact-dir",
-        str(artifact_dir),
-        "--phase-token",
-        phase_token,
-    ]
+        workspace=workspace,
+        artifact_dir=artifact_dir,
+        phase_token=phase_token,
+    )
     stdout_path = artifact_dir / f"phase-{phase}.stdout.log"
     stderr_path = artifact_dir / f"phase-{phase}.stderr.log"
     env = os.environ.copy()
@@ -528,7 +550,10 @@ def run_probe(
             dir=str(parent) if parent is not None else None,
         )
     )
-    phase_token = secrets.token_urlsafe(32)
+    # Hexadecimal, not URL-safe base64: the URL-safe alphabet contains "-",
+    # and a token starting with "-" was read as an option by the child's
+    # argument parser, which then refused to start. Same 256 bits of entropy.
+    phase_token = secrets.token_hex(32)
     _durable_json(
         workspace / WORKSPACE_MARKER,
         {
