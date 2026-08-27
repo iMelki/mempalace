@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "exclude": [],
+  "gates": [
+    {
+      "id": "conversation-continuation-context-gate",
+      "path": "mempalace/conversation_chunking.py",
+      "description": "Requires every continuation of an assistant answer to carry bounded, labelled parent-question context.",
+      "negativeFixture": "tests/fixtures/conversation_chunk_context_bypass_fixture.py",
+      "observedFailure": {
+        "date": "2026-08-20",
+        "command": ".venv/Scripts/python.exe -m pytest tests/fixtures/conversation_chunk_context_bypass_fixture.py -q",
+        "exitCode": 1,
+        "reason": "The fixture first proved that the context-envelope helper was bypassed, then failed because the gate admitted a continuation without inherited user context.",
+        "restoredPass": ".venv/Scripts/python.exe -m pytest tests/test_conversation_chunking.py::test_long_answer_continuations_keep_question_context_and_exact_payload -q; exit 0; 1 passed."
+      }
+    }
+  ]
+}

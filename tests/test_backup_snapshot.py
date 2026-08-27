@@ -10,12 +10,14 @@ import pytest
 
 from mempalace import backup_snapshot
 from mempalace.backup_snapshot import (
+    SNAPSHOT_STATUS_AWAITING_VERIFICATION,
     PalaceSnapshotError,
     canonical_identity_digest,
     clean_client_lease,
     read_catalog,
     stage_palace_snapshot,
     verify_snapshot_receipt,
+    verify_staged_snapshot,
 )
 from mempalace.palace import mine_palace_lock
 
@@ -313,6 +315,159 @@ def test_identity_digest_is_canonical_and_order_independent():
     left = canonical_identity_digest({"b": 2, "a": [1, {"y": 1, "x": 0}]})
     right = canonical_identity_digest({"a": [1, {"x": 0, "y": 1}], "b": 2})
     assert left == right
+
+
+# --------------------------------------------------------------------------
+# Deferred verification (memsys#423 follow-up): copy now, verify later in a
+# separately scheduled, separately timed lane.
+# --------------------------------------------------------------------------
+
+
+def test_defer_verification_copies_without_running_integrity_check_or_hashing(
+    palace, tmp_path, monkeypatch
+):
+    integrity_calls = []
+    hash_calls = []
+    monkeypatch.setattr(
+        backup_snapshot,
+        "_sqlite_integrity_check",
+        lambda *a, **k: integrity_calls.append(1) or "ok",
+    )
+    monkeypatch.setattr(
+        backup_snapshot,
+        "_hash_staged_tree",
+        lambda *a, **k: hash_calls.append(1) or ([], 0),
+    )
+
+    receipt = stage_palace_snapshot(
+        palace, tmp_path / "staging", use_maintenance_marker=False, verify=False
+    )
+
+    assert integrity_calls == []
+    assert hash_calls == []
+    assert receipt["status"] == SNAPSHOT_STATUS_AWAITING_VERIFICATION
+    assert receipt["leaseProven"] is True
+    assert receipt["snapshotConsistencyProven"] is False
+    assert receipt["contentIdentityProven"] is False
+    assert receipt["sqliteSnapshot"]["integrityCheck"] == "deferred"
+    assert receipt["contentIdentity"] is None
+    assert receipt["verification"]["status"] == "pending"
+
+    # The copy itself still happened: the staged tree is real and complete.
+    staged = Path(receipt["stagedRoot"])
+    assert (staged / "chroma.sqlite3").is_file()
+    assert (staged / SEGMENT_ID / "header.bin").is_file()
+
+    manifest_path = Path(receipt["manifestPath"])
+    assert manifest_path.is_file()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["schema"] == "mempalace-backup-snapshot-staging-manifest/v1"
+    assert isinstance(manifest["sourceCounts"], dict)
+
+    on_disk_receipt = json.loads(Path(receipt["receiptPath"]).read_text(encoding="utf-8"))
+    assert on_disk_receipt["status"] == SNAPSHOT_STATUS_AWAITING_VERIFICATION
+
+
+def test_verify_staged_snapshot_proves_a_previously_unverified_generation(palace, tmp_path):
+    staging = tmp_path / "staging"
+    copy_receipt = stage_palace_snapshot(
+        palace, staging, use_maintenance_marker=False, verify=False
+    )
+    assert copy_receipt["status"] == SNAPSHOT_STATUS_AWAITING_VERIFICATION
+
+    final_receipt = verify_staged_snapshot(staging)
+
+    assert final_receipt["status"] == "complete"
+    assert final_receipt["leaseProven"] is True
+    assert final_receipt["snapshotConsistencyProven"] is True
+    assert final_receipt["contentIdentityProven"] is True
+    assert final_receipt["sqliteSnapshot"]["integrityCheck"] == "ok"
+    assert final_receipt["contentIdentity"]["fileCount"] > 0
+    assert final_receipt["verification"]["status"] == "complete"
+
+    # The staged tree is fully and correctly hashed, matching an immediate
+    # (verify=True) run over an equivalent palace.
+    staged = Path(final_receipt["stagedRoot"])
+    on_disk = {p.relative_to(staged).as_posix() for p in staged.rglob("*") if p.is_file()}
+    hashed = {entry["relativePath"] for entry in final_receipt["contentIdentity"]["files"]}
+    assert hashed == on_disk
+
+    # The SAME on-disk receipt file was rewritten in place -- not a second file.
+    rewritten = json.loads(Path(final_receipt["receiptPath"]).read_text(encoding="utf-8"))
+    assert rewritten["status"] == "complete"
+    assert rewritten["contentIdentityDigest"] == final_receipt["contentIdentityDigest"]
+
+    # verify_snapshot_receipt's cheap structural re-check accepts the result.
+    structural = verify_snapshot_receipt(final_receipt["receiptPath"], verify_hashes=False)
+    assert structural["valid"] is True
+
+
+def test_verify_staged_snapshot_reports_a_failed_integrity_check_without_silently_accepting(
+    palace, tmp_path, monkeypatch
+):
+    staging = tmp_path / "staging"
+    stage_palace_snapshot(palace, staging, use_maintenance_marker=False, verify=False)
+
+    monkeypatch.setattr(
+        backup_snapshot,
+        "_sqlite_integrity_check",
+        lambda *a, **k: (_ for _ in ()).throw(
+            PalaceSnapshotError("snapshot SQLite integrity check did not return ok: corrupt")
+        ),
+    )
+
+    final_receipt = verify_staged_snapshot(staging)
+
+    # Failure is REPORTED, not silently accepted as proven.
+    assert final_receipt["status"] == "error"
+    assert final_receipt["snapshotConsistencyProven"] is False
+    assert final_receipt["contentIdentityProven"] is False
+    assert final_receipt["verification"]["status"] == "failed"
+    assert "corrupt" in final_receipt["verification"]["message"]
+
+    # The on-disk receipt reflects the failure -- the generation is never left
+    # claiming (or looking like) a proven backup.
+    on_disk = json.loads(Path(final_receipt["receiptPath"]).read_text(encoding="utf-8"))
+    assert on_disk["status"] == "error"
+    assert on_disk["snapshotConsistencyProven"] is False
+
+
+def test_verify_staged_snapshot_reports_a_content_identity_mismatch(palace, tmp_path):
+    staging = tmp_path / "staging"
+    copy_receipt = stage_palace_snapshot(
+        palace, staging, use_maintenance_marker=False, verify=False
+    )
+    manifest_path = Path(copy_receipt["manifestPath"])
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    # Force a mismatch against whatever the staged copy's own counts compute
+    # to (this fixture's minimal palace naturally produces {} for both sides).
+    manifest["sourceCounts"] = {
+        "drawers": {"segmentId": "fixture", "sqliteCount": 999999, "hnswCount": 999999}
+    }
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    final_receipt = verify_staged_snapshot(staging)
+
+    assert final_receipt["status"] == "error"
+    assert final_receipt["contentIdentityProven"] is False
+    assert "content identity failed" in final_receipt["verification"]["message"]
+
+
+def test_verify_staged_snapshot_requires_a_staging_manifest(tmp_path):
+    staging = tmp_path / "staging"
+    (staging / "palace").mkdir(parents=True)
+    with pytest.raises(PalaceSnapshotError, match="staging manifest is missing"):
+        verify_staged_snapshot(staging)
+
+
+def test_stage_palace_snapshot_defaults_to_verify_true(palace, tmp_path):
+    """Backward compatibility: every existing caller omits verify=..., and must
+    keep getting the original, fully-proven-inline behavior."""
+
+    receipt = stage_palace_snapshot(palace, tmp_path / "staging", use_maintenance_marker=False)
+    assert receipt["status"] == "complete"
+    assert receipt["snapshotConsistencyProven"] is True
+    assert receipt["contentIdentityProven"] is True
 
 
 def test_snapshot_never_mutates_the_source_palace(palace, tmp_path):

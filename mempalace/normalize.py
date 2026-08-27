@@ -18,8 +18,11 @@ No API key. No internet. Everything local.
 import json
 import os
 import re
+import unicodedata
 from pathlib import Path
 from typing import Optional
+
+from .conversation_chunking import ConversationTurn, ConversationUnit, privacy_safe_identity
 
 # Provenance footer appended to Slack transcript output so downstream consumers
 # know the speaker roles are positionally assigned, not verified.
@@ -177,7 +180,11 @@ def _try_normalize_json(content: str) -> Optional[str]:
     except json.JSONDecodeError:
         return None
 
-    for parser in (_try_claude_ai_json, _try_chatgpt_json, _try_slack_json):
+    # ChatGPT runs first: its signature (a ``mapping`` dict) is unambiguous,
+    # so it can never steal a Claude.ai or Slack file. The reverse is not
+    # true — _try_claude_ai_json walks *any* top-level list looking for
+    # role/sender keys, and a ChatGPT account export is a top-level list.
+    for parser in (_try_chatgpt_json, _try_claude_ai_json, _try_slack_json):
         normalized = parser(data)
         if normalized:
             return normalized
@@ -412,45 +419,603 @@ def _collect_claude_messages(items) -> list:
     return messages
 
 
-def _try_chatgpt_json(data) -> Optional[str]:
-    """ChatGPT conversations.json with mapping tree."""
-    if not isinstance(data, dict) or "mapping" not in data:
+# ─── ChatGPT export ──────────────────────────────────────────────────────
+#
+# Two shapes are seen in the wild and both are supported:
+#
+#   1. a single conversation object            {"title": ..., "mapping": {...}}
+#   2. an account-export shard: a LIST of      [{...}, {...}, ...]
+#      conversation objects (this is what
+#      "Export data" produces — conversations-000.json … -0NN.json)
+#
+# TREE TRAVERSAL — why we walk backwards.
+#
+# A ChatGPT conversation is a tree, not a list: editing a prompt or hitting
+# "regenerate" forks a new branch, and the old branch stays in the file. The
+# branch you actually see in the app is the one ending at ``current_node``.
+#
+# Measured against a real 1,023-conversation export (2026-06-02, 11 shards):
+#   - 24,356 mapping nodes total
+#   -      0 nodes carry a ``children`` key
+#   - 24,356 nodes carry a ``parent`` key
+#   -  1,023 conversations carry ``current_node``
+#
+# So the only reliable walk is: start at ``current_node`` and follow
+# ``parent`` back to the root, then reverse. Older exports that *do* carry
+# ``children`` still work — those lists are used to find leaves, and the
+# same backward walk then runs.
+#
+# TWO EXPLICIT SWITCHES (both default OFF — see docstrings for the reasoning):
+#
+#   all_branches    — index every branch in the tree, including prompts that
+#                     were edited away or answers that were regenerated over.
+#                     Env override: MEMPALACE_CHATGPT_ALL_BRANCHES=1
+#   include_thoughts— keep reasoning-model internals (``thoughts`` blocks and
+#                     "Thought for 8 seconds" recaps).
+#                     Env override: MEMPALACE_CHATGPT_INCLUDE_THOUGHTS=1
+
+_CHATGPT_ALL_BRANCHES_ENV = "MEMPALACE_CHATGPT_ALL_BRANCHES"
+_CHATGPT_INCLUDE_THOUGHTS_ENV = "MEMPALACE_CHATGPT_INCLUDE_THOUGHTS"
+
+# Author roles that represent a real speaker. ``system`` and ``tool`` are
+# platform plumbing (custom-instruction injections, browsing scaffolding) and
+# are dropped, matching the previous behavior.
+_CHATGPT_ROLES = {"user": "user", "human": "user", "assistant": "assistant"}
+
+# Non-text attachment kinds inside a ``multimodal_text`` message. These carry
+# no words, only a file pointer. We emit a short marker instead of dropping
+# the turn, so an image-only message stays visible in the transcript rather
+# than vanishing silently (silent vanishing is the exact failure this parser
+# is being fixed for).
+_CHATGPT_ASSET_LABELS = {
+    "image_asset_pointer": "image",
+    "audio_asset_pointer": "audio",
+    "video_container_asset_pointer": "video",
+    "real_time_user_audio_video_asset_pointer": "audio/video",
+}
+
+_CHATGPT_TITLE_MAX = 120
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    """Read a boolean switch from the environment. Unset → ``default``."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+def resolve_chatgpt_normalization_policy(
+    all_branches: Optional[bool] = None,
+    include_thoughts: Optional[bool] = None,
+) -> tuple[bool, bool]:
+    """Resolve environment-backed switches once for a receipt-bound mine run."""
+    if all_branches is None:
+        all_branches = _env_flag(_CHATGPT_ALL_BRANCHES_ENV, False)
+    if include_thoughts is None:
+        include_thoughts = _env_flag(_CHATGPT_INCLUDE_THOUGHTS_ENV, False)
+    return bool(all_branches), bool(include_thoughts)
+
+
+def _try_chatgpt_json(
+    data,
+    *,
+    all_branches: Optional[bool] = None,
+    include_thoughts: Optional[bool] = None,
+) -> Optional[str]:
+    """ChatGPT export — a single conversation object or a list of them.
+
+    Args:
+        data: Parsed JSON. Either one conversation dict carrying ``mapping``,
+            or a list of such dicts (the account-export shard shape).
+        all_branches: ``False`` (default) indexes only the live thread — the
+            branch ending at ``current_node``, i.e. what the conversation
+            looks like in the app today. ``True`` indexes every branch,
+            including prompts that were edited away and answers that were
+            regenerated over. Default off because those branches are drafts
+            the user replaced on purpose; indexing them makes search return
+            superseded text alongside the real answer. ``None`` reads the
+            ``MEMPALACE_CHATGPT_ALL_BRANCHES`` environment variable.
+        include_thoughts: ``False`` (default) drops reasoning-model internals
+            (``thoughts`` blocks and ``reasoning_recap`` chrome such as
+            "Thought for 8 seconds"). Default off because those are the
+            model's private scratchpad, not anything either party said, and
+            in the measured export they are 22% of all message nodes — enough
+            to swamp search results with drafts. ``None`` reads the
+            ``MEMPALACE_CHATGPT_INCLUDE_THOUGHTS`` environment variable.
+
+    Returns:
+        Transcript text, or ``None`` when the data is not a ChatGPT export or
+        yielded no usable conversation.
+    """
+    all_branches, include_thoughts = resolve_chatgpt_normalization_policy(
+        all_branches,
+        include_thoughts,
+    )
+
+    units = _chatgpt_conversation_units(
+        data,
+        all_branches=all_branches,
+        include_thoughts=include_thoughts,
+    )
+    if not units:
         return None
-    mapping = data["mapping"]
-    messages = []
-    # Find root: prefer node with parent=None AND no message (synthetic root)
-    root_id = None
-    fallback_root = None
+    transcripts = []
+    for unit in units:
+        messages = [(turn.role, turn.text) for turn in unit.turns]
+        transcript = _messages_to_transcript(messages)
+        if unit.title:
+            # A `---` line is a hard chunk boundary for convo_miner's
+            # exchange chunker, so one drawer can never straddle two
+            # different conversations.
+            transcript = f"--- conversation: {unit.title} ---\n{transcript}"
+        transcripts.append(transcript)
+
+    if not transcripts:
+        return None
+    return "\n".join(transcripts)
+
+
+def try_chatgpt_conversation_units(
+    content: str,
+    *,
+    all_branches: Optional[bool] = None,
+    include_thoughts: Optional[bool] = None,
+) -> Optional[list]:
+    """Return structured ChatGPT conversations without provider identifiers.
+
+    ``normalize()`` remains the compatibility text API. Conversation mining
+    uses this additive API so it can keep conversation/message identity and
+    context without reparsing flattened transcript markers.
+    """
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError:
+        return None
+    return _chatgpt_conversation_units(
+        data,
+        all_branches=all_branches,
+        include_thoughts=include_thoughts,
+    )
+
+
+def _chatgpt_conversation_units(
+    data,
+    *,
+    all_branches: Optional[bool] = None,
+    include_thoughts: Optional[bool] = None,
+) -> Optional[list]:
+    """Build isolated conversation units from one object or an export shard."""
+    all_branches, include_thoughts = resolve_chatgpt_normalization_policy(
+        all_branches,
+        include_thoughts,
+    )
+
+    conversations, is_export_shard = _chatgpt_conversations(data)
+    if not conversations:
+        return None
+    min_messages = 1 if is_export_shard else 2
+
+    units = []
+    for convo in conversations:
+        mapping = convo.get("mapping")
+        if not isinstance(mapping, dict) or not mapping:
+            continue
+        node_ids = _chatgpt_selected_node_ids(
+            convo,
+            all_branches=all_branches,
+        )
+        conversation_seed, identity_fallback = _chatgpt_conversation_seed(
+            convo,
+            node_ids,
+            include_thoughts=include_thoughts,
+        )
+        turns = _chatgpt_turns_from_nodes(
+            convo,
+            node_ids,
+            include_thoughts=include_thoughts,
+            conversation_seed=conversation_seed,
+        )
+        if len(turns) < min_messages:
+            continue
+
+        title = _chatgpt_title(convo)
+        root_id = node_ids[0] if node_ids and isinstance(node_ids[0], str) else ""
+        conversation_id_hash = privacy_safe_identity("chatgpt-conversation", conversation_seed)
+        root_id_hash = privacy_safe_identity(
+            "chatgpt-root",
+            f"{conversation_id_hash}\0{root_id}",
+        )
+        units.append(
+            ConversationUnit(
+                title=title,
+                conversation_id_hash=conversation_id_hash,
+                root_id_hash=root_id_hash,
+                identity_fallback=identity_fallback,
+                turns=tuple(turns),
+            )
+        )
+    return units or None
+
+
+def _chatgpt_conversations(data) -> tuple:
+    """Return ``(conversations, is_export_shard)``.
+
+    ``is_export_shard`` is True when the input was a top-level list, which
+    only the account export produces.
+    """
+    if isinstance(data, dict):
+        return ([data] if isinstance(data.get("mapping"), dict) else [], False)
+    if isinstance(data, list):
+        found = [c for c in data if isinstance(c, dict) and isinstance(c.get("mapping"), dict)]
+        return (found, bool(found))
+    return ([], False)
+
+
+def _chatgpt_title(convo: dict) -> str:
+    """Sanitized conversation title, or "" when absent.
+
+    Newlines and control characters are stripped so a crafted title cannot
+    forge transcript structure (extra ``>`` turns or ``---`` boundaries).
+    """
+    title = convo.get("title")
+    if not isinstance(title, str):
+        return ""
+    title = "".join(
+        " " if unicodedata.category(character) in {"Cc", "Zl", "Zp"} else character
+        for character in title
+    ).strip()
+    title = re.sub(r"-{3,}", "--", title)
+    if len(title) > _CHATGPT_TITLE_MAX:
+        title = title[:_CHATGPT_TITLE_MAX].rstrip() + "…"
+    return title
+
+
+def _chatgpt_node_sort_key(mapping: dict, node_id):
+    """Deterministic ordering key: message create_time, then node id."""
+    node = mapping.get(node_id) or {}
+    msg = node.get("message") if isinstance(node, dict) else None
+    raw = (msg or {}).get("create_time") if isinstance(msg, dict) else None
+    try:
+        created = float(raw)
+    except (TypeError, ValueError):
+        created = 0.0
+    return (created, str(node_id))
+
+
+def _chatgpt_child_index(mapping: dict) -> dict:
+    """node_id → list of child node ids.
+
+    Uses explicit ``children`` lists when the export has them (older format).
+    The 2026 export has none, so the index is rebuilt from every node's
+    ``parent`` pointer and ordered by create_time for determinism.
+    """
+    children = {node_id: [] for node_id in mapping}
+    explicit = False
     for node_id, node in mapping.items():
-        if node.get("parent") is None:
-            if node.get("message") is None:
-                root_id = node_id
-                break
-            elif fallback_root is None:
-                fallback_root = node_id
-    if not root_id:
-        root_id = fallback_root
-    if root_id:
-        current_id = root_id
-        visited = set()
-        while current_id and current_id not in visited:
-            visited.add(current_id)
-            node = mapping.get(current_id, {})
-            msg = node.get("message")
-            if msg:
-                role = msg.get("author", {}).get("role", "")
-                content = msg.get("content", {})
-                parts = content.get("parts", []) if isinstance(content, dict) else []
-                text = " ".join(str(p) for p in parts if isinstance(p, str) and p).strip()
-                if role == "user" and text:
-                    messages.append(("user", text))
-                elif role == "assistant" and text:
-                    messages.append(("assistant", text))
-            children = node.get("children", [])
-            current_id = children[0] if children else None
-    if len(messages) >= 2:
-        return _messages_to_transcript(messages)
-    return None
+        if not isinstance(node, dict):
+            continue
+        kids = node.get("children")
+        if isinstance(kids, list):
+            kept = [k for k in kids if k in mapping]
+            if kept:
+                explicit = True
+                children[node_id] = kept
+    if explicit:
+        return children
+
+    for node_id, node in mapping.items():
+        if not isinstance(node, dict):
+            continue
+        parent = node.get("parent")
+        if isinstance(parent, str) and parent in children and parent != node_id:
+            children[parent].append(node_id)
+    for node_id in children:
+        children[node_id].sort(key=lambda n: _chatgpt_node_sort_key(mapping, n))
+    return children
+
+
+def _chatgpt_live_chain(mapping: dict, current_node, child_index: dict) -> list:
+    """Node ids from root to ``current_node``, following ``parent`` backwards.
+
+    When ``current_node`` is missing or dangling, the newest leaf (no
+    children, latest create_time) is used as the endpoint instead.
+    """
+    start = current_node if isinstance(current_node, str) and current_node in mapping else None
+    if start is None:
+        leaves = [n for n in mapping if not child_index.get(n)]
+        if leaves:
+            start = max(leaves, key=lambda n: _chatgpt_node_sort_key(mapping, n))
+    chain = []
+    seen = set()
+    cursor = start
+    while isinstance(cursor, str) and cursor in mapping and cursor not in seen:
+        seen.add(cursor)
+        chain.append(cursor)
+        node = mapping.get(cursor)
+        cursor = node.get("parent") if isinstance(node, dict) else None
+    chain.reverse()
+    return chain
+
+
+def _chatgpt_all_nodes(mapping: dict, child_index: dict) -> list:
+    """Every node, depth-first from each root — includes abandoned branches."""
+    roots = []
+    for node_id, node in mapping.items():
+        parent = node.get("parent") if isinstance(node, dict) else None
+        if not isinstance(parent, str) or parent not in mapping:
+            roots.append(node_id)
+    roots.sort(key=lambda n: _chatgpt_node_sort_key(mapping, n))
+
+    ordered = []
+    seen = set()
+    stack = list(reversed(roots))
+    while stack:
+        node_id = stack.pop()
+        if node_id in seen:
+            continue
+        seen.add(node_id)
+        ordered.append(node_id)
+        for kid in reversed(child_index.get(node_id, [])):
+            if kid not in seen:
+                stack.append(kid)
+
+    # Anything unreachable (cycle, corrupt parent pointer) is still emitted —
+    # dropping nodes silently is the failure mode this parser is fixing.
+    for node_id in sorted(mapping, key=lambda n: _chatgpt_node_sort_key(mapping, n)):
+        if node_id not in seen:
+            seen.add(node_id)
+            ordered.append(node_id)
+    return ordered
+
+
+def _chatgpt_conversation_messages(
+    convo: dict, *, all_branches: bool, include_thoughts: bool
+) -> list:
+    """Extract ``[(role, text), ...]`` from one ChatGPT conversation."""
+    node_ids = _chatgpt_selected_node_ids(convo, all_branches=all_branches)
+    conversation_seed, _ = _chatgpt_conversation_seed(
+        convo,
+        node_ids,
+        include_thoughts=include_thoughts,
+    )
+    turns = _chatgpt_turns_from_nodes(
+        convo,
+        node_ids,
+        include_thoughts=include_thoughts,
+        conversation_seed=conversation_seed,
+    )
+    return [(turn.role, turn.text) for turn in turns]
+
+
+def _chatgpt_selected_node_ids(convo: dict, *, all_branches: bool) -> list:
+    """Return the selected node order while preserving the local branch policy."""
+    mapping = convo.get("mapping")
+    if not isinstance(mapping, dict) or not mapping:
+        return []
+    child_index = _chatgpt_child_index(mapping)
+    if all_branches:
+        return _chatgpt_all_nodes(mapping, child_index)
+    return _chatgpt_live_chain(mapping, convo.get("current_node"), child_index)
+
+
+def _chatgpt_turns_from_nodes(
+    convo: dict,
+    node_ids: list,
+    *,
+    include_thoughts: bool,
+    conversation_seed: str,
+) -> list:
+    """Extract speaker turns and replace raw node/message ids with hashes."""
+    mapping = convo.get("mapping")
+    if not isinstance(mapping, dict):
+        return []
+
+    records = []
+    title = _chatgpt_title(convo)
+    for turn_index, node_id in enumerate(node_ids):
+        node = mapping.get(node_id)
+        if not isinstance(node, dict):
+            continue
+        msg = node.get("message")
+        if not isinstance(msg, dict):
+            continue
+        author = msg.get("author")
+        raw_role = (author or {}).get("role") if isinstance(author, dict) else None
+        role = _CHATGPT_ROLES.get(str(raw_role or "").lower())
+        if role is None:
+            continue
+        text = _chatgpt_message_text(msg.get("content"), include_thoughts=include_thoughts)
+        if text:
+            raw_message_id = msg.get("id")
+            has_provider_message_id = isinstance(raw_message_id, str) and bool(raw_message_id)
+            identity_fallback = not has_provider_message_id
+            if has_provider_message_id:
+                message_seed = f"provider-message\0{raw_message_id}"
+            elif isinstance(node_id, str) and node_id:
+                message_seed = f"mapping-node-fallback\0{node_id}"
+            else:
+                message_seed = f"content-fallback\0{title}\0{turn_index}\0{role}\0{text}"
+            records.append(
+                (
+                    node_id,
+                    role,
+                    text,
+                    privacy_safe_identity(
+                        "chatgpt-message",
+                        f"{conversation_seed}\0{message_seed}",
+                    ),
+                    identity_fallback,
+                )
+            )
+
+    user_hashes = {
+        node_id: message_hash for node_id, role, _, message_hash, _ in records if role == "user"
+    }
+    return [
+        ConversationTurn(
+            role=role,
+            text=text,
+            message_id_hash=message_hash,
+            identity_fallback=identity_fallback,
+            context_message_id_hash=(
+                _chatgpt_parent_user_hash(mapping, node_id, user_hashes)
+                if role == "assistant"
+                else ""
+            ),
+        )
+        for node_id, role, text, message_hash, identity_fallback in records
+    ]
+
+
+def _chatgpt_conversation_seed(
+    convo: dict,
+    node_ids: list,
+    *,
+    include_thoughts: bool,
+) -> tuple:
+    """Return a stable conversation scope and whether provider id was absent."""
+    raw_id = convo.get("conversation_id") or convo.get("id")
+    if isinstance(raw_id, str) and raw_id:
+        return raw_id, False
+
+    mapping = convo.get("mapping") or {}
+    evidence = [_chatgpt_title(convo)]
+    for node_id in node_ids:
+        node = mapping.get(node_id)
+        msg = node.get("message") if isinstance(node, dict) else None
+        if not isinstance(msg, dict):
+            continue
+        role = (msg.get("author") or {}).get("role")
+        if role not in ("user", "assistant"):
+            continue
+        text = _chatgpt_message_text(msg.get("content"), include_thoughts=include_thoughts)
+        if text:
+            evidence.append(f"{node_id}\0{role}\0{text}")
+    return "fallback\0" + "\0".join(evidence), True
+
+
+def _chatgpt_parent_user_hash(mapping: dict, node_id, user_hashes: dict) -> str:
+    """Find the nearest selected user ancestor without trusting child order."""
+    seen = set()
+    cursor = node_id
+    while isinstance(cursor, str) and cursor in mapping and cursor not in seen:
+        seen.add(cursor)
+        node = mapping.get(cursor)
+        cursor = node.get("parent") if isinstance(node, dict) else None
+        if cursor in user_hashes:
+            return user_hashes[cursor]
+    return ""
+
+
+def _chatgpt_message_text(content, *, include_thoughts: bool) -> str:
+    """Text of one ChatGPT message, across every content kind in the export.
+
+    Measured content_type distribution in the 2026-06 export (23,333 message
+    nodes): text 14,642 · thoughts 4,379 · multimodal_text 3,594 ·
+    reasoning_recap 718. Only ``text`` was handled before this fix.
+    """
+    if isinstance(content, str):
+        return content.strip()
+    if not isinstance(content, dict):
+        return ""
+
+    content_type = str(content.get("content_type") or "")
+
+    if content_type in ("thoughts", "reasoning_recap"):
+        if not include_thoughts:
+            return ""
+        return _chatgpt_reasoning_text(content, content_type)
+
+    parts = content.get("parts")
+    if isinstance(parts, list):
+        # Words first, attachment markers after. A voice turn stores the
+        # asset pointer before the transcription, and _messages_to_transcript
+        # only puts the FIRST line behind the `> ` marker — so leaving the
+        # marker first would push the actual speech onto line 2, where the
+        # exchange chunker reads it as the assistant's reply.
+        words, markers = [], []
+        for part in parts:
+            piece = _chatgpt_part_text(part)
+            if not piece:
+                continue
+            (markers if _is_chatgpt_asset_marker(piece) else words).append(piece)
+        pieces = words + markers
+        if pieces:
+            # Keep a one-line message on one line so speaker attribution
+            # survives chunking; only genuinely multi-line bodies get
+            # newline-joined.
+            sep = "\n" if any("\n" in p for p in pieces) else " "
+            return sep.join(pieces).strip()
+
+    # Kinds that carry their body outside ``parts`` (code, execution output,
+    # tether quotes). Unknown future kinds land here too rather than vanishing.
+    for key in ("text", "result", "content"):
+        value = content.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _chatgpt_part_text(part) -> str:
+    """One element of a ``parts`` array — plain string, or an object.
+
+    In ``multimodal_text`` messages the objects are either an audio
+    transcription (real words, under ``text``) or an attachment pointer
+    (no words). Measured in the 2026-06 export: audio_transcription 3,143 ·
+    audio_asset_pointer 1,515 · real_time_user_audio_video_asset_pointer
+    1,514 · image_asset_pointer 658.
+    """
+    if isinstance(part, str):
+        return part.strip()
+    if not isinstance(part, dict):
+        return ""
+
+    text = part.get("text")
+    if isinstance(text, str) and text.strip():
+        return text.strip()
+
+    label = _CHATGPT_ASSET_LABELS.get(str(part.get("content_type") or ""))
+    if not label:
+        return ""
+    pointer = part.get("asset_pointer")
+    if isinstance(pointer, str) and pointer.strip():
+        pointer = re.sub(r"[\n\r\x00-\x1f\[\]]", "", pointer).strip()[:120]
+        if pointer:
+            return f"[{label}: {pointer}]"
+    return f"[{label}]"
+
+
+def _is_chatgpt_asset_marker(piece: str) -> bool:
+    """True for a marker this module generated for a wordless attachment."""
+    if not piece.startswith("[") or not piece.endswith("]") or "\n" in piece:
+        return False
+    inner = piece[1:-1].split(":", 1)[0].strip()
+    return inner in _CHATGPT_ASSET_LABELS.values()
+
+
+def _chatgpt_reasoning_text(content: dict, content_type: str) -> str:
+    """Reasoning-model internals, only reached when include_thoughts is on."""
+    if content_type == "reasoning_recap":
+        value = content.get("content")
+        if isinstance(value, str) and value.strip():
+            return f"[reasoning] {value.strip()}"
+        return ""
+
+    lines = []
+    for thought in content.get("thoughts") or []:
+        if not isinstance(thought, dict):
+            continue
+        pieces = [
+            v.strip()
+            for v in (thought.get("summary"), thought.get("content"))
+            if isinstance(v, str) and v.strip()
+        ]
+        if pieces:
+            lines.append(" — ".join(pieces))
+    if not lines:
+        return ""
+    return "[thoughts] " + "\n".join(lines)
 
 
 def _try_slack_json(data) -> Optional[str]:

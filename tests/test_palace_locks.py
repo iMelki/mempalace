@@ -43,24 +43,77 @@ def _get_mp_context():
 # ---------------------------------------------------------------------------
 
 
-def _hold_lock(palace_path: str, ready_flag: str, release_flag: str) -> int:
-    """Acquire mine_palace_lock, signal readiness, wait for release flag.
+# On Windows a child process is started with "spawn": a brand new interpreter
+# that has to re-import mempalace, and therefore chromadb, before it can take
+# the lock. On an idle machine that takes a couple of seconds. Inside a loaded
+# full-suite run it can take considerably longer, and the previous five-second
+# allowance was measured expiring there while passing every time this test was
+# run on its own — the classic "only fails in the full suite" flake, with no
+# shared state involved. These budgets cover interpreter startup, which is
+# setup and not the behaviour under test, so they are deliberately generous.
+# A real failure still reports quickly because the waits end the moment the
+# child process dies.
+_CHILD_STARTUP_BUDGET_SECONDS = 60.0
+# How long the child keeps holding the lock while waiting to be released.
+# Must comfortably outlast the parent's own work, or the child would let go
+# early and the parent's "second acquire is rejected" assertion would fail for
+# a reason that has nothing to do with locking.
+_CHILD_HOLD_BUDGET_SECONDS = 120.0
+_HOLD_TIMED_OUT_EXIT_CODE = 3
 
-    Returns 0 if we acquired the lock, 1 if MineAlreadyRunning was raised.
-    Runs in a child process for true cross-process locking semantics.
+
+def _hold_lock(palace_path: str, ready_flag: str, release_flag: str) -> None:
+    """Acquire mine_palace_lock, signal readiness, wait for the release flag.
+
+    Runs in a child process so the locking is genuinely cross-process. The
+    result is reported through the process exit code, because a value returned
+    from a multiprocessing target is discarded — a plain ``return 1`` here
+    would still leave ``exitcode`` at 0 and the parent's check would pass no
+    matter what happened.
+
+    Exit codes: 0 acquired and released on request, 1 rejected because another
+    holder had the palace, 3 gave up waiting to be released.
     """
     try:
         with mine_palace_lock(palace_path):
             # Tell the parent we hold the lock
             open(ready_flag, "w").close()
-            # Wait until parent tells us to release
-            for _ in range(500):
+            # Wait until the parent tells us to release
+            deadline = time.monotonic() + _CHILD_HOLD_BUDGET_SECONDS
+            while time.monotonic() < deadline:
                 if os.path.exists(release_flag):
-                    return 0
+                    sys.exit(0)
                 time.sleep(0.01)
-            return 0
+            sys.exit(_HOLD_TIMED_OUT_EXIT_CODE)
     except MineAlreadyRunning:
-        return 1
+        sys.exit(1)
+
+
+def _wait_for_child_flag(flag_path: str, process, *, description: str) -> None:
+    """Wait for a child process to create ``flag_path``.
+
+    Ends immediately if the child dies first, so a genuine failure surfaces the
+    child's exit code straight away instead of consuming the whole budget.
+    """
+    deadline = time.monotonic() + _CHILD_STARTUP_BUDGET_SECONDS
+    while True:
+        if os.path.exists(flag_path):
+            return
+        if not process.is_alive():
+            # The child may have written the flag and exited between the two
+            # checks above, so look once more before calling it a failure.
+            if os.path.exists(flag_path):
+                return
+            raise AssertionError(
+                f"{description}: the child process exited with code "
+                f"{process.exitcode} without signalling readiness"
+            )
+        if time.monotonic() >= deadline:
+            raise AssertionError(
+                f"{description}: the child process did not signal readiness "
+                f"within {_CHILD_STARTUP_BUDGET_SECONDS:.0f}s"
+            )
+        time.sleep(0.01)
 
 
 # ---------------------------------------------------------------------------
@@ -260,12 +313,7 @@ def test_same_palace_serializes_across_processes(tmp_path, monkeypatch):
     holder = ctx.Process(target=_hold_lock, args=(palace, ready, release))
     holder.start()
     try:
-        # Wait for the holder to acquire
-        for _ in range(500):
-            if os.path.exists(ready):
-                break
-            time.sleep(0.01)
-        assert os.path.exists(ready), "holder failed to acquire lock in time"
+        _wait_for_child_flag(ready, holder, description="holder failed to acquire the lock")
 
         # From the parent, we must not be able to acquire the same palace lock
         with pytest.raises(MineAlreadyRunning):
@@ -273,8 +321,31 @@ def test_same_palace_serializes_across_processes(tmp_path, monkeypatch):
                 pytest.fail("second acquire of same palace should have raised")
     finally:
         open(release, "w").close()
-        holder.join(timeout=5)
+        holder.join(timeout=_CHILD_STARTUP_BUDGET_SECONDS)
         assert holder.exitcode == 0
+
+
+def test_a_rejected_child_reports_a_nonzero_exit_code(tmp_path, monkeypatch):
+    """The child's outcome has to actually reach the parent.
+
+    A value returned from a multiprocessing target is thrown away, so the
+    previous helper's ``return 1`` left ``exitcode`` at 0 and the parent's
+    ``assert holder.exitcode == 0`` passed even when the child had been
+    rejected outright. This proves the exit code now carries the result.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    palace = str(tmp_path / "palace")
+    ready = str(tmp_path / "ready")
+    release = str(tmp_path / "release")
+
+    ctx = _get_mp_context()
+    with mine_palace_lock(palace):
+        loser = ctx.Process(target=_hold_lock, args=(palace, ready, release))
+        loser.start()
+        loser.join(timeout=_CHILD_STARTUP_BUDGET_SECONDS)
+
+    assert loser.exitcode == 1
+    assert not os.path.exists(ready)
 
 
 def test_different_palaces_dont_conflict(tmp_path, monkeypatch):
@@ -289,18 +360,15 @@ def test_different_palaces_dont_conflict(tmp_path, monkeypatch):
     holder = ctx.Process(target=_hold_lock, args=(palace_a, ready, release))
     holder.start()
     try:
-        for _ in range(500):
-            if os.path.exists(ready):
-                break
-            time.sleep(0.01)
-        assert os.path.exists(ready), "holder failed to acquire lock in time"
+        _wait_for_child_flag(ready, holder, description="holder failed to acquire the lock")
 
         # Different palace — must succeed even while palace_a is held
         with mine_palace_lock(palace_b):
             pass  # no exception expected
     finally:
         open(release, "w").close()
-        holder.join(timeout=5)
+        holder.join(timeout=_CHILD_STARTUP_BUDGET_SECONDS)
+        assert holder.exitcode == 0
 
 
 def test_palace_path_is_normalized(tmp_path, monkeypatch):

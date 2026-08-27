@@ -19,7 +19,20 @@ from typing import Optional
 
 from chromadb.errors import NotFoundError as _ChromaNotFoundError
 
-from .normalize import normalize
+from .conversation_chunking import (
+    CONVERSATION_CHUNK_BUDGET_METHOD,
+    CONVERSATION_CHUNK_METADATA_FIELDS,
+    CONVERSATION_CHUNK_SCHEMA_VERSION,
+    chunk_conversation_units,
+    conversation_units_text,
+    privacy_safe_identity,
+    split_text_bounded,
+)
+from .normalize import (
+    normalize,
+    resolve_chatgpt_normalization_policy,
+    try_chatgpt_conversation_units,
+)
 from .palace import (
     NORMALIZE_VERSION,
     SKIP_DIRS,
@@ -134,92 +147,57 @@ def _register_file(
 # =============================================================================
 
 
-def chunk_exchanges(content: str) -> list:
+def chunk_exchanges(
+    content: str,
+    chunk_size: int = CHUNK_SIZE,
+    min_chunk_size: int = MIN_CHUNK_SIZE,
+) -> list:
     """
     Chunk by exchange pair: one > turn + AI response = one unit.
     Falls back to paragraph chunking if no > markers.
     """
-    lines = content.split("\n")
+    if len(content.strip()) <= min_chunk_size:
+        return []
+
+    lines = content.splitlines(keepends=True)
     quote_lines = sum(1 for line in lines if line.strip().startswith(">"))
 
     if quote_lines >= 3:
-        return _chunk_by_exchange(lines)
+        return _chunk_by_exchange(lines, chunk_size)
     else:
-        return _chunk_by_paragraph(content)
+        return _chunk_by_paragraph(content, chunk_size)
 
 
-def _chunk_by_exchange(lines: list) -> list:
-    """One user turn (>) + the AI response that follows = one or more chunks.
-
-    The full AI response is preserved verbatim.  When the combined
-    user-turn + response exceeds CHUNK_SIZE the response is split across
-    consecutive drawers so nothing is silently discarded.
-    """
+def _chunk_by_exchange(lines: list, chunk_size: int) -> list:
+    """Keep legacy exchange boundaries while preserving every source byte."""
     chunks = []
-    i = 0
-
-    while i < len(lines):
-        line = lines[i]
-        if line.strip().startswith(">"):
-            user_turn = line.strip()
-            i += 1
-
-            ai_lines = []
-            while i < len(lines):
-                next_line = lines[i]
-                if next_line.strip().startswith(">") or next_line.strip().startswith("---"):
-                    break
-                if next_line.strip():
-                    ai_lines.append(next_line.strip())
-                i += 1
-
-            ai_response = " ".join(ai_lines)
-            content = f"{user_turn}\n{ai_response}" if ai_response else user_turn
-
-            # Split into multiple drawers when the exchange exceeds CHUNK_SIZE
-            if len(content) > CHUNK_SIZE:
-                # First chunk: user turn + as much response as fits
-                first_part = content[:CHUNK_SIZE]
-                if len(first_part.strip()) > MIN_CHUNK_SIZE:
-                    chunks.append({"content": first_part, "chunk_index": len(chunks)})
-                # Remaining response in CHUNK_SIZE-sized continuation drawers
-                remainder = content[CHUNK_SIZE:]
-                while remainder:
-                    part = remainder[:CHUNK_SIZE]
-                    remainder = remainder[CHUNK_SIZE:]
-                    if len(part.strip()) > MIN_CHUNK_SIZE:
-                        chunks.append({"content": part, "chunk_index": len(chunks)})
-            elif len(content.strip()) > MIN_CHUNK_SIZE:
-                chunks.append(
-                    {
-                        "content": content,
-                        "chunk_index": len(chunks),
-                    }
-                )
-        else:
-            i += 1
+    segment = []
+    for line in lines:
+        if line.strip().startswith(">") and segment:
+            _emit_bounded(chunks, "".join(segment), chunk_size)
+            segment = []
+        segment.append(line)
+    _emit_bounded(chunks, "".join(segment), chunk_size)
 
     return chunks
 
 
-def _chunk_by_paragraph(content: str) -> list:
-    """Fallback: chunk by paragraph breaks."""
+def _emit_bounded(
+    chunks: list,
+    content: str,
+    chunk_size: int,
+) -> None:
+    """Append exact ordered slices; the caller applies the noise floor once."""
+    if not content:
+        return
+    for piece in split_text_bounded(content, chunk_size):
+        chunks.append({"content": piece, "chunk_index": len(chunks)})
+
+
+def _chunk_by_paragraph(content: str, chunk_size: int) -> list:
+    """Fallback: preserve arbitrary text while enforcing the drawer bound."""
     chunks = []
-    paragraphs = [p.strip() for p in content.split("\n\n") if p.strip()]
-
-    # If no paragraph breaks and long content, chunk by line groups
-    if len(paragraphs) <= 1 and content.count("\n") > 20:
-        lines = content.split("\n")
-        for i in range(0, len(lines), 25):
-            group = "\n".join(lines[i : i + 25]).strip()
-            if len(group) > MIN_CHUNK_SIZE:
-                chunks.append({"content": group, "chunk_index": len(chunks)})
-        return chunks
-
-    for para in paragraphs:
-        if len(para) > MIN_CHUNK_SIZE:
-            chunks.append({"content": para, "chunk_index": len(chunks)})
-
+    _emit_bounded(chunks, content, chunk_size)
     return chunks
 
 
@@ -454,23 +432,35 @@ def _file_chunks_locked(
                     )
                     if extract_mode == "general":
                         room_counts_delta[chunk_room] += 1
-                    drawer_id = f"drawer_{wing}_{chunk_room}_{hashlib.sha256((source_file + str(chunk['chunk_index'])).encode()).hexdigest()[:24]}"
+                    logical_chunk_id = chunk.get("logical_chunk_id")
+                    identity_component = (
+                        logical_chunk_id
+                        if isinstance(logical_chunk_id, str) and logical_chunk_id
+                        else str(chunk["chunk_index"])
+                    )
+                    drawer_id = (
+                        f"drawer_{wing}_{chunk_room}_"
+                        f"{hashlib.sha256((source_file + identity_component).encode()).hexdigest()[:24]}"
+                    )
                     batch_docs.append(chunk["content"])
                     batch_ids.append(drawer_id)
-                    batch_metas.append(
-                        {
-                            "wing": wing,
-                            "room": chunk_room,
-                            "hall": _detect_hall_cached(chunk["content"]),
-                            "source_file": source_file,
-                            "chunk_index": chunk["chunk_index"],
-                            "added_by": agent,
-                            "filed_at": filed_at,
-                            "ingest_mode": "convos",
-                            "extract_mode": extract_mode,
-                            "normalize_version": NORMALIZE_VERSION,
-                        }
-                    )
+                    metadata = {
+                        "wing": wing,
+                        "room": chunk_room,
+                        "hall": _detect_hall_cached(chunk["content"]),
+                        "source_file": source_file,
+                        "chunk_index": chunk["chunk_index"],
+                        "added_by": agent,
+                        "filed_at": filed_at,
+                        "ingest_mode": "convos",
+                        "extract_mode": extract_mode,
+                        "normalize_version": NORMALIZE_VERSION,
+                    }
+                    for field in CONVERSATION_CHUNK_METADATA_FIELDS:
+                        value = chunk.get(field)
+                        if isinstance(value, (str, int, float, bool)):
+                            metadata[field] = value
+                    batch_metas.append(metadata)
                 batch = {
                     "documents": batch_docs,
                     "ids": batch_ids,
@@ -581,6 +571,8 @@ def _process_conversation_file(
     total_files: int,
     receipt_store: ReceiptStore = None,
     receipt_run: ManagedRunIdentity = None,
+    chatgpt_all_branches: Optional[bool] = None,
+    chatgpt_include_thoughts: Optional[bool] = None,
 ) -> tuple[int, dict, bool]:
     """Lock before reading so a waiting invocation cannot retain stale bytes."""
     require_managed_receipts(
@@ -588,6 +580,10 @@ def _process_conversation_file(
         receipt_store=receipt_store,
         receipt_run=receipt_run,
         operation="conversation _process_conversation_file",
+    )
+    chatgpt_all_branches, chatgpt_include_thoughts = resolve_chatgpt_normalization_policy(
+        chatgpt_all_branches,
+        chatgpt_include_thoughts,
     )
     raw_source_alias = os.fspath(filepath)
     source_file = canonical_source_locator(filepath, local_path=True)
@@ -611,6 +607,8 @@ def _process_conversation_file(
                 receipt_store=receipt_store,
                 receipt_run=receipt_run,
                 source_aliases=(raw_source_alias,),
+                chatgpt_all_branches=chatgpt_all_branches,
+                chatgpt_include_thoughts=chatgpt_include_thoughts,
             )
 
 
@@ -627,6 +625,8 @@ def _process_conversation_file_locked(
     receipt_store: ReceiptStore = None,
     receipt_run: ManagedRunIdentity = None,
     source_aliases: tuple[str, ...] = (),
+    chatgpt_all_branches: Optional[bool] = None,
+    chatgpt_include_thoughts: Optional[bool] = None,
 ) -> tuple[int, dict, bool]:
     """Process one conversation source and close its receipt terminally."""
     require_managed_receipts(
@@ -635,13 +635,20 @@ def _process_conversation_file_locked(
         receipt_run=receipt_run,
         operation="conversation _process_conversation_file_locked",
     )
+    chatgpt_all_branches, chatgpt_include_thoughts = resolve_chatgpt_normalization_policy(
+        chatgpt_all_branches,
+        chatgpt_include_thoughts,
+    )
     source_file = str(filepath)
     receipt = None
+    try:
+        raw_content = filepath.read_bytes()
+    except OSError:
+        return 0, {}, False
+    if len(raw_content) > MAX_FILE_SIZE:
+        return 0, {}, False
+
     if not dry_run and receipt_store is not None and receipt_run is not None:
-        try:
-            raw_content = filepath.read_bytes()
-        except OSError:
-            return 0, {}, False
         source_digest = sha256_bytes(raw_content)
         receipt_store.reconcile_pending_rewrites(
             {"drawers": collection},
@@ -654,7 +661,9 @@ def _process_conversation_file_locked(
             source_version_hash=source_digest,
             source_size_bytes=len(raw_content),
             adapter_name="conversations",
-            adapter_version=str(NORMALIZE_VERSION),
+            adapter_version=(
+                f"{NORMALIZE_VERSION}:conversation-chunk-{CONVERSATION_CHUNK_SCHEMA_VERSION}"
+            ),
             local_path=True,
         )
         if _reuse_verified_receipt(
@@ -667,10 +676,36 @@ def _process_conversation_file_locked(
 
     try:
         try:
-            content = normalize(
-                source_file,
-                source_bytes=raw_content if receipt is not None else None,
+            decoded_content = raw_content.decode("utf-8", errors="replace")
+            decoded_content = decoded_content.replace("\r\n", "\n").replace("\r", "\n")
+            structured_units = (
+                try_chatgpt_conversation_units(
+                    decoded_content,
+                    all_branches=chatgpt_all_branches,
+                    include_thoughts=chatgpt_include_thoughts,
+                )
+                if extract_mode != "general"
+                else None
             )
+            if structured_units:
+                content = conversation_units_text(structured_units)
+                source_identity_hash = (
+                    receipt.source["identity"]
+                    if receipt is not None
+                    else privacy_safe_identity(
+                        "conversation-source",
+                        canonical_source_locator(source_file, local_path=True),
+                    )
+                )
+                chunks = chunk_conversation_units(
+                    structured_units,
+                    source_identity_hash=source_identity_hash,
+                    chunk_size=CHUNK_SIZE,
+                    min_chunk_size=MIN_CHUNK_SIZE,
+                )
+            else:
+                content = normalize(source_file, source_bytes=raw_content)
+                chunks = None
         except Exception as exc:
             if receipt is not None:
                 receipt.fail(exc, stage="normalize")
@@ -695,7 +730,7 @@ def _process_conversation_file_locked(
             from .general_extractor import extract_memories
 
             chunks = extract_memories(content)
-        else:
+        elif chunks is None:
             chunks = chunk_exchanges(content)
 
         if not chunks:
@@ -929,6 +964,8 @@ def _mine_convos_impl(
         "general"  — general extractor: decisions, preferences, milestones, problems, emotions
     """
 
+    chatgpt_all_branches, chatgpt_include_thoughts = resolve_chatgpt_normalization_policy()
+
     convo_path = Path(convo_dir).expanduser().resolve()
     if not wing:
         from .config import normalize_wing_name
@@ -978,6 +1015,11 @@ def _mine_convos_impl(
                 "extract_mode": extract_mode,
                 "normalize_version": NORMALIZE_VERSION,
                 "chunk_size": CHUNK_SIZE,
+                "min_chunk_size": MIN_CHUNK_SIZE,
+                "conversation_chunk_schema_version": CONVERSATION_CHUNK_SCHEMA_VERSION,
+                "conversation_chunk_budget_method": CONVERSATION_CHUNK_BUDGET_METHOD,
+                "chatgpt_all_branches": chatgpt_all_branches,
+                "chatgpt_include_thoughts": chatgpt_include_thoughts,
                 "managed_output_collections": ["drawers"],
                 "limit": limit,
             },
@@ -1002,6 +1044,8 @@ def _mine_convos_impl(
             total_files=len(files),
             receipt_store=receipt_store,
             receipt_run=receipt_run,
+            chatgpt_all_branches=chatgpt_all_branches,
+            chatgpt_include_thoughts=chatgpt_include_thoughts,
         )
         if skipped:
             files_skipped += 1

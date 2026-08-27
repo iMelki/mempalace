@@ -999,3 +999,208 @@ def test_get_collection_applies_retrofit_on_existing_palace(tmp_path):
     )
 
     assert _effective_hnsw_num_threads(wrapper._collection) == 1
+
+
+# ── Palace reopen recovery and ChromaDB reference hygiene (wave 10) ─────────
+#
+# ChromaDB keeps one shared "system" per palace folder and reference-counts it:
+# every PersistentClient takes a reference and only close() gives one back.
+# _client() replaces its cached client whenever the database file is written,
+# so a replacement that is never closed leaks a reference forever and stops
+# close()/reset() from ever releasing the folder. Separately, a live palace can
+# lose the ability to read a stored row's vector while still reading that row's
+# document and metadata; reopening the palace restores it.
+
+
+class _ReopenableClient:
+    """Minimal client stand-in that hands out named collection objects."""
+
+    def __init__(self, tag):
+        self.tag = tag
+        self.close_calls = 0
+
+    def get_collection(self, name, **_kwargs):
+        return f"{self.tag}:{name}"
+
+    def close(self):
+        self.close_calls += 1
+
+
+def test_a_superseded_client_is_released_only_after_its_replacement_exists(tmp_path, monkeypatch):
+    """Order matters: closing first would drop the folder's reference count to
+    zero and ChromaDB would shut the shared system down under collection
+    handles the caller is still using."""
+    backend = ChromaBackend()
+    palace_path = str(tmp_path / "palace")
+    os.makedirs(palace_path)
+    Path(palace_path, "chroma.sqlite3").write_bytes(b"")
+
+    first = _ClosableClient()
+    backend._clients[palace_path] = first
+    # Freshness deliberately stale so the next call decides to replace.
+    backend._freshness[palace_path] = (1, 1.0)
+
+    events = []
+
+    original_close = ChromaBackend._close_client
+
+    def _record_close(client):
+        events.append(("close", id(client)))
+        original_close(client)
+
+    def _fake_persistent_client(path):
+        events.append(("build", path))
+        return _ClosableClient()
+
+    monkeypatch.setattr(ChromaBackend, "_close_client", staticmethod(_record_close))
+    monkeypatch.setattr(
+        "mempalace.backends.chroma.chromadb.PersistentClient",
+        lambda path: _fake_persistent_client(path),
+    )
+
+    replacement = backend._client(palace_path)
+
+    assert replacement is not first
+    assert first.close_calls == 1
+    assert [kind for kind, _ in events] == ["build", "close"]
+
+
+def test_reopen_palace_view_repoints_every_handle_for_that_palace(tmp_path, monkeypatch):
+    backend = ChromaBackend()
+    palace_path = str(tmp_path / "palace")
+    os.makedirs(palace_path)
+    # A database file has to exist, otherwise the ordinary "palace was rebuilt
+    # and its database is gone" branch replaces the client between the two
+    # get_collection calls and the test would not be exercising the reopen.
+    Path(palace_path, "chroma.sqlite3").write_bytes(b"")
+
+    built = []
+
+    def _fake_persistent_client(path):
+        client = _ReopenableClient(f"client{len(built)}")
+        built.append(client)
+        return client
+
+    monkeypatch.setattr(
+        "mempalace.backends.chroma.chromadb.PersistentClient",
+        lambda path: _fake_persistent_client(path),
+    )
+    monkeypatch.setattr(ChromaBackend, "_resolve_embedding_function", staticmethod(lambda: None))
+    monkeypatch.setattr("mempalace.backends.chroma._pin_hnsw_threads", lambda _collection: None)
+
+    drawers = backend.get_collection(palace_path, "drawers")
+    closets = backend.get_collection(palace_path, "closets")
+    assert drawers._collection == "client0:drawers"
+    assert closets._collection == "client0:closets"
+
+    assert backend.reopen_palace_view(palace_path) is True
+
+    # Both handles now point into the reopened palace, not just the one that
+    # happened to hit the fault.
+    assert drawers._collection == "client1:drawers"
+    assert closets._collection == "client1:closets"
+    assert built[0].close_calls == 1
+
+
+def test_reopen_palace_view_declines_when_there_is_nothing_to_reopen(tmp_path):
+    backend = ChromaBackend()
+    assert backend.reopen_palace_view(str(tmp_path / "never-opened")) is False
+
+
+def test_unreadable_vector_view_recovers_by_reopening_the_palace(tmp_path, monkeypatch):
+    """The recovery is targeted, not a blind retry: one reopen, then one reread."""
+    backend = ChromaBackend()
+    palace_path = str(tmp_path / "palace")
+    os.makedirs(palace_path)
+
+    class _BrokenThenFixed:
+        """First view cannot serve vectors; the view after a reopen can."""
+
+        def __init__(self, broken):
+            self.broken = broken
+            self.get_calls = 0
+
+        def get(self, **kwargs):
+            self.get_calls += 1
+            if self.broken and "embeddings" in (kwargs.get("include") or []):
+                raise RuntimeError(
+                    "Error executing plan: Internal error: "
+                    "Error creating hnsw segment reader: Nothing found on disk"
+                )
+            return {"ids": ["row"], "embeddings": [[0.5, 0.5]]}
+
+    views = {}
+
+    class _Client:
+        def __init__(self, tag):
+            self.tag = tag
+
+        def get_collection(self, name, **_kwargs):
+            view = views.setdefault((self.tag, name), _BrokenThenFixed(self.tag == "first"))
+            return view
+
+        def close(self):
+            pass
+
+    tags = iter(["first", "second"])
+    monkeypatch.setattr(
+        "mempalace.backends.chroma.chromadb.PersistentClient",
+        lambda path: _Client(next(tags)),
+    )
+    monkeypatch.setattr(ChromaBackend, "_resolve_embedding_function", staticmethod(lambda: None))
+    monkeypatch.setattr("mempalace.backends.chroma._pin_hnsw_threads", lambda _collection: None)
+
+    handle = backend.get_collection(palace_path, "drawers")
+    resolved = handle.get_exact_embeddings(["row"])
+
+    assert resolved == {"row": (0.5, 0.5)}
+    assert views[("first", "drawers")].get_calls == 1
+    assert views[("second", "drawers")].get_calls == 1
+
+
+def test_a_handle_with_no_origin_still_reports_the_original_visibility_error():
+    class _AlwaysBroken:
+        def get(self, **_kwargs):
+            raise RuntimeError("Error creating hnsw segment reader: Nothing found on disk")
+
+    handle = ChromaCollection(_AlwaysBroken())
+    with pytest.raises(EmbeddingVisibilityError):
+        handle.get_exact_embeddings(["row"])
+
+
+def test_repeated_writes_do_not_accumulate_chroma_clients(tmp_path, monkeypatch):
+    """One live client per palace, however many times the database is written.
+
+    Before this was fixed a full suite run ended holding 110 live clients, and
+    a single two-pass diary ingest built three per palace and released none.
+    """
+    backend = ChromaBackend()
+    palace_path = str(tmp_path / "palace")
+    os.makedirs(palace_path)
+
+    live = []
+
+    class _Counted(_ClosableClient):
+        def __init__(self):
+            super().__init__()
+            live.append(self)
+
+        def close(self):
+            super().close()
+            live.remove(self)
+
+    Path(palace_path, "chroma.sqlite3").write_bytes(b"")
+    monkeypatch.setattr(
+        "mempalace.backends.chroma.chromadb.PersistentClient",
+        lambda path: _Counted(),
+    )
+
+    for step in range(6):
+        backend._client(palace_path)
+        # Each loop looks like another write moving the database's timestamp.
+        backend._freshness[palace_path] = (1, float(step))
+
+    assert len(live) == 1
+
+    backend.reset()
+    assert live == []

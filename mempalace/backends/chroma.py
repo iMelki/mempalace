@@ -4,6 +4,8 @@ import datetime as _dt
 import logging
 import os
 import sqlite3
+import weakref
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
@@ -711,10 +713,33 @@ def _as_list(v: Any) -> list:
     return [v]
 
 
+@dataclass(frozen=True)
+class _CollectionOrigin:
+    """Everything needed to fetch this collection again after a palace reopen."""
+
+    backend: Any  # weakref.ref[ChromaBackend]; weak so a handle never pins a backend
+    palace_path: str
+    collection_name: str
+    ef_kwargs: dict = field(default_factory=dict)
+
+
 class ChromaCollection(BaseCollection):
     """Thin adapter translating ChromaDB dict returns into typed results."""
 
-    def __init__(self, collection):
+    def __init__(self, collection, *, origin=None):
+        self._collection = collection
+        # Where this handle came from, when the backend created it: enough to
+        # fetch an equivalent handle again after the palace is reopened. None
+        # for handles built directly (legacy callers and unit tests), which
+        # simply means the recovery path on get_exact_embeddings is unavailable.
+        self._origin = origin
+
+    def _rebind(self, client) -> None:
+        """Point this handle at the same collection inside a reopened palace."""
+        if self._origin is None:
+            raise RuntimeError("this collection handle cannot be rebound")
+        collection = client.get_collection(self._origin.collection_name, **self._origin.ef_kwargs)
+        _pin_hnsw_threads(collection)
         self._collection = collection
 
     # ------------------------------------------------------------------
@@ -892,7 +917,32 @@ class ChromaCollection(BaseCollection):
         )
 
     def get_exact_embeddings(self, ids: list[str]) -> dict[str, tuple[float, ...]]:
-        """Read exact vectors through Chroma's supported collection API."""
+        """Read exact vectors through Chroma's supported collection API.
+
+        ChromaDB intermittently loses its ability to serve a stored row's
+        vector while still serving that row's document and metadata, reporting
+        ``Error creating hnsw segment reader: Nothing found on disk``. Measured
+        on this machine: roughly one occurrence per hundred short two-pass
+        ingests. The row is not damaged — a brand new process reads the vector
+        without trouble, and so does this process once ChromaDB has genuinely
+        released and reopened that palace.
+
+        Waiting cannot fix it, because every retry re-reads the same broken
+        view; the caller's bounded retry was measured spending its whole
+        twenty-second budget on eighty-plus instant failures. So this method
+        reopens the palace once and reads again, which is a recovery from a
+        specific, self-reported, proven-recoverable fault — not a blind retry.
+        If the reopen is unavailable or does not help, the original error is
+        raised exactly as before.
+        """
+        try:
+            return self._exact_embeddings_once(ids)
+        except EmbeddingVisibilityError:
+            if not self._reopen_palace_view():
+                raise
+            return self._exact_embeddings_once(ids)
+
+    def _exact_embeddings_once(self, ids: list[str]) -> dict[str, tuple[float, ...]]:
         try:
             result = self.get(ids=ids, include=["embeddings"])
         except Exception as exc:
@@ -910,6 +960,22 @@ class ChromaCollection(BaseCollection):
         if set(resolved) != set(ids):
             raise EmbeddingVisibilityError("Chroma exact embedding readback is incomplete")
         return resolved
+
+    def _reopen_palace_view(self) -> bool:
+        """Ask the backend to reopen this palace. False when that is not possible."""
+        if self._origin is None:
+            return False
+        backend = self._origin.backend()
+        if backend is None:
+            return False
+        try:
+            return backend.reopen_palace_view(self._origin.palace_path)
+        except Exception:
+            logger.warning(
+                "reopening the palace to recover ChromaDB's vector view failed",
+                exc_info=True,
+            )
+            return False
 
     def delete(self, *, ids=None, where=None):
         _validate_where(where)
@@ -970,6 +1036,11 @@ class ChromaBackend(BaseBackend):
         self._clients: dict[str, Any] = {}
         # palace_path -> (inode, mtime) of chroma.sqlite3 at cache time.
         self._freshness: dict[str, tuple[int, float]] = {}
+        # palace_path -> the collection handles handed out for it, held weakly
+        # so a handle a caller has dropped never keeps a palace alive. Used to
+        # re-point live handles after a palace is reopened; see
+        # :meth:`reopen_palace_view`.
+        self._handles: dict[str, Any] = {}
         self._closed = False
 
     @staticmethod
@@ -1026,6 +1097,27 @@ class ChromaBackend(BaseBackend):
           when either side is 0 (safe fallback) but still honor mtime.
         * Mtime change uses an epsilon (0.01 s) to tolerate FS timestamp
           granularity without thrashing.
+
+        RELEASING THE CLIENT WE REPLACE (wave 10)
+        ChromaDB keeps one shared "system" per folder and reference-counts it:
+        every ``PersistentClient(path=…)`` takes a reference and only
+        ``close()`` gives one back. This method rebuilds the client after
+        essentially every write, because a write moves the database file's
+        modification time — measured at three client objects per palace for a
+        single two-pass diary ingest. Until now the replaced object was simply
+        dropped, so the count only ever climbed and never returned to zero.
+        Consequences measured in one process: 120 ChromaDB systems still live
+        after 120 short ingests, each holding SQLite handles and in-RAM index
+        state, and neither :meth:`close` nor :meth:`reset` able to free any of
+        them — the leak recorded in mempalace#41 was therefore only half
+        fixed. Closing the replaced client keeps the count balanced so those
+        methods work as documented.
+
+        Removing the mtime trigger was tried and measured, and it is NOT the
+        right change: with one client per palace the unrelated ChromaDB fault
+        described on :meth:`get_exact_embeddings` got more frequent, not less
+        (11 failures in 300 double-ingests, against 4 in 260 with the trigger
+        left in place).
         """
         if self._closed:
             from .base import BackendClosedError  # late import avoids cycles at module load
@@ -1054,7 +1146,13 @@ class ChromaBackend(BaseBackend):
             and abs(current_mtime - cached_mtime) > 0.01
         )
 
-        if cached is None or inode_changed or mtime_changed or mtime_appeared:
+        superseded = None
+        if cached is not None and (inode_changed or mtime_changed or mtime_appeared):
+            superseded = self._clients.pop(palace_path, None)
+            self._freshness.pop(palace_path, None)
+            cached = None
+
+        if cached is None:
             ChromaBackend._prepare_palace_for_open(palace_path)
             cached = chromadb.PersistentClient(path=palace_path)
             self._clients[palace_path] = cached
@@ -1062,7 +1160,29 @@ class ChromaBackend(BaseBackend):
             # chroma.sqlite3 lazily, so the stat captured before the call
             # may still be (0, 0.0) on first open.
             self._freshness[palace_path] = self._db_stat(palace_path)
+
+        # Give the superseded client's ChromaDB reference back, but only AFTER
+        # the replacement has taken its own. Closing first would drop the
+        # folder's reference count to zero, and ChromaDB would tear the shared
+        # system down under any collection object a caller is still holding —
+        # observed directly as
+        # "'RustBindingsAPI' object has no attribute 'bindings'".
+        self._release_superseded_client(superseded)
         return cached
+
+    @staticmethod
+    def _release_superseded_client(client: Any) -> None:
+        """Hand one replaced client's ChromaDB reference back, best effort.
+
+        Never raises: a failure here must not turn a successful palace open
+        into an error, and the caller already holds a working client.
+        """
+        if client is None:
+            return
+        try:
+            ChromaBackend._close_client(client)
+        except Exception:
+            logger.debug("releasing a superseded Chroma client failed", exc_info=True)
 
     # ------------------------------------------------------------------
     # Public static helpers (legacy; prefer :meth:`get_collection`)
@@ -1193,7 +1313,52 @@ class ChromaBackend(BaseBackend):
         else:
             collection = client.get_collection(collection_name, **ef_kwargs)
         _pin_hnsw_threads(collection)
-        return ChromaCollection(collection)
+        handle = ChromaCollection(
+            collection,
+            origin=_CollectionOrigin(
+                backend=weakref.ref(self),
+                palace_path=palace_path,
+                collection_name=collection_name,
+                ef_kwargs=ef_kwargs,
+            ),
+        )
+        self._handles.setdefault(palace_path, weakref.WeakSet()).add(handle)
+        return handle
+
+    def reopen_palace_view(self, palace_path: str) -> bool:
+        """Close and reopen one palace, re-pointing every live handle at it.
+
+        This exists for one measured ChromaDB fault: a live palace that can
+        still read a row's document and metadata but has lost the ability to
+        read that row's vector, reporting ``Error creating hnsw segment reader:
+        Nothing found on disk``. The stored data is intact — reopening the
+        palace restores the read, as does a brand new process.
+
+        Every collection handle this backend gave out for the palace is
+        re-pointed at the reopened palace before this returns, so a caller
+        holding several handles (drawers and closets, say) does not end up with
+        one working handle and one attached to a palace ChromaDB has shut down.
+
+        Returns True when the palace was reopened. False when the backend is
+        closed or the palace has no cached client to release, in which case the
+        caller should surface its original error rather than pretend to recover.
+        """
+        if self._closed:
+            return False
+        if palace_path not in self._clients:
+            return False
+        self.close_palace(palace_path)
+        client = self._client(palace_path)
+        for handle in list(self._handles.get(palace_path, ())):
+            try:
+                handle._rebind(client)
+            except Exception:
+                logger.warning(
+                    "could not re-point a collection handle after reopening a palace",
+                    exc_info=True,
+                )
+        logger.info("reopened a palace to recover ChromaDB's vector view")
+        return True
 
     def close_palace(self, palace) -> None:
         """Close cached handles for ``palace``. Accepts ``PalaceRef`` or legacy path str."""
@@ -1209,6 +1374,7 @@ class ChromaBackend(BaseBackend):
         clients = tuple({id(client): client for client in self._clients.values()}.values())
         self._clients.clear()
         self._freshness.clear()
+        self._handles.clear()
         self._closed = True
         for client in clients:
             self._close_client(client)
@@ -1233,6 +1399,7 @@ class ChromaBackend(BaseBackend):
         clients = tuple({id(client): client for client in self._clients.values()}.values())
         self._clients.clear()
         self._freshness.clear()
+        self._handles.clear()
         for client in clients:
             self._close_client(client)
 
