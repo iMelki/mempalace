@@ -1,5 +1,6 @@
 {
   "version": 1,
+  "_doc": "Negative-proof ledger. A control is trusted only after an attributed failure on a deliberate break and a verified restored pass.",
   "exclude": [],
   "gates": [
     {
@@ -13,6 +14,67 @@
         "exitCode": 1,
         "reason": "The fixture first proved that the context-envelope helper was bypassed, then failed because the gate admitted a continuation without inherited user context.",
         "restoredPass": ".venv/Scripts/python.exe -m pytest tests/test_conversation_chunking.py::test_long_answer_continuations_keep_question_context_and_exact_payload -q; exit 0; 1 passed."
+      }
+    },
+    {
+      "id": "markdown-local-link-check",
+      "path": "scripts/check-markdown-links.ps1",
+      "description": "Fails when a tracked Markdown file contains a broken repo-local relative link.",
+      "negativeFixture": "tests/gate-negative-proof.ps1",
+      "observedFailure": {
+        "date": "2026-08-27",
+        "command": "pwsh -NoProfile -File ./tests/gate-negative-proof.ps1",
+        "exitCode": 1,
+        "reason": "In a disposable git fixture, committed broken.md with [missing](./does-not-exist-gate-proof.md). The real checker exited 1 and named that exact target. Clean fixture and restored tree both exited 0.",
+        "restoredPass": "Same script continued through restore (git rm broken.md) and exited 0 overall; markdown-links section printed restore=0 OK."
+      }
+    },
+    {
+      "id": "version-guard-workflow",
+      "path": ".github/workflows/version-guard.yml",
+      "description": "Requires mempalace/version.py, pyproject.toml, and plugin manifests to agree; tag pushes must match on stable tags.",
+      "negativeFixture": "tests/gate-negative-proof.ps1",
+      "observedFailure": {
+        "date": "2026-08-27",
+        "command": "pwsh -NoProfile -File ./tests/gate-negative-proof.ps1",
+        "reason": "Copied the five version sources into a temp tree and set pyproject.toml version to 0.0.0-gate-proof. Local agreement mirror reported ok=false with that value present. Restored the original pyproject text and agreement returned ok=true. Workflow contract still requires 'Verify all sources agree' and tag-match steps.",
+        "restoredPass": "Restored pyproject matched baseline; agreement ok=true; workflow SHA unchanged."
+      }
+    },
+    {
+      "id": "ci-workflow-skip-dev-pr",
+      "path": ".github/workflows/ci.yml",
+      "description": "Skips pull_request when head_ref is dev so a long-lived promotion PR does not double-bill runners already covered by push.",
+      "negativeFixture": "tests/gate-negative-proof.ps1",
+      "observedFailure": {
+        "date": "2026-08-27",
+        "command": "pwsh -NoProfile -File ./tests/gate-negative-proof.ps1",
+        "reason": "Temp-mutated a copy of ci.yml replacing github.head_ref != 'dev' with a never-match guard. Contract check failed naming the missing fragment github.head_ref != 'dev'. Repo file SHA-256 unchanged after the proof.",
+        "restoredPass": "Live ci.yml still contains the skip-dev guard, windows job, and concurrency block; proof exited 0."
+      }
+    },
+    {
+      "id": "deploy-docs-workflow-main-only",
+      "path": ".github/workflows/deploy-docs.yml",
+      "description": "Builds and deploys docs only from main (not the stale develop branch).",
+      "negativeFixture": "tests/gate-negative-proof.ps1",
+      "observedFailure": {
+        "date": "2026-08-27",
+        "command": "pwsh -NoProfile -File ./tests/gate-negative-proof.ps1",
+        "reason": "Temp-mutated branches: [main] to branches: [develop]. Contract failed for missing fragment 'branches: [main]'. Live workflow SHA unchanged.",
+        "restoredPass": "Live deploy-docs.yml still requires main, bun run docs:build, and actions/deploy-pages@v5; proof exited 0."
+      }
+    },
+    {
+      "id": "sync-upstream-conflict-fail",
+      "path": ".github/workflows/sync-upstream.yml",
+      "description": "Fails the sync job on mergeUpstream HTTP 409 so conflicts are not silent warnings.",
+      "negativeFixture": "tests/gate-negative-proof.ps1",
+      "observedFailure": {
+        "date": "2026-08-27",
+        "command": "pwsh -NoProfile -File ./tests/gate-negative-proof.ps1",
+        "reason": "Temp-replaced core.setFailed with core.warning in a copy. Contract failed for missing fragment 'core.setFailed'. Live workflow SHA unchanged.",
+        "restoredPass": "Live sync-upstream.yml still calls mergeUpstream, checks err.status === 409, and uses core.setFailed; proof exited 0."
       }
     }
   ]
