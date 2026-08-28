@@ -8,6 +8,8 @@ from pathlib import Path
 import subprocess
 import sys
 
+import conftest as test_conftest
+
 from mempalace.embedding import reset_embedding_function_cache
 from mempalace.native_lifecycle import (
     BOUND_ENV,
@@ -136,6 +138,14 @@ def test_lifecycle_bound_is_enabled_for_the_suite_by_default():
 def _run_pytest_child(fixture: Path, receipt: Path | None = None, extra_env=None):
     repo_root = Path(__file__).resolve().parents[1]
     env = os.environ.copy()
+    # conftest redirects HOME into a session temp dir. A nested pytest must
+    # see the real user site-packages (where pytest itself lives) and the
+    # same HOME a protected pre-push caller would have.
+    for var, original in test_conftest._original_env.items():
+        if original is None:
+            env.pop(var, None)
+        else:
+            env[var] = original
     env["PYTHONPATH"] = str(repo_root)
     if extra_env:
         env.update(extra_env)
