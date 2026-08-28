@@ -1,10 +1,24 @@
 # MemPalace Open Tasks
 
-Last updated: 2026-08-20
+Last updated: 2026-08-28
 
 This file is the durable local index for active `mempalace` issues.
 
 ## Active Issues
+
+- [#50 - Bound Chroma/ONNX thread lifecycle in full-suite pre-push runs](https://github.com/iMelki/mempalace/issues/50)
+  - The protected pre-push caller stalled at 900 seconds on `2f84f8e` with
+    1,229 waiting threads after a direct suite run had already passed.
+    `#41` reset the default backend cache but did not close raw
+    `PersistentClient` objects, the MCP client cache, or ONNX sessions, and
+    native pools were still sized at import-time defaults.
+  - Implemented locally: thread-pool env bounds before `chromadb` import,
+    a tracked/idempotent Chroma close, ONNX cache dispose, collection-fixture
+    close, and an incremental last-test / peak-resource receipt for the
+    quiet pre-push invocation. Synthetic leak fixture plus
+    `pytest -q -p no:cacheprovider` child proof; no live palace, MCP, or
+    hosted Railway work.
+  - Contract: `docs/research/native-thread-lifecycle-2026-08-28.md`.
 
 - [#49 - Preserve question context and identity in bounded conversation chunks](https://github.com/iMelki/mempalace/issues/49)
   - The code slice adds isolated structured ChatGPT conversation/turn records,
