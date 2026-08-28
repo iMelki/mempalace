@@ -85,7 +85,9 @@ def close_chroma_client(client: Any, *, strict: bool = False) -> bool:
 
     Idempotent: a second call on the same object is a no-op. Teardown
     callers leave ``strict=False`` so a close failure cannot mask the
-    originating test error. Production backend close uses ``strict=True``.
+    originating test error; a raised ``close()`` is then a failed attempt
+    (returns False, stays in ``live_owners``). Production backend close
+    uses ``strict=True``.
     """
     if client is None:
         return False
@@ -103,6 +105,7 @@ def close_chroma_client(client: Any, *, strict: bool = False) -> bool:
         if strict:
             raise
         logger.debug("closing a Chroma client failed", exc_info=True)
+        return False
     try:
         _closed_clients.add(client)
     except TypeError:

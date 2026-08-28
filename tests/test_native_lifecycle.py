@@ -69,6 +69,20 @@ def test_close_chroma_client_is_idempotent():
     assert owner.close_calls == 1
 
 
+def test_failed_close_is_not_treated_as_success():
+    class _Exploding:
+        def close(self) -> None:
+            raise RuntimeError("native close failed")
+
+    owner = _Exploding()
+    registry = NativeSessionRegistry()
+    registry.track(owner)
+
+    assert close_chroma_client(owner) is False
+    assert registry.live_count() == 1
+    assert owner in registry.live_owners()
+
+
 def test_dispose_onnx_owner_ends_session_and_clears_attribute():
     owner = _OnnxOwner()
 
@@ -93,17 +107,19 @@ def test_synthetic_waiting_threads_return_to_baseline_after_release():
     registry = NativeSessionRegistry()
     pool = SyntheticNativePool(workers=8, name_prefix="proof-onnx")
     registry.track(pool)
+    try:
+        leaked = inspect_native_leak(registry, baseline)
+        assert leaked["live_owners"] == 1
+        assert leaked["python_thread_delta"] >= 8
 
-    leaked = inspect_native_leak(registry, baseline)
-    assert leaked["live_owners"] == 1
-    assert leaked["python_thread_delta"] >= 8
+        released = registry.release()
+        after = sample_native_resources()
 
-    released = registry.release()
-    after = sample_native_resources()
-
-    assert released == 1
-    assert registry.live_count() == 0
-    assert after["python_threads"] <= baseline["python_threads"] + 1
+        assert released == 1
+        assert registry.live_count() == 0
+        assert after["python_threads"] <= baseline["python_threads"] + 1
+    finally:
+        pool.close()
 
 
 def test_unreleased_owner_is_the_negative_leak_signal():
