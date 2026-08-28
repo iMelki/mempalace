@@ -1076,10 +1076,16 @@ class ChromaBackend(BaseBackend):
 
     @staticmethod
     def _close_client(client: Any) -> None:
-        """Release a cached Chroma client through its supported lifecycle API."""
-        close = getattr(client, "close", None)
-        if callable(close):
-            close()
+        """Release a cached Chroma client through its supported lifecycle API.
+
+        Routes through :func:`mempalace.native_lifecycle.close_chroma_client`
+        so a later test/session teardown cannot double-close the same object
+        (mempalace#50). The first close still uses the client's public
+        ``close()``; later calls are no-ops.
+        """
+        from ..native_lifecycle import close_chroma_client
+
+        close_chroma_client(client, strict=True)
 
     def _client(self, palace_path: str):
         """Return a cached ``PersistentClient``, rebuilding on inode/mtime change.

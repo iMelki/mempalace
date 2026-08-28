@@ -143,6 +143,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **Full-suite pre-push now bounds Chroma/ONNX thread and session lifecycle
+  (#50).** The protected caller could report a green pytest run and still
+  stall at its 900-second boundary with a thousand-plus waiting native
+  threads. The suite now caps new OpenMP/OpenBLAS/Rayon/tokenizers pools
+  before `chromadb` imports, tracks every `PersistentClient`, closes the
+  shared collection fixture and any leftover cached MCP/ONNX sessions at
+  the owning test/session boundary, and writes an incremental last-test /
+  peak-thread receipt. A synthetic leak fixture fails closed, then the
+  pre-push-shaped `pytest -q -p no:cacheprovider` child restores the pass.
+  Hard-exit and recovery assertions are unchanged.
+
 - **Test-process cache cleanup and bounded #41 diagnostics (#41; relates to
   #24).** The test fixture resets the default Chroma backend and known-entity
   cache between units, bounds the managed-write readback configuration to

@@ -40,12 +40,30 @@ os.environ["HOMEPATH"] = os.path.splitdrive(_session_tmp)[1] or _session_tmp
 # both, since that assignment happens after import time.
 os.environ.setdefault("MEMPALACE_MANAGED_WRITE_READBACK_TIMEOUT_SECONDS", "20")
 
+# mempalace#50: bound OpenMP/OpenBLAS/ONNX/Rayon pools BEFORE chromadb
+# imports those native libraries. Later setdefault calls are no-ops.
+from mempalace.native_lifecycle import (  # noqa: E402
+    NativeLifecycleMonitor,
+    apply_native_thread_bounds,
+    bound_native_lifecycle_enabled,
+    close_chroma_client,
+    install_persistent_client_tracker,
+    release_native_sessions,
+)
+
+apply_native_thread_bounds()
+
 # Now it is safe to import mempalace modules that trigger initialisation.
 import chromadb  # noqa: E402
 import pytest  # noqa: E402
 
 from mempalace.config import MempalaceConfig  # noqa: E402
 from mempalace.knowledge_graph import KnowledgeGraph  # noqa: E402
+
+if bound_native_lifecycle_enabled():
+    install_persistent_client_tracker()
+
+_NATIVE_LIFECYCLE_MONITOR = NativeLifecycleMonitor()
 
 
 _TOKEN_RE = re.compile(r"\w+", re.UNICODE)
@@ -108,28 +126,39 @@ def _reset_mcp_cache():
 
     Both are reset here alongside the pre-existing MCP client/collection
     cache and ``ChromaBackend._quarantined_paths`` clear.
+
+    mempalace#50 extends that reset into an explicit native-session
+    close/dispose: tracked ``PersistentClient`` objects, an already-imported
+    MCP client cache, and cached ONNX embedding sessions are closed through
+    their supported APIs rather than dropped.
     """
 
     def _clear_cache():
-        try:
-            from mempalace import mcp_server
+        if bound_native_lifecycle_enabled():
+            # Close tracked PersistentClients, the default backend cache,
+            # an already-imported MCP client cache, and ONNX EF sessions
+            # before dropping Python references (mempalace#50).
+            release_native_sessions()
+        else:
+            try:
+                from mempalace import mcp_server
 
-            mcp_server._client_cache = None
-            mcp_server._collection_cache = None
-        except (ImportError, AttributeError):
-            pass
+                mcp_server._client_cache = None
+                mcp_server._collection_cache = None
+            except (ImportError, AttributeError):
+                pass
+            try:
+                from mempalace import palace
+
+                palace.reset_default_backend()
+            except (ImportError, AttributeError):
+                pass
         try:
             # Reset the per-process quarantine gate so tests don't leak
             # state through ChromaBackend._quarantined_paths.
             from mempalace.backends.chroma import ChromaBackend
 
             ChromaBackend._quarantined_paths.clear()
-        except (ImportError, AttributeError):
-            pass
-        try:
-            from mempalace import palace
-
-            palace.reset_default_backend()
         except (ImportError, AttributeError):
             pass
         try:
@@ -215,8 +244,10 @@ def collection(palace_path):
         embedding_function=_TEST_EMBEDDING_FUNCTION,
     )
     yield col
-    client.delete_collection("mempalace_drawers")
-    del client
+    try:
+        client.delete_collection("mempalace_drawers")
+    finally:
+        close_chroma_client(client)
 
 
 @pytest.fixture
@@ -368,6 +399,12 @@ def _build_sanitized_failure_diagnostics(
     return encoded.decode("utf-8")
 
 
+def pytest_runtest_setup(item):
+    """Record the current test before it runs so a killed pre-push child
+    still has last-test/progress evidence on disk (mempalace#50)."""
+    _NATIVE_LIFECYCLE_MONITOR.note_test(item.nodeid, "setup")
+
+
 @pytest.hookimpl(tryfirst=True, hookwrapper=True)
 def pytest_runtest_makereport(item, call):
     outcome = yield
@@ -442,3 +479,31 @@ def _readback_and_lock_diagnostics(request, monkeypatch):
         yield
     finally:
         delattr(request.node, "_mempalace_failure_diagnostic_state")
+
+
+def pytest_runtest_teardown(item):
+    _NATIVE_LIFECYCLE_MONITOR.note_test(item.nodeid, "teardown")
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """Release leftover native sessions and persist the caller receipt."""
+    if bound_native_lifecycle_enabled():
+        release_native_sessions()
+    _NATIVE_LIFECYCLE_MONITOR.write_receipt(final=True)
+
+
+def pytest_terminal_summary(terminalreporter, exitstatus, config):
+    receipt = _NATIVE_LIFECYCLE_MONITOR.build_receipt(final=True)
+    terminalreporter.write_sep("-", "mempalace native lifecycle (#50)")
+    terminalreporter.write_line(
+        "peak_threads={threads} peak_handles={handles} "
+        "private_bytes={private} duration_s={duration} last_test={last} "
+        "receipt={receipt}".format(
+            threads=receipt["peak"]["threads"],
+            handles=receipt["peak"]["handles"],
+            private=receipt["peak"]["private_bytes"],
+            duration=receipt["duration_seconds"],
+            last=receipt["last_test"] or "(none)",
+            receipt=_NATIVE_LIFECYCLE_MONITOR.receipt_path,
+        )
+    )

@@ -141,6 +141,24 @@ def get_embedding_function(device: Optional[str] = None):
     return ef
 
 
+def reset_embedding_function_cache() -> int:
+    """Dispose cached ONNX embedding sessions and drop the process cache.
+
+    Production mining keeps the cache for the process lifetime so model load
+    happens once. Tests and shutdown paths must release those native sessions
+    or ONNX Runtime thread pools outlive the owning client (mempalace#50).
+    """
+    from .native_lifecycle import dispose_onnx_owner
+
+    owners = list(_EF_CACHE.values())
+    _EF_CACHE.clear()
+    disposed = 0
+    for owner in owners:
+        if dispose_onnx_owner(owner):
+            disposed += 1
+    return disposed
+
+
 def describe_device(device: Optional[str] = None) -> str:
     """Return a short human-readable label for the resolved device.
 

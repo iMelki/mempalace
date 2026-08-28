@@ -76,6 +76,19 @@
         "reason": "Temp-replaced core.setFailed with core.warning in a copy. Contract failed for missing fragment 'core.setFailed'. Live workflow SHA unchanged.",
         "restoredPass": "Live sync-upstream.yml still calls mergeUpstream, checks err.status === 409, and uses core.setFailed; proof exited 0."
       }
+    },
+    {
+      "id": "native-lifecycle-leak-gate",
+      "path": "mempalace/native_lifecycle.py",
+      "description": "Requires Chroma/ONNX clients and waiting-thread pools to be closed at the suite lifecycle boundary.",
+      "negativeFixture": "tests/fixtures/native_lifecycle_unreleased.py",
+      "observedFailure": {
+        "date": "2026-08-28",
+        "command": "python3 -m pytest tests/fixtures/native_lifecycle_unreleased.py -q -p no:cacheprovider",
+        "exitCode": 1,
+        "reason": "The fixture first proved an unclosed native waiting-thread pool is visible, then failed the gate with native-lifecycle-leak: unclosed chroma/onnx session.",
+        "restoredPass": "python3 -m pytest tests/test_native_lifecycle.py tests/fixtures/native_lifecycle_bound_child.py -q -p no:cacheprovider"
+      }
     }
   ]
 }
