@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import threading
+import time
 from collections import defaultdict
-from typing import DefaultDict
+from typing import Any, DefaultDict
 
 
 COLLECTION_NAME = "mempalace_drawers"
@@ -69,6 +71,111 @@ def _default_palace_path() -> str:
         return DEFAULT_PALACE_PATH
     except Exception:
         return os.path.join(os.path.expanduser("~"), ".mempalace", "palace")
+
+
+# ---------------------------------------------------------------------------
+# Cached drawer count for health probes
+#
+# ``get_fast_drawer_count`` is only "fast" relative to a wing/room GROUP BY --
+# it still runs a two-JOIN ``COUNT(*)`` across the whole ``embeddings`` table.
+# Measured on the live palace (1,031,514 drawers, 26.5 GB ``chroma.sqlite3``):
+# 2.03s cold, 0.25s warm. ``/healthz`` called it on *every* probe, so the
+# Router's 2.0s probe budget and the MemPalace bridge watchdog's 5s budget both
+# timed out against a service that was answering queries the whole time. The
+# Router reported ``mempalace: fail / "timed out"`` and the watchdog reported
+# ``alive-timeout``, while ``queryProof`` stayed ``proven``.
+#
+# Serving a slightly stale count is correct here: the probe needs "is this
+# palace populated", not a transactional number. Never let a failed refresh
+# replace a known-good count with ``None`` -- a confident wrong "empty palace"
+# is the exact failure this module already carries a regression test for.
+# ---------------------------------------------------------------------------
+
+DRAWER_COUNT_TTL_SECONDS = 30.0
+
+_drawer_count_lock = threading.Lock()
+_drawer_count_state: dict[str, Any] = {"value": None, "at": None, "path": None}
+_drawer_count_refresh_thread: threading.Thread | None = None
+
+
+def reset_drawer_count_cache() -> None:
+    """Drop the cached count. For tests and for an explicit operator refresh."""
+
+    global _drawer_count_refresh_thread
+    with _drawer_count_lock:
+        _drawer_count_state.update({"value": None, "at": None, "path": None})
+        _drawer_count_refresh_thread = None
+
+
+def wait_for_drawer_count_refresh(timeout: float | None = None) -> bool:
+    """Join an in-flight background refresh. Returns False if it is still running."""
+
+    with _drawer_count_lock:
+        thread = _drawer_count_refresh_thread
+    if thread is None:
+        return True
+    thread.join(timeout)
+    return not thread.is_alive()
+
+
+def _refresh_drawer_count(palace_path: str | None, stamp: float) -> None:
+    value = get_fast_drawer_count(palace_path)
+    with _drawer_count_lock:
+        # A failed read must not erase a known-good count.
+        if value is not None or _drawer_count_state.get("value") is None:
+            _drawer_count_state["value"] = value
+        _drawer_count_state["path"] = palace_path
+        # Stamp the moment the refresh was *requested*, not finished, so a slow
+        # read cannot silently extend the TTL past what the caller asked for.
+        _drawer_count_state["at"] = stamp
+
+
+def get_cached_drawer_count(
+    palace_path: str | None = None,
+    *,
+    ttl_seconds: float | None = None,
+    now: float | None = None,
+) -> int | None:
+    """Return the drawer count for a health probe on every probe.
+
+    Fresh cache -> returned directly. Stale cache -> the last known value is
+    returned *immediately* and a single background thread refreshes it. Cold
+    cache -> counted synchronously once, because a probe that reports no count
+    at all reads as an empty palace to the bridge watchdog.
+    """
+
+    global _drawer_count_refresh_thread
+
+    if ttl_seconds is None:
+        ttl_seconds = DRAWER_COUNT_TTL_SECONDS
+    if now is None:
+        now = time.monotonic()
+
+    with _drawer_count_lock:
+        cached_at = _drawer_count_state.get("at")
+        cached_value = _drawer_count_state.get("value")
+        cached_path = _drawer_count_state.get("path")
+        is_cold = cached_at is None or cached_path != palace_path
+        if not is_cold and (now - cached_at) < ttl_seconds:
+            return cached_value
+
+        if is_cold:
+            # Hold the lock: one cold caller counts, the rest wait for it once.
+            value = get_fast_drawer_count(palace_path)
+            _drawer_count_state.update({"value": value, "at": now, "path": palace_path})
+            return value
+
+        thread = _drawer_count_refresh_thread
+        if thread is None or not thread.is_alive():
+            thread = threading.Thread(
+                target=_refresh_drawer_count,
+                args=(palace_path, now),
+                name="mempalace-drawer-count-refresh",
+                daemon=True,
+            )
+            _drawer_count_refresh_thread = thread
+            thread.start()
+        return cached_value
 
 
 def get_fast_drawer_count(palace_path: str | None = None) -> int | None:

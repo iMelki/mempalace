@@ -6,6 +6,23 @@ This file is the durable local index for active `mempalace` issues.
 
 ## Active Issues
 
+- [#54 - /healthz recounts a 26.5 GB SQLite file on every probe](https://github.com/iMelki/mempalace/issues/54)
+  - `/healthz` ran an uncached two-JOIN `COUNT(*)` over `embeddings` on every
+    probe: measured `2.03s` cold / `0.25s` warm for `1,031,514` drawers in a
+    `26.5 GB` `chroma.sqlite3`. The MemSys Router probe budget is `2.0s` and
+    the MemPalace bridge watchdog's is `5.0s`, so both reported the backend
+    down while `queryProof` stayed `proven` and retrieval worked normally.
+  - Fixed by a 30s TTL cache in `mempalace/status.py` that serves the last
+    known count immediately and refreshes off-probe, never letting a failed
+    refresh overwrite a good count with `None`; `/healthz` now awaits it via
+    `run_in_threadpool`. Three regressions added, each proven failing first.
+  - Remaining: the running service still has the old code. A MemPalace
+    restart to pick the fix up is a separate operator-approved process
+    mutation and has not been performed.
+  - Remaining: the CHANGELOG entry is unwritten - `CHANGELOG.md` currently
+    holds 45 lines of another agent's uncommitted #51 work and was left
+    untouched rather than swept into this commit.
+
 - [#50 - Bound Chroma/ONNX thread lifecycle in full-suite pre-push runs](https://github.com/iMelki/mempalace/issues/50)
   - The protected pre-push caller stalled at 900 seconds on `2f84f8e` with
     1,229 waiting threads after a direct suite run had already passed.
