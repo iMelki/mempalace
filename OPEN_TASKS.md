@@ -1,27 +1,10 @@
 # MemPalace Open Tasks
 
-Last updated: 2026-08-28
+Last updated: 2026-09-02
 
 This file is the durable local index for active `mempalace` issues.
 
 ## Active Issues
-
-- [#54 - /healthz recounts a 26.5 GB SQLite file on every probe](https://github.com/iMelki/mempalace/issues/54)
-  - `/healthz` ran an uncached two-JOIN `COUNT(*)` over `embeddings` on every
-    probe: measured `2.03s` cold / `0.25s` warm for `1,031,514` drawers in a
-    `26.5 GB` `chroma.sqlite3`. The MemSys Router probe budget is `2.0s` and
-    the MemPalace bridge watchdog's is `5.0s`, so both reported the backend
-    down while `queryProof` stayed `proven` and retrieval worked normally.
-  - Fixed by a 30s TTL cache in `mempalace/status.py` that serves the last
-    known count immediately and refreshes off-probe, never letting a failed
-    refresh overwrite a good count with `None`; `/healthz` now awaits it via
-    `run_in_threadpool`. Three regressions added, each proven failing first.
-  - Remaining: the running service still has the old code. A MemPalace
-    restart to pick the fix up is a separate operator-approved process
-    mutation and has not been performed.
-  - Remaining: the CHANGELOG entry is unwritten - `CHANGELOG.md` currently
-    holds 45 lines of another agent's uncommitted #51 work and was left
-    untouched rather than swept into this commit.
 
 - [#50 - Bound Chroma/ONNX thread lifecycle in full-suite pre-push runs](https://github.com/iMelki/mempalace/issues/50)
   - The protected pre-push caller stalled at 900 seconds on `2f84f8e` with
@@ -572,6 +555,24 @@ This file is the durable local index for active `mempalace` issues.
   - Completed via [PR #2](https://github.com/iMelki/mempalace/pull/2).
 
 ## Recently Closed
+
+- [#54 - /healthz recounts a 26.5 GB SQLite file on every probe](https://github.com/iMelki/mempalace/issues/54)
+  - Closed 2026-09-02 after the fix (commit subject `fix(#54): stop /healthz
+    recounting a 26.5 GB SQLite file on every probe`) was proven live. The
+    bridge restarted on the fixed code after the 2026-09-02 boot (process
+    created `22:21:21Z`, editable install resolving to this checkout, pyc
+    header bound to the fixed `status.py`). 22 consecutive Router `/healthz`
+    reads over 5m15s at the 15s cadence all showed `mempalace: pass` with a
+    fresh observation and no timeout; the bridge watchdog receipt read
+    `healthy` / HTTP 200 / `drawerCount 1031514`; the backend watchdog
+    freshness alarm reported `level: ok` with `mempalace-bridge: healthy`.
+  - The CHANGELOG entry that the active-issue note called unwritten now
+    exists under `[3.3.5] - unreleased / Fixed`.
+  - Local checkout note: `git merge --ff-only origin/dev` was refused on the
+    shared checkout because six worktree paths (four of them byte-identical
+    to `origin/dev`, two carrying another session's uncommitted #51 work)
+    would be overwritten; nothing was stashed or reset. Reconciling that
+    checkout remains a separate, attended step.
 
 - [#43 - Pre-push Git environment breaks temporary-repository tests](https://github.com/iMelki/mempalace/issues/43)
   - Closed 2026-08-09 after isolating both disposable-repository setup and scanner
