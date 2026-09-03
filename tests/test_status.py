@@ -1,6 +1,9 @@
 import os
 import sqlite3
+import threading
+import time
 
+import mempalace.status as status_module
 from mempalace.status import (
     _default_palace_path,
     _sqlite_status_counts,
@@ -137,3 +140,65 @@ def test_fast_count_returns_none_when_no_palace_exists(tmp_path):
     # Must not report a confident 0 for a path that has no palace at all --
     # None means "cannot assert", which callers treat differently from empty.
     assert get_fast_drawer_count(str(tmp_path / "nonexistent")) is None
+
+
+def test_cached_drawer_count_does_not_recount_within_ttl(monkeypatch):
+    """Regression: ``/healthz`` recounted a 26.5 GB SQLite file on every probe.
+
+    ``get_fast_drawer_count`` is documented as "Fast O(1)" but runs a
+    two-JOIN ``COUNT(*)`` over the whole ``embeddings`` table. Measured on the
+    live palace (1,031,514 drawers, 26.5 GB ``chroma.sqlite3``): 2.03s cold,
+    0.25s warm. The Router health probe budget is 2.0s and the MemPalace
+    bridge watchdog's is 5s, so both flapped against a service that was
+    healthy the whole time.
+    """
+
+    calls = []
+
+    def _counter(palace_path=None):
+        calls.append(palace_path)
+        return 1234
+
+    monkeypatch.setattr(status_module, "get_fast_drawer_count", _counter)
+    status_module.reset_drawer_count_cache()
+
+    first = status_module.get_cached_drawer_count("/palace", ttl_seconds=60.0, now=1000.0)
+    second = status_module.get_cached_drawer_count("/palace", ttl_seconds=60.0, now=1010.0)
+    third = status_module.get_cached_drawer_count("/palace", ttl_seconds=60.0, now=1059.0)
+
+    assert (first, second, third) == (1234, 1234, 1234)
+    assert len(calls) == 1, f"expected one recount within the TTL, got {len(calls)}"
+
+
+def test_cached_drawer_count_serves_stale_value_instead_of_blocking(monkeypatch):
+    """A stale count must be served immediately; the refresh happens off-probe.
+
+    Blocking the probe to refresh is what produced ``alive-timeout``. The
+    cache refreshes in the background and the caller keeps the last known
+    good number.
+    """
+
+    release = threading.Event()
+    counts = iter([111, 222])
+
+    def _slow_counter(palace_path=None):
+        value = next(counts)
+        if value == 222:
+            assert release.wait(timeout=10), "refresh thread never ran"
+        return value
+
+    monkeypatch.setattr(status_module, "get_fast_drawer_count", _slow_counter)
+    status_module.reset_drawer_count_cache()
+
+    assert status_module.get_cached_drawer_count("/palace", ttl_seconds=30.0, now=1000.0) == 111
+
+    started = time.monotonic()
+    stale = status_module.get_cached_drawer_count("/palace", ttl_seconds=30.0, now=1100.0)
+    elapsed = time.monotonic() - started
+
+    assert stale == 111, "a stale-but-known count must be served, not None"
+    assert elapsed < 1.0, f"stale read blocked for {elapsed:.2f}s on the refresh"
+
+    release.set()
+    status_module.wait_for_drawer_count_refresh(timeout=10)
+    assert status_module.get_cached_drawer_count("/palace", ttl_seconds=30.0, now=1101.0) == 222

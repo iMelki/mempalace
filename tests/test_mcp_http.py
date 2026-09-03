@@ -1562,3 +1562,45 @@ def test_run_uvicorn_with_hardened_accept_loop_wires_a_real_uvicorn_server(monke
 
     assert served == [fixture_config]
     assert exit_calls == [1]
+
+
+def test_healthz_does_not_recount_the_palace_on_every_probe(monkeypatch):
+    """Regression: each probe ran a COUNT(*) over a 26.5 GB SQLite file.
+
+    Measured live on 2026-09-01: 2.03s cold / 0.25s warm for 1,031,514
+    drawers, against a 2.0s Router probe budget and a 5s bridge-watchdog
+    budget. Both reported MemPalace down ("timed out" / "alive-timeout")
+    while ``queryProof`` stayed ``proven`` -- the palace was serving queries
+    the entire time. The count must still be served: the bridge watchdog
+    downgrades a countless payload to ``alive-suspect``.
+    """
+
+    import mempalace.status as status_module
+
+    calls = []
+
+    def _counter(palace_path=None):
+        calls.append(palace_path)
+        return 4321
+
+    monkeypatch.setattr(status_module, "get_fast_drawer_count", _counter)
+    status_module.reset_drawer_count_cache()
+
+    app = create_http_app(
+        auth_token=AUTH_FIXTURE,
+        tools=_registry(lambda value=0: {"value": value}),
+    )
+    headers = {"Authorization": f"Bearer {AUTH_FIXTURE}"}
+
+    with TestClient(app, base_url="http://127.0.0.1:8787") as client:
+        payloads = [client.get("/healthz", headers=headers) for _ in range(5)]
+
+    status_module.reset_drawer_count_cache()
+
+    assert [p.status_code for p in payloads] == [200] * 5
+    for probe in payloads:
+        body = probe.json()
+        assert body["status"] == "ok"
+        assert body["drawers"] == 4321
+        assert body["drawerCount"] == 4321
+    assert len(calls) == 1, f"expected one count across five probes, got {len(calls)}"

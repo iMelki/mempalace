@@ -143,6 +143,38 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **`/healthz` no longer recounts the palace on every probe (#54).** The
+  liveness endpoint ran an uncached two-JOIN `COUNT(*)` over `embeddings` on
+  every probe: `2.03s` cold / `0.25s` warm against the live `26.5 GB`
+  `chroma.sqlite3` (`1,031,514` drawers), over the MemSys Router's `2.0s`
+  probe budget, so the Router and the bridge watchdog both reported MemPalace
+  down while `queryProof` stayed `proven` and retrieval kept working.
+  `get_cached_drawer_count` in `mempalace/status.py` now serves a 30s TTL
+  cache: a fresh value costs no I/O, a stale value is returned immediately
+  while one background thread refreshes, the cold path counts once, and a
+  failed refresh never overwrites a known-good count with `None`. `/healthz`
+  awaits the count via `run_in_threadpool`, so even the cold path cannot block
+  the event loop shared with `/mcp`. Three regressions, each proven failing
+  first. Live proof on 2026-09-02, after the bridge restarted on the fixed
+  code (process created `22:21:21Z`, after both the fix commit and the file
+  mtimes; the `status.cpython-313.pyc` header matches the fixed source): 22
+  consecutive Router `/healthz` reads over 5m15s at the real 15s cadence all
+  showed `mempalace: pass`, observation `fresh` (age 10.3-10.8s) and no
+  timeout; the bridge watchdog receipt read `healthy` / HTTP 200 /
+  `drawerCount 1031514`; `Run-BackendWatchdogFreshnessAlarm.ps1` reported
+  `level: ok` with `mempalace-bridge: healthy` (previously `alive-timeout`).
+
+- **Full-suite pre-push now bounds Chroma/ONNX thread and session lifecycle
+  (#50).** The protected caller could report a green pytest run and still
+  stall at its 900-second boundary with a thousand-plus waiting native
+  threads. The suite now caps new OpenMP/OpenBLAS/Rayon/tokenizers pools
+  before `chromadb` imports, tracks every `PersistentClient`, closes the
+  shared collection fixture and any leftover cached MCP/ONNX sessions at
+  the owning test/session boundary, and writes an incremental last-test /
+  peak-thread receipt. A synthetic leak fixture fails closed, then the
+  pre-push-shaped `pytest -q -p no:cacheprovider` child restores the pass.
+  Hard-exit and recovery assertions are unchanged.
+
 - **Test-process cache cleanup and bounded #41 diagnostics (#41; relates to
   #24).** The test fixture resets the default Chroma backend and known-entity
   cache between units, bounds the managed-write readback configuration to

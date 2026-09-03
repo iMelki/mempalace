@@ -16,8 +16,17 @@ on:
   # closes that dead-end.
   workflow_dispatch:
 
+# Cost note (agent-settings#595): windows-latest bills ~2x. Skip pull_request
+# when head_ref == 'dev' so a long-lived promotion PR does not double-bill the
+# same commit already covered by push. Concurrency keyed on PR number collapses
+# synchronize storms.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test-linux:
+    if: github.event_name != 'pull_request' || github.head_ref != 'dev'
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -32,6 +41,7 @@ jobs:
       - run: python -m pytest tests/ -v --ignore=tests/benchmarks --cov=mempalace --cov-report=term-missing --cov-fail-under=80 --durations=10
 
   test-windows:
+    if: github.event_name != 'pull_request' || github.head_ref != 'dev'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v6
@@ -43,6 +53,7 @@ jobs:
       - run: python -m pytest tests/ -v --ignore=tests/benchmarks --cov=mempalace --cov-report=term-missing --cov-fail-under=80 --durations=10
 
   test-macos:
+    if: github.event_name != 'pull_request' || github.head_ref != 'dev'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v6
@@ -53,6 +64,7 @@ jobs:
       - run: pip install -e ".[dev]"
       - run: python -m pytest tests/ -v --ignore=tests/benchmarks --cov=mempalace --cov-report=term-missing --cov-fail-under=80 --durations=10
   lint:
+    if: github.event_name != 'pull_request' || github.head_ref != 'dev'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6

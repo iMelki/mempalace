@@ -27,6 +27,7 @@ try:
     from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
     from mcp.server.transport_security import TransportSecuritySettings
     from starlette.applications import Starlette
+    from starlette.concurrency import run_in_threadpool
     from starlette.middleware import Middleware
     from starlette.responses import JSONResponse
     from starlette.routing import Route
@@ -700,10 +701,14 @@ def create_http_app(
         async with manager.run():
             yield
 
-    from .status import get_fast_drawer_count
+    from .status import get_cached_drawer_count
 
     async def healthz(_request: Any) -> JSONResponse:
-        drawers = get_fast_drawer_count()
+        # The count is a two-JOIN COUNT(*) over a multi-GB SQLite file, so it
+        # is cached and, on a cold cache only, run off the event loop. Counting
+        # inline here made the probe exceed both the Router's 2s and the bridge
+        # watchdog's 5s budget while the service was healthy.
+        drawers = await run_in_threadpool(get_cached_drawer_count)
         payload = {
             "status": "ok",
             "service": "mempalace-mcp",
