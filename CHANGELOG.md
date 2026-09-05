@@ -8,6 +8,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [3.3.5] — unreleased
 
+### Changed
+
+- **Native HTTP MCP default port is now `18787`.** `mempalace-mcp-http` and
+  `python -m mempalace.mcp_http` previously bound `127.0.0.1:8787`, which
+  collides with Grok Bot OAuth's reserved localhost port. `DEFAULT_PORT` and
+  the `--port` CLI default now match the live MemPalace bridge
+  (`MEMPALACE_BRIDGE_PORT=18787`). Historical 8787 notes and Grok OAuth ports
+  are unchanged.
+
 ### Added
 
 - **Bounded conversation chunks retain their parent question and stable identity

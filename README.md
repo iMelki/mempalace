@@ -155,7 +155,7 @@ mempalace-mcp-http
 ```
 
 Set `MEMPALACE_MCP_TOKEN` (or the existing `MEMSYS_MEMPALACE_TOKEN`) in the
-process environment first. The server binds to `127.0.0.1:8787/mcp` by
+process environment first. The server binds to `127.0.0.1:18787/mcp` by
 default and does not accept a token on the command line. Authenticated
 `GET /healthz` preserves the MemSys operator-process probe; functional
 readiness still requires MCP initialize, tool listing, and a read-only call.

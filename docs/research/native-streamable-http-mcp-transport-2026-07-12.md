@@ -8,7 +8,7 @@ stdio entry point remains supported, and both transports use the same tool
 registry and argument dispatcher.
 
 The HTTP command is `mempalace-mcp-http`. It requires Python 3.10+, binds to
-`127.0.0.1:8787` by default, and has no literal bearer-token default. Startup
+`127.0.0.1:18787` by default, and has no literal bearer-token default. Startup
 token resolution is deliberately unambiguous:
 
 - `MEMPALACE_MCP_TOKEN` alone works.

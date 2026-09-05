@@ -49,7 +49,7 @@ from .write_receipts import _package_source_digest
 logger = logging.getLogger("mempalace_mcp_http")
 
 DEFAULT_HOST = "127.0.0.1"
-DEFAULT_PORT = 8787
+DEFAULT_PORT = 18787
 DEFAULT_MAX_CONCURRENCY = 1
 DEFAULT_SESSION_IDLE_SECONDS: float | None = 300.0
 DEFAULT_MAX_SESSIONS = 64
@@ -803,7 +803,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Startup-only immutable evaluation corpus manifest; omitted remains fail-closed",
     )
     parser.add_argument("--host", choices=LOOPBACK_HOSTS, default=DEFAULT_HOST)
-    parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=DEFAULT_PORT,
+        help="Loopback listen port (default: %(default)s)",
+    )
     parser.add_argument("--max-concurrency", type=int, default=DEFAULT_MAX_CONCURRENCY)
     parser.add_argument("--max-http-connections", type=int, default=64)
     parser.add_argument("--max-sessions", type=int, default=DEFAULT_MAX_SESSIONS)
