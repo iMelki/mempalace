@@ -89,6 +89,19 @@
         "reason": "The fixture first proved an unclosed native waiting-thread pool is visible, then failed the gate with native-lifecycle-leak: unclosed chroma/onnx session.",
         "restoredPass": "python3 -m pytest tests/test_native_lifecycle.py tests/fixtures/native_lifecycle_bound_child.py -q -p no:cacheprovider"
       }
+    },
+    {
+      "id": "hnsw-proven-evidence-divergence-guard",
+      "path": "mempalace/mcp_server.py",
+      "description": "A confirmed negative capacity result overrides cached healthy evidence and disables vector search.",
+      "negativeFixture": "tests/test_mcp_server.py::TestReadTools::test_confirmed_divergence_disables_even_with_recent_healthy_proof",
+      "observedFailure": {
+        "date": "2026-09-08",
+        "command": "python -m pytest -q tests/test_mcp_server.py::TestReadTools::test_confirmed_divergence_disables_even_with_recent_healthy_proof",
+        "exitCode": 1,
+        "reason": "In an isolated archive candidate, asserted an exact one-site replacement forcing _capacity_is_proven_healthy to return True. The real handler test failed with: confirmed divergence did not disable vector search -- the #1222 segfault guard is inert. Negative raw output: .tmp/fleet-git-hygiene-20260908/mempalace-gate-negative.log in the workspace.",
+        "restoredPass": "Restored exact original SHA256 961f75713e26a338007abd1bcf4c7f2fa689818ceb5692ac34a85ca3b2561917; reran same pytest node: exit 0. Scope isolated HOME, deterministic embeddings, no live palace."
+      }
     }
   ]
 }

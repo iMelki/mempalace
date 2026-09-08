@@ -6,6 +6,14 @@ This file is the durable local index for active `mempalace` issues.
 
 ## Active Issues
 
+- [#51 - Stabilize bounded HNSW capacity evidence and degraded receipts](https://github.com/iMelki/mempalace/issues/51)
+  - Reconciled unfinished probe memo/budget work with current lifecycle and HTTP
+    port fixes. Preserved the positional `candidate_strategy` API while adding
+    degraded receipt fields. Offline checks: 211 passed/1 skipped; 31 API tests
+    passed after the compatibility repair; Ruff and negative/restored guard proof
+    passed. Runtime restart and live capacity timing are not part of this pass.
+  - Review and limits: `docs/research/hnsw-probe-reconciliation-2026-09-08.md`.
+
 - [#50 - Bound Chroma/ONNX thread lifecycle in full-suite pre-push runs](https://github.com/iMelki/mempalace/issues/50)
   - The protected pre-push caller stalled at 900 seconds on `2f84f8e` with
     1,229 waiting threads after a direct suite run had already passed.

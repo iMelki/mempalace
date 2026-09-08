@@ -71,6 +71,7 @@ from .backends.chroma import (  # noqa: E402
     ChromaBackend,
     ChromaCollection,
     _HNSW_BLOAT_GUARD,
+    _clear_hnsw_element_count_memo,
     _pin_hnsw_threads,
     _vector_segment_id,
     hnsw_capacity_status,
@@ -103,7 +104,19 @@ from .palace_graph import (  # noqa: E402
 
 from .knowledge_graph import KnowledgeGraph  # noqa: E402
 
-logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
+# Timestamps are not decoration here: #51 (vector search flapping on and
+# off) could only be diagnosed by hand-counting bare log lines across a
+# ~3h bridge lifetime, because nothing in the bridge log carried a clock.
+# This is the ONLY logging configuration in the package — every other
+# module inherits this root handler — and uvicorn's own dictConfig runs
+# with ``disable_existing_loggers=False`` and defines only the ``uvicorn*``
+# loggers, so it neither overrides nor supplies this format.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s.%(msecs)03d %(levelname)s %(name)s: %(message)s",
+    datefmt="%Y-%m-%dT%H:%M:%S",
+    stream=sys.stderr,
+)
 logger = logging.getLogger("mempalace_mcp")
 
 
@@ -149,17 +162,84 @@ _palace_db_mtime = 0.0  # mtime of chroma.sqlite3 at cache time
 # successful repair via :func:`tool_reconnect` (which re-runs the probe).
 _vector_disabled = False
 _vector_disabled_reason = ""
+# Machine-readable companion to ``_vector_disabled_reason`` (#51). The
+# reason is free prose from the probe; the code is a small closed set so a
+# caller can tell "the probe timed out" apart from "the probe found real
+# divergence" without substring-matching a sentence.
+_vector_disabled_code = ""
+# Transition bookkeeping (#51). The flap was only visible by counting log
+# lines by hand (8 disable + 8 re-enable in one ~3h bridge lifetime);
+# these make it self-reporting and give the fallback block a ``since``.
+_vector_state_changed_at = datetime.now().astimezone().isoformat()
+_vector_state_changed_monotonic = time.monotonic()
+_vector_state_transitions = 0
 # Optional[dict] (not ``dict | None``) keeps Python 3.9 import-time
 # parsing happy — PEP 604 unions in annotations only became unconditional
 # at module-eval time in 3.10.
 _vector_capacity_status: Optional[dict] = None
-_HNSW_CAPACITY_CACHE_TTL_SECONDS = 5.0
-_HNSW_CAPACITY_WAITER_TIMEOUT_SECONDS = 5.0
-_HNSW_CAPACITY_PROBE_TIMEOUT_SECONDS = 5.0
+
+# ── HNSW capacity probe budgets (#51) ────────────────────────────────────
+# All three of these used to be 5.0s. That is the bug. The probe itself was
+# MEASURED at 4.1–5.4s against the live 1 030 543-drawer palace (three
+# consecutive read-only runs: 5.367 / 4.129 / 4.157s), and a per-step
+# breakdown under host contention peaked at 12.495s. A probe that straddles
+# its own lease loses its own race, and evidence discarded 5s after it was
+# proven forces an immediate re-roll of the same dice — measured at 8
+# "vector search is disabled" + 8 "vector search re-enabled" transitions in
+# a single ~3h bridge lifetime.
+#
+# Soft TTL: proven-healthy evidence is served without blocking until it is
+# this old; past it a refresh probe starts. 300s is the DOUBLE-FAULT
+# budget, because the cache key is already content-addressed over
+# chroma.sqlite3 and index_metadata.pickle (see _hnsw_capacity_probe_key),
+# so any write already forces a miss and the TTL only matters when that
+# detection ALSO fails. 300s × the measured peak ingest of 66.7
+# embeddings/s = 20 000 unobserved embeddings = 19.4% of this palace's
+# measured 103 054 divergence tolerance, i.e. under half of one 50 000
+# sync_threshold flush window.
+_HNSW_CAPACITY_CACHE_TTL_SECONDS = 300.0
+# Hard ceiling: past this, proven evidence is discarded and we fail closed
+# even while a probe is still trying. 900s × 66.7/s = 60 000 = 58% of the
+# 103 054 tolerance and 1.2 flush windows, still inside the measured
+# 19.5-minute arithmetic cliff (77 916 headroom ÷ 66.7/s) with no margin
+# left over. Do not raise it without re-measuring peak ingest.
+_HNSW_CAPACITY_EVIDENCE_MAX_AGE_SECONDS = 900.0
+# How long a caller with no usable evidence blocks. Must stay well under
+# the probe lease: when the waiter and the lease are equal, a slow probe is
+# torn down and restarted forever instead of surviving to populate the
+# cache for the next caller. 15.0 ≈ 3× the measured 5.12s worst case for
+# the fast probe path.
+_HNSW_CAPACITY_WAITER_TIMEOUT_SECONDS = 15.0
+# The probe's flight lease. 30.0 ≈ 6× the measured 5.12s p100 of the fast
+# probe path and still clears the 12.495s worst case observed under host
+# contention, so a healthy probe never expires mid-flight.
+_HNSW_CAPACITY_PROBE_TIMEOUT_SECONDS = 30.0
+
 _hnsw_capacity_condition = threading.Condition()
 _hnsw_capacity_cache: dict = {}
 _hnsw_capacity_inflight: dict = {}
 _hnsw_capacity_generation = 0
+# Last probe result that PROVED capacity healthy, as
+# (monotonic_at, status, probe_key). Kept so a slow or wedged probe degrades
+# to BOUNDED STALENESS instead of flipping vector search off (#51).
+#
+# It is only ever honoured for its OWN probe key. That key is
+# content-addressed over chroma.sqlite3 and index_metadata.pickle, so a key
+# match means the palace bytes have not moved since the evidence was
+# gathered — the evidence is still literally true, merely old. A key change
+# means the palace really did change and we fail closed as before. The
+# record is cleared by _invalidate_hnsw_capacity_probe_cache() and by any
+# probe that read the palace and could not prove health, so a live negative
+# always outranks stale positive evidence — that is the #1222 guard.
+_hnsw_capacity_proven: Optional[tuple] = None
+
+# status -> machine-readable disable code for results produced by
+# hnsw_capacity_status() itself. Probe-machinery failures carry their own
+# code via _probe_unavailable_status().
+_HNSW_STATUS_REASON_CODES = {
+    "diverged": "divergence_confirmed",
+    "unknown": "palace_state_unreadable",
+}
 
 
 def _file_cache_identity(path: str) -> tuple:
@@ -191,7 +271,7 @@ def _hnsw_capacity_probe_key(palace_path: str, collection_name: str) -> tuple:
     )
 
 
-def _probe_unavailable_status(message: str) -> dict:
+def _probe_unavailable_status(message: str, reason_code: str = "probe_unavailable") -> dict:
     return {
         "segment_id": None,
         "sqlite_count": None,
@@ -199,8 +279,65 @@ def _probe_unavailable_status(message: str) -> dict:
         "divergence": None,
         "diverged": True,
         "status": "probe-unavailable",
+        "reason_code": reason_code,
         "message": message,
     }
+
+
+def _capacity_is_proven_healthy(info: dict) -> bool:
+    """True only when the probe positively proved capacity is within tolerance."""
+    return info.get("status") == "ok" and info.get("diverged") is False
+
+
+def _hnsw_reason_code(info: dict) -> str:
+    """Machine-readable disable code for a non-healthy capacity result."""
+    code = info.get("reason_code")
+    if code:
+        return str(code)
+    return _HNSW_STATUS_REASON_CODES.get(info.get("status"), "capacity_not_proven")
+
+
+def _proven_evidence_within(max_age: float, key: tuple) -> Optional[dict]:
+    """Return the last proven-healthy status for ``key`` if young enough.
+
+    Requires an exact probe-key match: stale evidence is only served while
+    the palace bytes it describes are unchanged. Caller must hold
+    ``_hnsw_capacity_condition``. The returned copy is annotated so a
+    consumer can see it is not a fresh reading.
+    """
+    if _hnsw_capacity_proven is None:
+        return None
+    proven_at, status, proven_key = _hnsw_capacity_proven
+    if proven_key != key:
+        return None
+    age = time.monotonic() - proven_at
+    if age > max_age:
+        return None
+    out = dict(status)
+    out["evidence_stale"] = True
+    out["evidence_age_seconds"] = round(age, 3)
+    return out
+
+
+def _degrade_or_fail_closed(reason_code: str, message: str, key: tuple) -> dict:
+    """Serve bounded-stale proven evidence for ``key``, else fail closed.
+
+    A probe that is merely slow, wedged, or could not be started is *not*
+    evidence of divergence, so tearing vector search down for it converts a
+    latency problem into a correctness downgrade across a million drawers
+    (#51). When the palace bytes are unchanged (exact probe-key match) and
+    the last proof is younger than
+    ``_HNSW_CAPACITY_EVIDENCE_MAX_AGE_SECONDS``, that proof still describes
+    the current state and is honoured. Past the ceiling, or for any changed
+    palace, we fail closed exactly as before.
+
+    Caller must hold ``_hnsw_capacity_condition``.
+    """
+    stale = _proven_evidence_within(_HNSW_CAPACITY_EVIDENCE_MAX_AGE_SECONDS, key)
+    if stale is not None:
+        stale["evidence_degraded_by"] = reason_code
+        return stale
+    return _probe_unavailable_status(message, reason_code)
 
 
 def _run_hnsw_capacity_probe(
@@ -218,12 +355,21 @@ def _run_hnsw_capacity_probe(
     except Exception as exc:
         logger.debug("HNSW capacity probe raised", exc_info=True)
         resolved = _probe_unavailable_status(
-            f"HNSW capacity probe failed ({type(exc).__name__}); vector search is disabled"
+            f"HNSW capacity probe failed ({type(exc).__name__}); vector search is disabled",
+            "probe_raised",
         )
+    global _hnsw_capacity_proven
     with _hnsw_capacity_condition:
         flight = _hnsw_capacity_inflight.get(flight_key)
         if flight is None or flight["token"] is not token or flight["key"] != key:
             return
+        if _capacity_is_proven_healthy(resolved):
+            _hnsw_capacity_proven = (time.monotonic(), dict(resolved), key)
+        elif resolved.get("status") != "probe-unavailable":
+            # The probe read the palace and could not prove health (real
+            # divergence, or unreadable state). A live negative must always
+            # outrank stale positive evidence — this is the #1222 guard.
+            _hnsw_capacity_proven = None
         _hnsw_capacity_cache[key] = (time.monotonic(), dict(resolved))
         if len(_hnsw_capacity_cache) > 8:
             oldest = min(
@@ -240,18 +386,38 @@ def _cached_hnsw_capacity_status(
     palace_path: str,
     collection_name: str,
     *,
-    wait_timeout: Optional[float] = _HNSW_CAPACITY_WAITER_TIMEOUT_SECONDS,
+    wait_timeout: Optional[float] = None,
 ) -> dict:
     """Return one fresh probe per DB identity, coalescing concurrent callers.
 
     Every caller uses a daemon probe and a bounded lease. A stuck probe cannot
     hold the serial flight forever, and a late result from an expired flight is
     ignored instead of becoming fresh evidence.
+
+    Evidence expiry is a soft/hard split (#51). At
+    ``_HNSW_CAPACITY_CACHE_TTL_SECONDS`` a refresh probe starts, but a proof
+    that is still key-exact — i.e. the palace bytes have not moved — keeps
+    being honoured until ``_HNSW_CAPACITY_EVIDENCE_MAX_AGE_SECONDS``, so a
+    slow probe costs latency instead of flipping vector search off. Past the
+    hard ceiling, or for any palace whose bytes changed, we fail closed
+    exactly as before. Before this split all three budgets were 5.0s and a
+    4.1–5.4s probe raced its own lease every 5 seconds.
+
+    ``wait_timeout=None`` resolves the module default at call time so tests
+    (and operators) can retune the constant without rebinding this default.
     """
+    started_at = time.monotonic()
     key = _hnsw_capacity_probe_key(palace_path, collection_name)
     flight_key = key[:2]
     resolved_wait = _HNSW_CAPACITY_WAITER_TIMEOUT_SECONDS if wait_timeout is None else wait_timeout
     deadline = time.monotonic() + max(0.0, resolved_wait)
+
+    def _stamp(out: dict) -> dict:
+        # How long the CALLER blocked on capacity evidence. #51's 5.3s
+        # queries could not be attributed without this number.
+        out["probe_wait_ms"] = round((time.monotonic() - started_at) * 1000, 1)
+        return out
+
     with _hnsw_capacity_condition:
         while True:
             cached = _hnsw_capacity_cache.get(key)
@@ -263,16 +429,21 @@ def _cached_hnsw_capacity_status(
                         key = current_key
                         flight_key = key[:2]
                         continue
-                    return dict(cached[1])
+                    return _stamp(dict(cached[1]))
             now = time.monotonic()
             flight = _hnsw_capacity_inflight.get(flight_key)
             if flight is not None and (flight["key"] != key or now >= flight["expires_at"]):
                 _hnsw_capacity_inflight.pop(flight_key, None)
                 _hnsw_capacity_condition.notify_all()
                 if flight["key"] == key:
-                    return _probe_unavailable_status(
-                        "HNSW capacity probe exceeded its bounded lifetime; "
-                        "vector search is disabled until fresh capacity evidence is available"
+                    return _stamp(
+                        _degrade_or_fail_closed(
+                            "probe_lease_expired",
+                            "HNSW capacity probe exceeded its bounded lifetime; "
+                            "vector search is disabled until fresh capacity evidence "
+                            "is available",
+                            key,
+                        )
                     )
                 flight = None
             if flight is None:
@@ -292,29 +463,47 @@ def _cached_hnsw_capacity_status(
                     ).start()
                 except RuntimeError:
                     _hnsw_capacity_inflight.pop(flight_key, None)
-                    return _probe_unavailable_status(
-                        "HNSW capacity probe worker could not start; vector search is disabled"
+                    return _stamp(
+                        _degrade_or_fail_closed(
+                            "probe_worker_unavailable",
+                            "HNSW capacity probe worker could not start; vector search is disabled",
+                            key,
+                        )
                     )
             remaining = min(deadline, flight["expires_at"]) - time.monotonic()
             if remaining <= 0:
-                return _probe_unavailable_status(
-                    "HNSW capacity probe is still running; vector search is disabled "
-                    "until fresh capacity evidence is available"
+                return _stamp(
+                    _degrade_or_fail_closed(
+                        "probe_still_running",
+                        "HNSW capacity probe is still running; vector search is disabled "
+                        "until fresh capacity evidence is available",
+                        key,
+                    )
                 )
             _hnsw_capacity_condition.wait(timeout=remaining)
 
 
 def _invalidate_hnsw_capacity_probe_cache() -> None:
-    """Invalidate completed evidence without disrupting an active probe."""
-    global _hnsw_capacity_generation
+    """Invalidate completed evidence without disrupting an active probe.
+
+    Also drops the proven-healthy record: after a reconnect or repair the
+    next caller must fail closed on a slow probe rather than coast on
+    evidence gathered before the palace changed underneath it.
+    """
+    global _hnsw_capacity_generation, _hnsw_capacity_proven
     with _hnsw_capacity_condition:
         _hnsw_capacity_cache.clear()
+        _hnsw_capacity_proven = None
         _hnsw_capacity_generation += 1
+    # The pickle-identity memo one level down is keyed on file identity, so
+    # it is already correct across a rebuild; clearing it keeps "invalidate
+    # everything" honest rather than partially true.
+    _clear_hnsw_element_count_memo()
 
 
 def _refresh_vector_disabled_flag(
     *,
-    wait_timeout: Optional[float] = _HNSW_CAPACITY_WAITER_TIMEOUT_SECONDS,
+    wait_timeout: Optional[float] = None,
 ) -> None:
     """Re-run the HNSW capacity probe and update the module-level flag.
 
@@ -322,7 +511,10 @@ def _refresh_vector_disabled_flag(
     database identity. It never opens Chroma. Probe failure or waiter timeout
     fails closed by keeping vector search disabled.
     """
-    global _vector_disabled, _vector_disabled_reason, _vector_capacity_status
+    global _vector_disabled, _vector_disabled_reason, _vector_disabled_code
+    global _vector_capacity_status
+    global _vector_state_changed_at, _vector_state_changed_monotonic
+    global _vector_state_transitions
     info = _cached_hnsw_capacity_status(
         _config.palace_path,
         "mempalace_drawers",
@@ -330,25 +522,47 @@ def _refresh_vector_disabled_flag(
     )
     with _hnsw_capacity_condition:
         _vector_capacity_status = info
-        healthy = info.get("status") == "ok" and info.get("diverged") is False
+        healthy = _capacity_is_proven_healthy(info)
+
+        def _mark_transition() -> str:
+            """Stamp the new state and return how long the previous one held."""
+            global _vector_state_changed_at, _vector_state_changed_monotonic
+            global _vector_state_transitions
+            held = time.monotonic() - _vector_state_changed_monotonic
+            _vector_state_transitions += 1
+            _vector_state_changed_at = datetime.now().astimezone().isoformat()
+            _vector_state_changed_monotonic = time.monotonic()
+            return f"{held:.1f}s"
+
         if not healthy:
+            code = _hnsw_reason_code(info)
             if not _vector_disabled:
+                held = _mark_transition()
                 logger.warning(
-                    "HNSW capacity is not proven healthy (%s) — routing search to "
-                    "BM25-only sqlite fallback. Run `mempalace repair` to restore "
-                    "vector search.",
+                    "HNSW capacity is not proven healthy (code=%s: %s) — routing search "
+                    "to BM25-only sqlite fallback (transition #%d, previous state held "
+                    "%s). Run `mempalace repair` to restore vector search.",
+                    code,
                     info.get("message", "unknown"),
+                    _vector_state_transitions,
+                    held,
                 )
             _vector_disabled = True
             _vector_disabled_reason = info.get("message", "")
+            _vector_disabled_code = code
         else:
             if _vector_disabled:
+                held = _mark_transition()
                 logger.info(
-                    "HNSW capacity within tolerance (%s) — vector search re-enabled",
+                    "HNSW capacity within tolerance (%s) — vector search re-enabled "
+                    "(transition #%d, previous state held %s)",
                     info.get("message", ""),
+                    _vector_state_transitions,
+                    held,
                 )
             _vector_disabled = False
             _vector_disabled_reason = ""
+            _vector_disabled_code = ""
 
 
 # ==================== WRITE-AHEAD LOG ====================
@@ -676,11 +890,18 @@ def _tool_status_via_sqlite() -> dict:
     }
     if _vector_disabled_reason:
         result["vector_disabled_reason"] = _vector_disabled_reason
+    if _vector_disabled_code:
+        result["vector_disabled_code"] = _vector_disabled_code
+        result["vector_disabled_since"] = _vector_state_changed_at
+    result["vector_state_transitions"] = _vector_state_transitions
     if _vector_capacity_status:
         result["hnsw_capacity"] = {
             "sqlite_count": _vector_capacity_status.get("sqlite_count"),
             "hnsw_count": _vector_capacity_status.get("hnsw_count"),
             "divergence": _vector_capacity_status.get("divergence"),
+            "probe_wait_ms": _vector_capacity_status.get("probe_wait_ms"),
+            "evidence_stale": _vector_capacity_status.get("evidence_stale", False),
+            "evidence_age_seconds": _vector_capacity_status.get("evidence_age_seconds"),
         }
     return result
 
@@ -867,10 +1088,14 @@ def tool_search(
         n_results=limit,
         max_distance=dist,
         vector_disabled=_vector_disabled,
+        vector_disabled_code=_vector_disabled_code if _vector_disabled else "",
+        vector_disabled_since=_vector_state_changed_at if _vector_disabled else "",
     )
     if _vector_disabled:
         result["vector_disabled"] = True
         result["vector_disabled_reason"] = _vector_disabled_reason
+        result["vector_disabled_code"] = _vector_disabled_code
+        result["vector_disabled_since"] = _vector_state_changed_at
     # Attach sanitizer metadata for transparency
     if sanitized["was_sanitized"]:
         result["query_sanitized"] = True
@@ -897,6 +1122,8 @@ def tool_check_duplicate(content: str, threshold: float = 0.9):
             "matches": [],
             "vector_disabled": True,
             "vector_disabled_reason": _vector_disabled_reason,
+            "vector_disabled_code": _vector_disabled_code,
+            "vector_disabled_since": _vector_state_changed_at,
             "hint": (
                 "duplicate detection requires vector search; run `mempalace repair` to restore"
             ),
@@ -1737,7 +1964,8 @@ def tool_reconnect():
         _palace_db_inode, \
         _palace_db_mtime, \
         _vector_disabled, \
-        _vector_disabled_reason
+        _vector_disabled_reason, \
+        _vector_disabled_code
     _client_cache = None
     _collection_cache = None
     _palace_db_inode = 0
@@ -1747,6 +1975,7 @@ def tool_reconnect():
     # still applies after the reconnect.
     _vector_disabled = False
     _vector_disabled_reason = ""
+    _vector_disabled_code = ""
     _invalidate_hnsw_capacity_probe_cache()
     try:
         col = _get_collection()

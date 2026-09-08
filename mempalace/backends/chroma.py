@@ -4,6 +4,7 @@ import datetime as _dt
 import logging
 import os
 import sqlite3
+import threading
 import weakref
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -336,8 +337,35 @@ class _SafePersistentDataUnpickler:
             return _Restricted(f).load()
 
 
+# Memo for :func:`_hnsw_element_count`, keyed on the pickle's own stat
+# identity. MEASURED (#51): index_metadata.pickle is 127 618 430 bytes and
+# holds 1 005 405 ``id_to_label`` entries; a raw whole-file read costs
+# 0.066-0.081s (it is already in the OS page cache) while rebuilding the
+# dict costs 0.88-1.69s. That CPU is provably redundant — the file had not
+# changed in 28 days while chroma.sqlite3 was written continuously, yet the
+# capacity probe's cache key fuses both files, so every sqlite write forced
+# a re-unpickle of an unchanged pickle. Repeating the unpickle when
+# (dev, ino, mtime_ns, size) is unchanged adds no new trust assumption: it
+# is the exact tuple ``_hnsw_capacity_probe_key`` already treats as proof
+# of identity, applied one level down.
+_HNSW_ELEMENT_COUNT_MEMO: dict = {}
+_HNSW_ELEMENT_COUNT_MEMO_LOCK = threading.Lock()
+_HNSW_ELEMENT_COUNT_MEMO_MAX = 4
+
+
+def _pickle_cache_identity(path: str) -> tuple:
+    try:
+        st = os.stat(path)
+        return (os.path.normcase(path), st.st_dev, st.st_ino, st.st_mtime_ns, st.st_size)
+    except OSError:
+        return (os.path.normcase(path), None, None, None, None)
+
+
 def _hnsw_element_count(palace_path: str, segment_id: str) -> Optional[int]:
     """Return the element count chromadb thinks the HNSW segment holds.
+
+    Memoized on the pickle's stat identity — see
+    ``_HNSW_ELEMENT_COUNT_MEMO`` for the measured cost this avoids.
 
     Reads ``index_metadata.pickle`` via a tight-allowlist unpickler and
     counts ``id_to_label`` entries. This is the count chromadb consults
@@ -360,6 +388,26 @@ def _hnsw_element_count(palace_path: str, segment_id: str) -> Optional[int]:
     segment) or the unpickle fails. Callers treat ``None`` as "unknown".
     """
     pickle_path = os.path.join(palace_path, segment_id, "index_metadata.pickle")
+    identity = _pickle_cache_identity(pickle_path)
+    with _HNSW_ELEMENT_COUNT_MEMO_LOCK:
+        if identity in _HNSW_ELEMENT_COUNT_MEMO:
+            return _HNSW_ELEMENT_COUNT_MEMO[identity]
+    value = _read_hnsw_element_count(pickle_path)
+    with _HNSW_ELEMENT_COUNT_MEMO_LOCK:
+        _HNSW_ELEMENT_COUNT_MEMO[identity] = value
+        while len(_HNSW_ELEMENT_COUNT_MEMO) > _HNSW_ELEMENT_COUNT_MEMO_MAX:
+            _HNSW_ELEMENT_COUNT_MEMO.pop(next(iter(_HNSW_ELEMENT_COUNT_MEMO)))
+    return value
+
+
+def _clear_hnsw_element_count_memo() -> None:
+    """Drop every memoized pickle element count (repair / reconnect paths)."""
+    with _HNSW_ELEMENT_COUNT_MEMO_LOCK:
+        _HNSW_ELEMENT_COUNT_MEMO.clear()
+
+
+def _read_hnsw_element_count(pickle_path: str) -> Optional[int]:
+    """Uncached read of ``index_metadata.pickle``; see :func:`_hnsw_element_count`."""
     if not os.path.isfile(pickle_path):
         return None
     try:
@@ -550,13 +598,24 @@ def _sqlite_embedding_count(palace_path: str, collection_name: str) -> Optional[
     try:
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
         try:
+            # Semi-join, not a 3-way join. MEASURED (#51): the join form
+            # plans as SCAN e USING COVERING INDEX + two index probes per
+            # row, so it pays for every embeddings row in the file —
+            # including 1 411 177 orphan rows (57.5% of 2 455 263) left by
+            # quarantined segments. The IN-subquery plans as SEARCH
+            # embeddings USING COVERING INDEX (segment_id=?). Identical
+            # semantics and identical result (1 030 543, verified 9/9
+            # paired runs); 2.0-2.4s -> 0.42-0.52s.
             row = conn.execute(
                 """
                 SELECT COUNT(*)
-                FROM embeddings e
-                JOIN segments s ON e.segment_id = s.id
-                JOIN collections c ON s.collection = c.id
-                WHERE c.name = ?
+                FROM embeddings
+                WHERE segment_id IN (
+                    SELECT s.id
+                    FROM segments s
+                    JOIN collections c ON s.collection = c.id
+                    WHERE c.name = ?
+                )
                 """,
                 (collection_name,),
             ).fetchone()

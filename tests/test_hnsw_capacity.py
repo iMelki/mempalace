@@ -17,6 +17,7 @@ import pytest
 
 from mempalace.backends.chroma import (
     _hnsw_element_count,
+    _sqlite_embedding_count,
     _vector_segment_id,
     hnsw_capacity_status,
 )
@@ -706,3 +707,105 @@ def test_tool_status_via_sqlite_returns_breakdown(palace_with_drawers, monkeypat
     # ops×2 (incident + repair runbook), design×1 (metaphor).
     assert out["wings"].get("ops") == 2
     assert out["wings"].get("design") == 1
+
+
+# ── #51: probe cost and the disabled-state receipt ────────────────────
+
+
+def test_sqlite_embedding_count_matches_legacy_join_across_two_segments(tmp_path):
+    """The semi-join rewrite must be semantically identical to the 3-way join.
+
+    The rewrite (#51) exists because the join form scans every embeddings
+    index entry — including rows belonging to quarantined segments that no
+    longer appear in ``segments`` — while the IN-subquery seeks by
+    segment_id. Equivalence is only interesting when a collection owns more
+    than one segment carrying rows, plus orphan rows that belong to neither,
+    so that is exactly what this fixture builds.
+    """
+    palace = str(tmp_path)
+    seg = "seg-multi"
+    _seed_chroma_db(palace, sqlite_count=40, segment_id=seg)
+    conn = sqlite3.connect(os.path.join(palace, "chroma.sqlite3"))
+    try:
+        # 15 more rows on the collection's METADATA segment (this is where
+        # the live palace actually keeps them) ...
+        for i in range(15):
+            conn.execute(
+                """INSERT INTO embeddings (id, segment_id, embedding_id, seq_id)
+                   VALUES (?, 'seg-meta', ?, ?)""",
+                (1000 + i, f"m-{i}", b"\x00"),
+            )
+        # ... and 25 orphan rows whose segment_id has no `segments` row at
+        # all, mirroring the 1,411,177 orphans measured in the live palace.
+        for i in range(25):
+            conn.execute(
+                """INSERT INTO embeddings (id, segment_id, embedding_id, seq_id)
+                   VALUES (?, 'seg-quarantined', ?, ?)""",
+                (2000 + i, f"q-{i}", b"\x00"),
+            )
+        conn.commit()
+        legacy = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM embeddings e
+            JOIN segments s ON e.segment_id = s.id
+            JOIN collections c ON s.collection = c.id
+            WHERE c.name = ?
+            """,
+            (COLLECTION,),
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+    assert legacy == 55
+    assert _sqlite_embedding_count(palace, COLLECTION) == legacy
+
+
+def test_hnsw_element_count_memo_recounts_after_pickle_changes(tmp_path):
+    """The stat-identity memo must not outlive the file it describes.
+
+    Memoizing the 127 MB unpickle (#51) is only safe because a rewritten
+    pickle changes (dev, ino, mtime_ns, size). Rewriting with a different
+    element count must therefore be observed, not served from the memo.
+    """
+    palace = str(tmp_path)
+    seg = "seg-memo"
+    _write_pickle(palace, seg, hnsw_count=10)
+    assert _hnsw_element_count(palace, seg) == 10
+    # Second read comes from the memo — same answer, no re-unpickle.
+    assert _hnsw_element_count(palace, seg) == 10
+
+    _write_pickle(palace, seg, hnsw_count=25)
+    assert _hnsw_element_count(palace, seg) == 25
+
+
+def test_bm25_fallback_block_carries_cause_and_since(palace_with_drawers):
+    """#51: the degraded receipt must say WHY, not just that it degraded.
+
+    ``reason`` stays the pinned enum value; ``cause`` and ``since`` are
+    additive so a caller can separate "the capacity probe timed out" from
+    "the probe found real divergence".
+    """
+    out = _bm25_only_via_sqlite(
+        "segfault chromadb",
+        str(palace_with_drawers),
+        vector_disabled_code="probe_lease_expired",
+        vector_disabled_since="2026-08-25T12:00:00+00:00",
+    )
+    assert out["fallback"]["mode"] == "bm25_only_via_sqlite"
+    assert out["fallback"]["reason"] == "vector_search_disabled"
+    assert out["fallback"]["cause"] == "probe_lease_expired"
+    assert out["fallback"]["since"] == "2026-08-25T12:00:00+00:00"
+
+
+def test_bm25_fallback_block_omits_cause_when_not_supplied(palace_with_drawers):
+    """The union-merge path is not a disabled-vector receipt.
+
+    ``_merge_bm25_union_candidates`` calls the same helper while vector
+    search is healthy; an empty ``cause`` must not be mistaken for a real
+    disable code, so the keys are omitted entirely.
+    """
+    out = _bm25_only_via_sqlite("segfault chromadb", str(palace_with_drawers))
+    assert out["fallback"]["reason"] == "vector_search_disabled"
+    assert "cause" not in out["fallback"]
+    assert "since" not in out["fallback"]
