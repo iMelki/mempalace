@@ -94,7 +94,7 @@
       "id": "hnsw-proven-evidence-divergence-guard",
       "path": "mempalace/mcp_server.py",
       "description": "A confirmed negative capacity result overrides cached healthy evidence and disables vector search.",
-      "negativeFixture": "tests/test_mcp_server.py::TestReadTools::test_confirmed_divergence_disables_even_with_recent_healthy_proof",
+      "negativeFixture": "tests/test_mcp_server.py",
       "observedFailure": {
         "date": "2026-09-08",
         "command": "python -m pytest -q tests/test_mcp_server.py::TestReadTools::test_confirmed_divergence_disables_even_with_recent_healthy_proof",
