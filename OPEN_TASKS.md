@@ -6,6 +6,8 @@ This file is the durable local index for active `mempalace` issues.
 
 ## Active Issues
 
+- [#48 dev reconciliation](https://github.com/iMelki/mempalace/issues/48): September13 normalizes the upstream workflow to its declared LF policy. Historical checkouts otherwise showed a persistent CRLF-only dirty diff after restore. YAML content/semantics are identical; no upstream sync was dispatched.
+
 - [#51 - Stabilize bounded HNSW capacity evidence and degraded receipts](https://github.com/iMelki/mempalace/issues/51)
   - Reconciled unfinished probe memo/budget work with current lifecycle and HTTP
     port fixes. Preserved the positional `candidate_strategy` API while adding

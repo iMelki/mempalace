@@ -10,6 +10,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Normalize the upstream workflow line endings to the existing LF attributes, eliminating persistent clean-checkout drift without changing workflow behavior (#48).
+
 - **Native HTTP MCP default port is now `18787`.** `mempalace-mcp-http` and
   `python -m mempalace.mcp_http` previously bound `127.0.0.1:8787`, which
   collides with Grok Bot OAuth's reserved localhost port. `DEFAULT_PORT` and
