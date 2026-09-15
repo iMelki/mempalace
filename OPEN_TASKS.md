@@ -1,10 +1,21 @@
 # MemPalace Open Tasks
 
-Last updated: 2026-09-02
+Last updated: 2026-09-15
 
 This file is the durable local index for active `mempalace` issues.
 
 ## Active Issues
+
+- [#57 - Per-row conditional purge costs a full collection scan per drawer](https://github.com/iMelki/mempalace/issues/57)
+  - Measured: 13-18 s per deleted drawer at 1,031,550 drawers; a six-drawer note
+    spends ~93 s purging. Cause is fork-local: `_delete_validated_collection_rows`
+    deletes one row per call with `ids` plus `where` plus a `$regex`
+    `where_document`, and chromadb 1.5.7 drops ID pushdown whenever any filter
+    accompanies `ids`. Upstream has no `write_receipts.py` and uses one bulk
+    `collection.delete(where={"source_file": ...})`.
+  - Fixes: batch the purge; backfill `write_output_content_hash` so the regex
+    stops firing. Both need a negative proof - a row mutated between snapshot and
+    delete must still fail the conditional delete.
 
 - [#48 dev reconciliation](https://github.com/iMelki/mempalace/issues/48): September13 normalizes the upstream workflow to its declared LF policy. Historical checkouts otherwise showed a persistent CRLF-only dirty diff after restore. YAML content/semantics are identical; no upstream sync was dispatched.
 
