@@ -1,10 +1,36 @@
 # MemPalace Open Tasks
 
-Last updated: 2026-09-02
+Last updated: 2026-09-15
 
 This file is the durable local index for active `mempalace` issues.
 
 ## Active Issues
+
+- [[memsys#680](https://github.com/iMelki/memsys/issues/680) / [memsys#692](https://github.com/iMelki/memsys/issues/692) - Record the SQLite WAL mode decision for the 26.5 GB chroma.sqlite3]
+  - Architecture Decision Record completed: `docs/rfcs/003-chroma-sqlite-wal-decision-record.md`.
+  - Core finding: Default `journal_mode=delete` acquires an exclusive database lock during mining, rendering the live palace completely unreadable by concurrent readers (even in `mode=ro`). However, naive WAL adoption risks checkpoint starvation, Windows AV handle collisions on `-shm`, and WSL DrvFS boundary corruption.
+  - Adopted dual-track architecture: Track 1 for normal online mining with managed WAL (`synchronous=NORMAL`, `busy_timeout=30000`, 64 MB `journal_size_limit`, passive batch checkpoints, truncate on exit, AV directory exclusion); Track 2 for bulk cohort rebuilds using shadow staging (`storage/staging/chroma.sqlite3`) and atomic rename-swap under a maintenance latch.
+  - Status: ADR completed; migration scripts and telemetry thresholds planned.
+
+- [#62 - sync-upstream.yml fails every week with no alert](https://github.com/iMelki/mempalace/issues/62)
+  - Verified two suspected targeting bugs before touching anything: the
+    fork's default branch is genuinely `main` (not `dev` — the workflow's
+    `branch: 'main'` target was already correct), but the job name's
+    `milla-jovovich/mempalace` label was stale (that org handle now
+    redirects to `MemPalace/mempalace`). Fixed the label-only issue on
+    `fix/sync-upstream-owner-label` (`79e73ded12195c21899918938b31fd481bd1ddfe`).
+  - The label fix does not and cannot fix the actual failures: 19 of the
+    last 20 scheduled runs failed on the same real `409` merge conflict
+    from `repos.mergeUpstream` — `origin/main` and `upstream/main` are
+    110/1214 commits diverged, and a disposable local dry-run merge
+    (aborted, never pushed) found 38 conflicting files spanning core
+    source, `pyproject.toml`, and `uv.lock`. This needs a real
+    reconciliation merge or a deliberate redesign of what this fork syncs
+    from upstream, not a workflow edit.
+  - No mechanism in this repo would have surfaced 19 straight silent
+    failures short of opening the Actions tab; #62 proposes an
+    `if: failure()` step that opens/updates one tracking issue instead of
+    relying on GitHub's per-user email notifications.
 
 - [#50 - Bound Chroma/ONNX thread lifecycle in full-suite pre-push runs](https://github.com/iMelki/mempalace/issues/50)
   - The protected pre-push caller stalled at 900 seconds on `2f84f8e` with
