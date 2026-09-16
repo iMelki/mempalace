@@ -8,7 +8,7 @@ on:
 
 jobs:
   sync:
-    name: Sync fork main with milla-jovovich/mempalace
+    name: Sync fork main with MemPalace/mempalace
     runs-on: ubuntu-latest
     permissions:
       contents: write
