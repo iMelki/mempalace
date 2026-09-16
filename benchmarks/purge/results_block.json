@@ -1,0 +1,70 @@
+[
+  {
+    "size": 10000,
+    "n_start": 9948,
+    "reps": 10,
+    "controls": {
+      "where_contenthash_only_returns_only_row10": [
+        true,
+        [
+          "row-00000010"
+        ]
+      ],
+      "ids_plus_full_where": [
+        true,
+        [
+          "row-00000010"
+        ]
+      ],
+      "ids_plus_regex": [
+        true,
+        [
+          "row-00000010"
+        ]
+      ],
+      "ids_where_and_regex": [
+        true,
+        [
+          "row-00000010"
+        ]
+      ],
+      "neg_wrong_regex_returns_empty": [
+        true,
+        []
+      ]
+    },
+    "controls_all_pass": true,
+    "failures": [],
+    "A": {
+      "mean_ms": 32.45,
+      "median_ms": 30.92,
+      "p10_ms": 29.28,
+      "min_ms": 26.8,
+      "max_ms": 47.81
+    },
+    "B": {
+      "mean_ms": 35.4,
+      "median_ms": 35.79,
+      "p10_ms": 33.49,
+      "min_ms": 31.19,
+      "max_ms": 39.45
+    },
+    "C": {
+      "mean_ms": 81.6,
+      "median_ms": 80.75,
+      "p10_ms": 74.85,
+      "min_ms": 69.32,
+      "max_ms": 100.13
+    },
+    "D": {
+      "mean_ms": 87.27,
+      "median_ms": 90.76,
+      "p10_ms": 73.52,
+      "min_ms": 72.51,
+      "max_ms": 113.11
+    },
+    "n_end": 9896,
+    "expected_end": 9896,
+    "count_ok": true
+  }
+]

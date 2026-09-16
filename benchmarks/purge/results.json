@@ -1,0 +1,86 @@
+[
+  {
+    "size": 10000,
+    "build_s": 110.7,
+    "reps": 10,
+    "n_start": 10000,
+    "n_end": 9948,
+    "expected_end": 9948,
+    "count_ok": true,
+    "controls": {
+      "ctl1_where_contenthash_only": {
+        "expect": [
+          "row-00000010"
+        ],
+        "got": [
+          "row-00000010"
+        ],
+        "pass": true
+      },
+      "ctl2_ids_plus_full_where": {
+        "expect": [
+          "row-00000010"
+        ],
+        "got": [
+          "row-00000010"
+        ],
+        "pass": true
+      },
+      "ctl3_ids_plus_regex": {
+        "expect": [
+          "row-00000010"
+        ],
+        "got": [
+          "row-00000010"
+        ],
+        "pass": true
+      },
+      "ctl4_ids_where_regex": {
+        "expect": [
+          "row-00000010"
+        ],
+        "got": [
+          "row-00000010"
+        ],
+        "pass": true
+      },
+      "ctl5_negative_wrong_hash": {
+        "expect": [],
+        "got": [],
+        "pass": true
+      },
+      "ctl6_negative_wrong_regex": {
+        "expect": [],
+        "got": [],
+        "pass": true
+      }
+    },
+    "controls_all_pass": true,
+    "delete_failures": [],
+    "db_path": "S:\\source\\CCAI\\Assistants\\tools\\Memory\\mempalace\\benchmarks\\purge\\db_10000",
+    "A": {
+      "mean_ms": 242.006,
+      "median_ms": 172.326,
+      "min_ms": 55.073,
+      "max_ms": 622.036
+    },
+    "B": {
+      "mean_ms": 212.395,
+      "median_ms": 176.337,
+      "min_ms": 79.76,
+      "max_ms": 520.405
+    },
+    "C": {
+      "mean_ms": 353.454,
+      "median_ms": 362.089,
+      "min_ms": 151.364,
+      "max_ms": 706.029
+    },
+    "D": {
+      "mean_ms": 536.938,
+      "median_ms": 302.67,
+      "min_ms": 162.415,
+      "max_ms": 1616.826
+    }
+  }
+]
