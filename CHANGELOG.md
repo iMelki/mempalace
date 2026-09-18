@@ -8,6 +8,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [3.3.5] — unreleased
 
+### Changed
+
+- **Managed purge Prefer HOLD: ids + metadata `where`, not document regex
+  (memsys#677).** `_delete_filters_for_validated_row` no longer attaches
+  `where_document` `$regex` on the remine/managed-write delete hot path —
+  including legacy/missing or stale content-hash rows. Everyday deletes stay
+  Arm-B shaped (`collection.delete(ids=..., where=...)`). Bench on
+  `bench/issue-57-three-arm-delete` showed regex arms ~2.6–3× slower than
+  ids/ids+where at N=10k. No new rare/opt-in regex API (none existed). Pre-delete
+  exact row re-read under exclusive managed-write scope plus stamped ownership /
+  content-hash metadata remain the binding. Empty rows without a matching stamped
+  hash still fail closed.
+
 ### Added
 
 - **Bounded conversation chunks retain their parent question and stable identity

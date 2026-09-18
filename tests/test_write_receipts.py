@@ -1997,7 +1997,8 @@ def test_matching_stamped_hash_uses_metadata_binding_without_document_regex(tmp_
 
 
 @pytest.mark.parametrize("hash_state", ["missing", "stale"])
-def test_legacy_or_stale_hash_retains_exact_document_regex(tmp_path, hash_state):
+def test_legacy_or_stale_hash_uses_metadata_where_without_document_regex(tmp_path, hash_state):
+    """Prefer HOLD (#677): missing/stale hash still deletes via ids+where, not regex."""
     _, _, collection, _, _, _ = _seed_receipted_recovery_source(tmp_path)
     document, metadata = collection.rows["baseline-row"]
     metadata = dict(metadata)
@@ -2010,9 +2011,16 @@ def test_legacy_or_stale_hash_retains_exact_document_regex(tmp_path, hash_state)
         (document, metadata, None),
     )
 
-    _, where_document = write_receipts_module._delete_filters_for_validated_row(row)
+    where, where_document = write_receipts_module._delete_filters_for_validated_row(row)
 
-    assert where_document == {"$regex": f"(?s)^{re.escape(document)}$"}
+    assert where_document is None
+    assert isinstance(where, dict)
+    clauses = where["$and"] if "$and" in where else [where]
+    assert any(META_SOURCE_IDENTITY in clause for clause in clauses)
+    if hash_state == "stale":
+        assert {META_OUTPUT_CONTENT_HASH: metadata[META_OUTPUT_CONTENT_HASH]} in clauses
+    else:
+        assert all(META_OUTPUT_CONTENT_HASH not in clause for clause in clauses)
 
 
 def test_stale_hash_on_empty_row_fails_closed(tmp_path):
