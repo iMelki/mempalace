@@ -2363,6 +2363,8 @@ def test_identity_selector_rejects_contradictory_foreign_source_file(tmp_path):
 
 
 def test_exact_delete_uses_capable_raw_collection_behind_legacy_wrapper(tmp_path):
+    """Prefer HOLD (#677): unwrap to raw when wrapper cannot take metadata where."""
+
     class LegacyDeleteWrapper:
         def __init__(self, raw):
             self._collection = raw
@@ -2370,8 +2372,9 @@ def test_exact_delete_uses_capable_raw_collection_behind_legacy_wrapper(tmp_path
         def get(self, **kwargs):
             return self._collection.get(**kwargs)
 
-        def delete(self, *, ids=None, where=None):
-            raise AssertionError(f"unsafe wrapper delete reached: {ids!r} {where!r}")
+        def delete(self, *, ids=None):
+            # ids-only surface is unsafe for ownership-bound purge; must unwrap.
+            raise AssertionError(f"unsafe wrapper delete reached (ids-only): {ids!r}")
 
     _, store, raw, source_locator, baseline, snapshot = _seed_receipted_recovery_source(tmp_path)
     rewrite, recovery_path = _begin_recovery_rewrite(store, source_locator, baseline, snapshot)
@@ -2394,23 +2397,26 @@ def test_exact_delete_uses_capable_raw_collection_behind_legacy_wrapper(tmp_path
     assert rewrite.receipt_id
 
 
-def test_exact_delete_fails_closed_when_wrapper_cannot_forward_content_filter(tmp_path):
+def test_exact_delete_fails_closed_when_wrapper_cannot_forward_ownership_filter(tmp_path):
+    """Prefer HOLD (#677): fail closed when neither wrapper nor raw can take where."""
+
     class UnsupportedDeleteWrapper:
         def __init__(self, raw):
-            self.raw = raw
+            self.raw = raw  # deliberately not `_collection` — no unwrap path
 
         def get(self, **kwargs):
             return self.raw.get(**kwargs)
 
-        def delete(self, *, ids=None, where=None):
-            self.raw.delete(ids=ids, where=where)
+        def delete(self, *, ids=None):
+            # ids-only; cannot forward ownership metadata where
+            self.raw.delete(ids=ids)
 
     _, store, raw, source_locator, baseline, snapshot = _seed_receipted_recovery_source(tmp_path)
     _, recovery_path = _begin_recovery_rewrite(store, source_locator, baseline, snapshot)
     wrapper = UnsupportedDeleteWrapper(raw)
 
     with _managed_write_scope(store):
-        with pytest.raises(ReceiptRecoveryError, match="content-bound conditional deletion"):
+        with pytest.raises(ReceiptRecoveryError, match="ownership-bound conditional deletion"):
             purge_managed_source_snapshot(
                 wrapper,
                 snapshot,
