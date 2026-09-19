@@ -782,12 +782,13 @@ In every failing reproduction the row survived. Deleting the same validated ID
 with its source, receipt, and content-hash metadata but no `where_document`
 deleted exactly one row.
 
-The managed path now recomputes SHA-256 from the fetched document and compares
-it with the receipt-stamped output hash. When they match, deletion remains bound
-to the exact ID, source ownership, receipt ID, and content hash while omitting
-the redundant large regex. Missing or stale hashes keep the exact anchored
-document regex; malformed hashes and empty stale-hash rows fail closed. The
-pre-delete snapshot comparison, exclusive managed-write scope, exactly-one
+The managed path recomputes SHA-256 from the fetched document and compares it
+with the receipt-stamped output hash when present. Prefer HOLD (memsys#677 /
+issue-57 bench): everyday purge deletes always use exact ID plus source /
+receipt / content-hash metadata `where` and never attach `where_document`
+`$regex` on that hot path — including legacy/missing or stale hash rows.
+Malformed hashes and empty rows without a matching stamped hash fail closed.
+The pre-delete snapshot comparison, exclusive managed-write scope, exactly-one
 delete accounting, and survivor readback remain unchanged. This protects
 cooperating managed writers; Chroma still does not provide a compare-and-swap
 delete for an out-of-band writer that changes only the document while preserving
