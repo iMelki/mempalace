@@ -32,6 +32,7 @@ from mempalace.mcp_http import (  # noqa: E402
     DEFAULT_HOST,
     DEFAULT_MAX_CONCURRENCY,
     DEFAULT_MAX_SESSIONS,
+    DEFAULT_PORT,
     DEFAULT_SESSION_IDLE_SECONDS,
     DEFAULT_TERMINATION_TIMEOUT_SECONDS,
     BearerTokenMiddleware,
@@ -1419,13 +1420,18 @@ def test_failed_precreation_cleanup_releases_session_reservation(monkeypatch):
         assert manager._pending_session_creations == 0
 
 
-def test_cli_defaults_to_loopback_and_serial_backend_calls():
+def test_cli_defaults_to_loopback_and_serial_backend_calls(capsys):
     args = _parse_args([])
     assert args.host == DEFAULT_HOST == "127.0.0.1"
+    assert args.port == DEFAULT_PORT == 18787
     assert args.max_concurrency == DEFAULT_MAX_CONCURRENCY == 1
     assert args.max_sessions == DEFAULT_MAX_SESSIONS == 64
     assert args.session_idle_seconds == DEFAULT_SESSION_IDLE_SECONDS == 300
     assert args.termination_timeout_seconds == DEFAULT_TERMINATION_TIMEOUT_SECONDS == 5
+    with pytest.raises(SystemExit) as help_exit:
+        _parse_args(["--help"])
+    assert help_exit.value.code == 0
+    assert "18787" in capsys.readouterr().out
     with pytest.raises(SystemExit):
         _parse_args(["--host", "0.0.0.0"])
     assert _parse_args(["--session-idle-seconds", "5"]).session_idle_seconds == 5

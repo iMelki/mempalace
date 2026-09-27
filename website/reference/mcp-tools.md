@@ -59,6 +59,8 @@ Semantic search. Returns verbatim drawer content with similarity scores.
 
 **Returns:** `{ query, filters, results: [{ text, wing, room, source_file, similarity }] }`
 
+When the HNSW capacity guard has vector search disabled, the response is a degraded receipt instead: `fallback: { mode: "bm25_only_via_sqlite", reason: "vector_search_disabled", cause, since }` alongside top-level `vector_disabled`, `vector_disabled_reason`, `vector_disabled_code`, and `vector_disabled_since`. `cause`/`vector_disabled_code` is one of `probe_lease_expired`, `probe_still_running`, `probe_worker_unavailable`, `probe_raised`, `divergence_confirmed`, `palace_state_unreadable` — read it to tell a slow capacity probe apart from real index divergence (#51).
+
 ---
 
 ### `mempalace_check_duplicate`

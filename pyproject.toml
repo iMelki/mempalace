@@ -27,7 +27,11 @@ classifiers = [
     "Topic :: Utilities",
 ]
 dependencies = [
-    "chromadb>=1.5.4,<2",
+    # PINNED, not a range: mempalace#1710 documents silent vector loss at 1.5.8 via
+    # dimensionality:None checkpoint pickles interacting with a quarantine guard and a
+    # pruned WAL, and this fork carries its own quarantine_stale_hnsw routine. A range
+    # let a clean venv drift to 1.5.9+ while only the existing .venv held 1.5.7.
+    "chromadb==1.5.7",
     "pyyaml>=6.0,<7",
     "tomli>=2.0.0; python_version < '3.11'",
 ]

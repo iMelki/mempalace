@@ -10,6 +10,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Snapshot leases now refuse a pre-existing MemSys maintenance marker
+  (#67).** The child acquires the marker with exclusive creation, including
+  when it appears after the wrapper's early check, and preserves a foreign
+  replacement observed at release. Focused tests passed 29/29. This is a
+  source mitigation, not current-marker recovery, installed adoption, or a
+  completed exact-object release proof.
+
 - **Managed purge Prefer HOLD: ids + metadata `where`, not document regex
   (memsys#677).** `_delete_filters_for_validated_row` no longer attaches
   `where_document` `$regex` on the remine/managed-write delete hot path —
@@ -20,6 +27,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   exact row re-read under exclusive managed-write scope plus stamped ownership /
   content-hash metadata remain the binding. Empty rows without a matching stamped
   hash still fail closed.
+
+- Normalize the upstream workflow line endings to the existing LF attributes, eliminating persistent clean-checkout drift without changing workflow behavior (#48).
+
+- **Native HTTP MCP default port is now `18787`.** `mempalace-mcp-http` and
+  `python -m mempalace.mcp_http` previously bound `127.0.0.1:8787`, which
+  collides with Grok Bot OAuth's reserved localhost port. `DEFAULT_PORT` and
+  the `--port` CLI default now match the live MemPalace bridge
+  (`MEMPALACE_BRIDGE_PORT=18787`). Historical 8787 notes and Grok OAuth ports
+  are unchanged.
 
 ### Added
 
@@ -187,6 +203,50 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   peak-thread receipt. A synthetic leak fixture fails closed, then the
   pre-push-shaped `pytest -q -p no:cacheprovider` child restores the pass.
   Hard-exit and recovery assertions are unchanged.
+- **Vector search no longer flaps on and off every few minutes (#51).** The HNSW
+  capacity probe was measured at 4.1-5.4s against the live 1,030,543-drawer
+  palace (5.367 / 4.129 / 4.157s over three consecutive read-only runs; 12.495s
+  worst case under host contention) while all three governing budgets in
+  `mcp_server.py` were 5.0 seconds. The probe therefore raced its own lease, and
+  proven evidence was discarded 5s after it was obtained, forcing an immediate
+  re-roll - 8 "vector search is disabled" and 8 "vector search re-enabled"
+  transitions in a single ~3h bridge lifetime, each disabled window silently
+  downgrading a million drawers from semantic similarity to lexical BM25 behind
+  an HTTP 200.
+
+  The budgets are now asymmetric and each carries the measurement behind it:
+  probe lease 30.0s (6x the measured worst case), caller wait 15.0s, soft
+  evidence TTL 300.0s, hard evidence ceiling 900.0s. Evidence expiry became a
+  soft/hard split: past the soft TTL a refresh probe starts, but a proof whose
+  file-stat probe key still matches - i.e. `chroma.sqlite3` and
+  `index_metadata.pickle` have not moved - keeps being honoured up to the hard
+  ceiling, so a slow probe costs latency instead of disabling vector search.
+  Past the ceiling, for any palace whose bytes changed, and for any probe that
+  actually read the palace and found divergence, the behaviour is unchanged:
+  fail closed. A confirmed divergence clears the proven-healthy record, so stale
+  evidence can never outrank a live negative - the #1222 segfault guard is
+  intact and covered by a dedicated test.
+
+  The probe itself is also ~10x cheaper, which is what puts it far under its own
+  budget rather than merely inside it: the embedding count is a semi-join rather
+  than a three-way join (it no longer pays for 1,411,177 orphan rows left by
+  quarantined segments), and the 127 MB `index_metadata.pickle` element count is
+  memoized on that file's own stat identity. Measured end to end against the
+  live palace: 0.444 / 0.476 / 0.461s versus 4.1-5.4s before, returning
+  byte-identical evidence (sqlite 1,030,543 / hnsw 1,005,405 / divergence
+  25,138).
+
+- **The degraded-search receipt now says why, and the bridge log has clocks
+  (#51).** `fallback.reason` keeps its pinned value `vector_search_disabled`;
+  additive `fallback.cause` and `fallback.since` distinguish
+  `probe_lease_expired`, `probe_still_running`, `probe_worker_unavailable`,
+  `probe_raised`, `divergence_confirmed`, and `palace_state_unreadable`, which
+  the prose reason string never could. `mempalace_search`,
+  `mempalace_check_duplicate`, and `mempalace_status` carry the same code plus
+  the ISO timestamp of the last transition, `mempalace_status` reports the
+  transition count and the caller-observed `probe_wait_ms`, and the root logging
+  config emits ISO timestamps - #51 was only diagnosable by hand-counting
+  timestamp-free log lines.
 
 - **Test-process cache cleanup and bounded #41 diagnostics (#41; relates to
   #24).** The test fixture resets the default Chroma backend and known-entity

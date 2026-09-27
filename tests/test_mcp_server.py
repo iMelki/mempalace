@@ -345,6 +345,225 @@ class TestReadTools:
         assert calls == 2
         assert mcp_server._vector_disabled is False
 
+    def test_probe_slower_than_old_five_second_budget_keeps_vector_enabled(
+        self, monkeypatch, config, kg
+    ):
+        """#51: a 5.5s probe must not disable vector search.
+
+        The live probe was MEASURED at 4.1-5.4s (5.367 / 4.129 / 4.157s
+        against the 1,030,543-drawer palace) while all three governing
+        budgets were 5.0s, so the probe routinely lost its own race and
+        flipped vector search to BM25-only across the whole palace -- 8
+        disable + 8 re-enable transitions in one ~3h bridge lifetime.
+
+        This test deliberately does NOT monkeypatch the timing constants:
+        the shipped values are the thing under test. It sleeps 5.5s, which
+        is above the old 5.0s waiter/lease and below the new 15.0s waiter,
+        so it fails on the old constants and passes on the new ones.
+        """
+        from mempalace import mcp_server
+
+        _patch_mcp_server(monkeypatch, config, kg)
+        mcp_server._invalidate_hnsw_capacity_probe_cache()
+        monkeypatch.setattr(mcp_server, "_vector_disabled", False)
+        monkeypatch.setattr(mcp_server, "_vector_disabled_reason", "")
+        monkeypatch.setattr(mcp_server, "_vector_disabled_code", "")
+
+        def slow_but_healthy_probe(*_args, **_kwargs):
+            time.sleep(5.5)
+            return {
+                "diverged": False,
+                "status": "ok",
+                "message": "HNSW 1,005,405 / sqlite 1,030,543 (within flush-lag tolerance)",
+                "sqlite_count": 1_030_543,
+                "hnsw_count": 1_005_405,
+                "divergence": 25_138,
+            }
+
+        monkeypatch.setattr(mcp_server, "hnsw_capacity_status", slow_but_healthy_probe)
+        mcp_server._refresh_vector_disabled_flag()
+
+        assert mcp_server._vector_disabled is False, (
+            "a 5.5s probe disabled vector search; probe budgets are back in the "
+            f"self-racing regime (reason={mcp_server._vector_disabled_reason!r})"
+        )
+        assert mcp_server._vector_disabled_code == ""
+        assert mcp_server._vector_capacity_status["status"] == "ok"
+
+    def test_probe_budgets_are_asymmetric_and_exceed_measured_probe_cost(self):
+        """The bug was three equal 5.0s constants; keep them from converging.
+
+        Lease > waiter is the load-bearing relation: when they are equal a
+        slow probe is torn down and restarted forever instead of surviving
+        to populate the cache for the next caller.
+        """
+        from mempalace import mcp_server
+
+        measured_worst_probe_seconds = 12.495  # observed under host contention
+        assert (
+            mcp_server._HNSW_CAPACITY_PROBE_TIMEOUT_SECONDS
+            > mcp_server._HNSW_CAPACITY_WAITER_TIMEOUT_SECONDS
+        )
+        assert mcp_server._HNSW_CAPACITY_PROBE_TIMEOUT_SECONDS > measured_worst_probe_seconds
+        # 5.4s was the slowest of three consecutive live read-only runs.
+        assert mcp_server._HNSW_CAPACITY_WAITER_TIMEOUT_SECONDS > 5.4
+        # Evidence must outlive its own refresh trigger, and the hard
+        # ceiling must not exceed the 19.5-minute arithmetic cliff.
+        assert (
+            mcp_server._HNSW_CAPACITY_EVIDENCE_MAX_AGE_SECONDS
+            > mcp_server._HNSW_CAPACITY_CACHE_TTL_SECONDS
+        )
+        assert mcp_server._HNSW_CAPACITY_EVIDENCE_MAX_AGE_SECONDS <= 900.0
+
+    def test_wedged_probe_serves_bounded_stale_proof_then_fails_closed(
+        self, monkeypatch, config, kg
+    ):
+        """#51: a wedged probe degrades to bounded staleness, not to BM25.
+
+        Proven-healthy evidence is honoured only while the probe key still
+        matches (palace bytes unchanged) and only up to
+        ``_HNSW_CAPACITY_EVIDENCE_MAX_AGE_SECONDS``. Past the ceiling we
+        still fail closed.
+        """
+        from mempalace import mcp_server
+
+        _patch_mcp_server(monkeypatch, config, kg)
+        mcp_server._invalidate_hnsw_capacity_probe_cache()
+        monkeypatch.setattr(mcp_server, "_vector_disabled", False)
+        monkeypatch.setattr(mcp_server, "_vector_disabled_reason", "")
+        monkeypatch.setattr(mcp_server, "_vector_disabled_code", "")
+
+        monkeypatch.setattr(
+            mcp_server,
+            "hnsw_capacity_status",
+            lambda *_a, **_k: {
+                "diverged": False,
+                "status": "ok",
+                "message": "within flush-lag tolerance",
+                "sqlite_count": 1_030_543,
+                "hnsw_count": 1_005_405,
+                "divergence": 25_138,
+            },
+        )
+        mcp_server._refresh_vector_disabled_flag()
+        assert mcp_server._vector_disabled is False
+
+        release = threading.Event()
+
+        def wedged_probe(*_args, **_kwargs):
+            assert release.wait(timeout=5)
+            return {"diverged": False, "status": "ok", "message": "late"}
+
+        # Soft TTL 0 => the proof is immediately due for refresh; a 50ms
+        # lease => the refresh probe is always declared wedged.
+        monkeypatch.setattr(mcp_server, "hnsw_capacity_status", wedged_probe)
+        monkeypatch.setattr(mcp_server, "_HNSW_CAPACITY_CACHE_TTL_SECONDS", 0.0)
+        monkeypatch.setattr(mcp_server, "_HNSW_CAPACITY_PROBE_TIMEOUT_SECONDS", 0.05)
+        # time.monotonic() has ~15.6ms granularity on Windows, so a
+        # zero-second TTL is only past-due once the clock has actually
+        # ticked. Sleep past one tick rather than relying on sub-tick ages.
+        time.sleep(0.05)
+
+        try:
+            mcp_server._refresh_vector_disabled_flag()
+            assert mcp_server._vector_disabled is False, (
+                "a wedged probe disabled vector search even though key-exact "
+                "proven evidence was inside the staleness ceiling"
+            )
+            assert mcp_server._vector_capacity_status["evidence_stale"] is True
+            assert (
+                mcp_server._vector_capacity_status["evidence_degraded_by"] == "probe_lease_expired"
+            )
+
+            # Past the hard ceiling the same wedged probe must fail closed.
+            monkeypatch.setattr(mcp_server, "_HNSW_CAPACITY_EVIDENCE_MAX_AGE_SECONDS", 0.0)
+            mcp_server._refresh_vector_disabled_flag()
+            assert mcp_server._vector_disabled is True
+            assert mcp_server._vector_disabled_code == "probe_lease_expired"
+        finally:
+            release.set()
+
+    def test_confirmed_divergence_disables_even_with_recent_healthy_proof(
+        self, monkeypatch, config, kg
+    ):
+        """The fix must not become "always enabled" (#1222 guard).
+
+        A probe that actually read the palace and found divergence must
+        clear the proven-healthy record, disable vector search, and leave
+        no stale proof behind for a later wedged probe to coast on.
+        """
+        from mempalace import mcp_server
+
+        _patch_mcp_server(monkeypatch, config, kg)
+        mcp_server._invalidate_hnsw_capacity_probe_cache()
+        monkeypatch.setattr(mcp_server, "_vector_disabled", False)
+        monkeypatch.setattr(mcp_server, "_vector_disabled_reason", "")
+        monkeypatch.setattr(mcp_server, "_vector_disabled_code", "")
+
+        monkeypatch.setattr(
+            mcp_server,
+            "hnsw_capacity_status",
+            lambda *_a, **_k: {
+                "diverged": False,
+                "status": "ok",
+                "message": "within flush-lag tolerance",
+                "sqlite_count": 200_000,
+                "hnsw_count": 199_000,
+                "divergence": 1_000,
+            },
+        )
+        mcp_server._refresh_vector_disabled_flag()
+        assert mcp_server._vector_disabled is False
+        assert mcp_server._hnsw_capacity_proven is not None
+
+        # The #1222 shape: sqlite at 200K, HNSW frozen at 16 384. Expire the
+        # per-key cache entry the way a TTL lapse does, WITHOUT clearing the
+        # proven record -- that is the state in which stale evidence could
+        # wrongly outrank a live negative.
+        monkeypatch.setattr(
+            mcp_server,
+            "hnsw_capacity_status",
+            lambda *_a, **_k: {
+                "diverged": True,
+                "status": "diverged",
+                "message": "HNSW 16,384 / sqlite 200,000 - run mempalace repair",
+                "sqlite_count": 200_000,
+                "hnsw_count": 16_384,
+                "divergence": 183_616,
+            },
+        )
+        with mcp_server._hnsw_capacity_condition:
+            mcp_server._hnsw_capacity_cache.clear()
+
+        mcp_server._refresh_vector_disabled_flag()
+
+        assert mcp_server._vector_disabled is True, (
+            "confirmed divergence did not disable vector search -- the #1222 "
+            "segfault guard is inert"
+        )
+        assert mcp_server._vector_disabled_code == "divergence_confirmed"
+        assert "16,384" in mcp_server._vector_disabled_reason
+        assert mcp_server._hnsw_capacity_proven is None
+
+        # And a wedged probe afterwards must stay closed: there is no
+        # surviving proof to coast on.
+        release = threading.Event()
+
+        def wedged_probe(*_args, **_kwargs):
+            assert release.wait(timeout=5)
+            return {"diverged": False, "status": "ok", "message": "late"}
+
+        monkeypatch.setattr(mcp_server, "hnsw_capacity_status", wedged_probe)
+        monkeypatch.setattr(mcp_server, "_HNSW_CAPACITY_PROBE_TIMEOUT_SECONDS", 0.05)
+        with mcp_server._hnsw_capacity_condition:
+            mcp_server._hnsw_capacity_cache.clear()
+        try:
+            mcp_server._refresh_vector_disabled_flag()
+            assert mcp_server._vector_disabled is True
+            assert mcp_server._vector_disabled_code == "probe_lease_expired"
+        finally:
+            release.set()
+
     def test_hnsw_cached_probe_exception_fails_vector_disabled(self, monkeypatch, config, kg):
         from mempalace import mcp_server
 

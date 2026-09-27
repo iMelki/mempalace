@@ -52,10 +52,12 @@ import argparse
 import hashlib
 import json
 import os
+import stat
 import shutil
 import sqlite3
 import sys
 import time
+import uuid
 from contextlib import contextmanager
 
 # datetime.UTC is a 3.11+ alias; CI runs 3.9, where only timezone.utc exists.
@@ -157,6 +159,110 @@ def default_maintenance_marker() -> Path | None:
     return Path(local_app_data) / "MemSys" / ".maintenance"
 
 
+def _marker_matches_identity(
+    path: Path, identity: os.stat_result, *, content_immutable: bool = True
+) -> bool:
+    current = os.stat(path, follow_symlinks=False)
+    return (
+        stat.S_ISREG(current.st_mode)
+        and current.st_dev == identity.st_dev
+        and current.st_ino == identity.st_ino
+        and (
+            not content_immutable
+            or (current.st_size == identity.st_size and current.st_mtime_ns == identity.st_mtime_ns)
+        )
+    )
+
+
+def _unlink_owned_marker(
+    path: Path, identity: os.stat_result, *, content_immutable: bool = True
+) -> None:
+    if not _marker_matches_identity(path, identity, content_immutable=content_immutable):
+        raise PalaceSnapshotError("maintenance marker ownership changed; foreign marker preserved")
+    path.unlink()
+
+
+def _open_prepared_marker(path: Path):
+    """Create a Windows writer that denies competing writes and path removal.
+
+    Keeping this handle open through ``os.link`` binds publication to the
+    prepared object. A plain Python ``Path.open`` permits a second writer on
+    Windows and cannot provide that proof.
+    """
+
+    if os.name != "nt":
+        # Preserve the existing POSIX explicit-marker behavior. Its pathname
+        # hard-link publication is not an object-bound concurrency proof.
+        return path.open("x", encoding="utf-8", newline="\r\n")
+
+    import ctypes
+    import msvcrt
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create = kernel32.CreateFileW
+    create.argtypes = [
+        ctypes.c_wchar_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+    ]
+    create.restype = ctypes.c_void_p
+    # CREATE_NEW + FILE_SHARE_READ: no competing write, rename, or unlink.
+    handle = create(str(path), 0x40000000, 0x1, None, 0x1, 0x80, None)
+    if handle == ctypes.c_void_p(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        fd = msvcrt.open_osfhandle(handle, os.O_WRONLY)
+    except BaseException:
+        kernel32.CloseHandle(ctypes.c_void_p(handle))
+        raise
+    try:
+        return os.fdopen(fd, "w", encoding="utf-8", newline="\r\n")
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _create_maintenance_marker(marker: Path) -> os.stat_result:
+    """Publish only a complete marker through a no-replace, same-volume link.
+
+    A pre-link write, flush, or fstat failure leaves no active pause marker.
+    A close failure after linking may retain only a complete recoverable marker.
+    ``os.link`` is intentionally fail-closed on filesystems without hard links.
+    """
+
+    prepared = marker.with_name(f".maintenance.prepared-{uuid.uuid4().hex}")
+    prepared_identity: os.stat_result | None = None
+    try:
+        # Recovery's Get-MemSysRecoveryExpectedText requires literal CRLF.
+        with _open_prepared_marker(prepared) as stream:
+            prepared_identity = os.fstat(stream.fileno())
+            stream.write(f"mempalace backup-snapshot lease {_utc_now()} pid={os.getpid()}\n")
+            stream.flush()
+            prepared_identity = os.fstat(stream.fileno())
+            os.link(prepared, marker)
+        _unlink_owned_marker(prepared, prepared_identity)
+        return prepared_identity
+    except BaseException:
+        # A native link may have succeeded even if a wrapper raises afterward.
+        # Only remove the exact prepared object; a foreign destination stays.
+        if prepared_identity is not None:
+            try:
+                if _marker_matches_identity(marker, prepared_identity):
+                    _unlink_owned_marker(marker, prepared_identity)
+            except OSError:
+                pass  # A remaining complete marker needs attended exact recovery.
+        if prepared_identity is not None:
+            try:
+                _unlink_owned_marker(prepared, prepared_identity, content_immutable=False)
+            except OSError:
+                pass  # Never unlink a foreign replacement at the prepared path.
+        raise
+
+
 @contextmanager
 def clean_client_lease(
     palace_path: Path,
@@ -171,8 +277,8 @@ def clean_client_lease(
     :class:`PalaceSnapshotError` rather than queueing behind a multi-hour miner.
 
     Layer 2 is the shared MemSys maintenance marker, which asks the schedulers
-    and watchdogs not to start new work.  It is best effort: a marker that
-    another operator already raised is left exactly as found on release.
+    and watchdogs not to start new work.  A pre-existing marker belongs to
+    another operation (or an interrupted one) and must block this lease.
     """
 
     resolved = Path(palace_path).expanduser().resolve()
@@ -183,20 +289,20 @@ def clean_client_lease(
         )
 
     marker_created = False
-    marker_pre_existing = False
+    marker_identity: os.stat_result | None = None
     if marker is not None:
-        marker_pre_existing = marker.exists()
-        if not marker_pre_existing:
-            try:
-                marker.parent.mkdir(parents=True, exist_ok=True)
-                marker.write_text(
-                    f"mempalace backup-snapshot lease {_utc_now()} pid={os.getpid()}\n",
-                    encoding="utf-8",
-                )
-                marker_created = True
-            except OSError:
-                # Best effort only. The palace lock below is the hard boundary.
-                marker = None
+        try:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker_identity = _create_maintenance_marker(marker)
+            marker_created = True
+        except FileExistsError as exc:
+            raise PalaceSnapshotError(
+                "clean-client lease unavailable: maintenance marker already exists"
+            ) from exc
+        except OSError as exc:
+            raise PalaceSnapshotError(
+                "clean-client lease unavailable: maintenance marker cannot be raised"
+            ) from exc
 
     try:
         with mine_palace_lock(str(resolved)):
@@ -206,7 +312,7 @@ def clean_client_lease(
                 "palaceLockScope": "exclusive-cross-process",
                 "maintenanceMarkerPath": str(marker) if marker is not None else "",
                 "maintenanceMarkerRaisedByLease": marker_created,
-                "maintenanceMarkerPreExisting": marker_pre_existing,
+                "maintenanceMarkerPreExisting": False,
             }
     except MineAlreadyRunning as exc:
         raise PalaceSnapshotError(
@@ -216,9 +322,12 @@ def clean_client_lease(
     finally:
         if marker_created and marker is not None:
             try:
-                marker.unlink(missing_ok=True)
-            except OSError:
-                pass
+                assert marker_identity is not None
+                _unlink_owned_marker(marker, marker_identity)
+            except FileNotFoundError as exc:
+                raise PalaceSnapshotError("maintenance marker disappeared before release") from exc
+            except OSError as exc:
+                raise PalaceSnapshotError("maintenance marker release failed") from exc
 
 
 # --------------------------------------------------------------------------

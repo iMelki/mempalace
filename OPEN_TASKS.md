@@ -1,16 +1,37 @@
 # MemPalace Open Tasks
 
-Last updated: 2026-09-15
+Last updated: 2026-09-27
 
 This file is the durable local index for active `mempalace` issues.
 
 ## Active Issues
+
+- [#67 - Fail closed on snapshot maintenance-marker ownership and exact release](https://github.com/iMelki/mempalace/issues/67)
+  - Source mitigation rejects pre-existing and late-arriving markers at exclusive
+    child lease acquisition, and preserves a replacement detected at release.
+    Focused snapshot tests passed 29/29. A path-based release race and natural
+    scheduled-run proof remain open; the current MemSys marker still needs its
+    separately approved exact-object quarantine. See
+    `docs/research/snapshot-maintenance-marker-ownership-2026-09-27.md` and
+    [MemSys #466](https://github.com/iMelki/memsys/issues/466).
 
 - [[memsys#680](https://github.com/iMelki/memsys/issues/680) / [memsys#692](https://github.com/iMelki/memsys/issues/692) - Record the SQLite WAL mode decision for the 26.5 GB chroma.sqlite3]
   - Architecture Decision Record completed: `docs/rfcs/003-chroma-sqlite-wal-decision-record.md`.
   - Core finding: Default `journal_mode=delete` acquires an exclusive database lock during mining, rendering the live palace completely unreadable by concurrent readers (even in `mode=ro`). However, naive WAL adoption risks checkpoint starvation, Windows AV handle collisions on `-shm`, and WSL DrvFS boundary corruption.
   - Adopted dual-track architecture: Track 1 for normal online mining with managed WAL (`synchronous=NORMAL`, `busy_timeout=30000`, 64 MB `journal_size_limit`, passive batch checkpoints, truncate on exit, AV directory exclusion); Track 2 for bulk cohort rebuilds using shadow staging (`storage/staging/chroma.sqlite3`) and atomic rename-swap under a maintenance latch.
   - Status: ADR completed; migration scripts and telemetry thresholds planned.
+
+- [#57 - Per-row conditional purge costs a full collection scan per drawer](https://github.com/iMelki/mempalace/issues/57)
+  - Measured: 13-18 s per deleted drawer at 1,031,550 drawers; a six-drawer note
+    spends ~93 s purging. Cause is fork-local: `_delete_validated_collection_rows`
+    deletes one row per call with `ids` plus `where` plus a `$regex`
+    `where_document`, and chromadb 1.5.7 drops ID pushdown whenever any filter
+    accompanies `ids`. Upstream has no `write_receipts.py` and uses one bulk
+    `collection.delete(where={"source_file": ...})`.
+  - Fixes: batch the purge; backfill `write_output_content_hash` so the regex
+    stops firing. Both need a negative proof - a row mutated between snapshot and
+    delete must still fail the conditional delete.
+  - Benchmark harness and four-arm comparison recorded on `bench/issue-57-three-arm-delete` (PR #65).
 
 - [#62 - sync-upstream.yml fails every week with no alert](https://github.com/iMelki/mempalace/issues/62)
   - Verified two suspected targeting bugs before touching anything: the
@@ -31,6 +52,16 @@ This file is the durable local index for active `mempalace` issues.
     failures short of opening the Actions tab; #62 proposes an
     `if: failure()` step that opens/updates one tracking issue instead of
     relying on GitHub's per-user email notifications.
+
+- [#48 dev reconciliation](https://github.com/iMelki/mempalace/issues/48): September13 normalizes the upstream workflow to its declared LF policy. Historical checkouts otherwise showed a persistent CRLF-only dirty diff after restore. YAML content/semantics are identical; no upstream sync was dispatched.
+
+- [#51 - Stabilize bounded HNSW capacity evidence and degraded receipts](https://github.com/iMelki/mempalace/issues/51)
+  - Reconciled unfinished probe memo/budget work with current lifecycle and HTTP
+    port fixes. Preserved the positional `candidate_strategy` API while adding
+    degraded receipt fields. Offline checks: 211 passed/1 skipped; 31 API tests
+    passed after the compatibility repair; Ruff and negative/restored guard proof
+    passed. Runtime restart and live capacity timing are not part of this pass.
+  - Review and limits: `docs/research/hnsw-probe-reconciliation-2026-09-08.md`.
 
 - [#50 - Bound Chroma/ONNX thread lifecycle in full-suite pre-push runs](https://github.com/iMelki/mempalace/issues/50)
   - The protected pre-push caller stalled at 900 seconds on `2f84f8e` with

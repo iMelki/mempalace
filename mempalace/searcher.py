@@ -450,6 +450,28 @@ def search(query: str, palace_path: str, wing: str = None, room: str = None, n_r
     print()
 
 
+def _vector_disabled_fallback_block(code: str, since: str) -> dict:
+    """Build the degraded-receipt block for the BM25-only fallback (#51).
+
+    ``reason`` stays exactly ``"vector_search_disabled"`` — it is a small
+    closed enum pinned by tests and read by downstream callers. ``cause``
+    and ``since`` are additive: ``cause`` distinguishes "the capacity probe
+    timed out" from "the probe found real divergence", which the reason
+    string alone never could, and ``since`` says how long the degraded
+    state has held. Both are omitted when the caller did not supply them
+    (e.g. the union-merge path, which is not a disabled-vector receipt).
+    """
+    block = {
+        "mode": "bm25_only_via_sqlite",
+        "reason": "vector_search_disabled",
+    }
+    if code:
+        block["cause"] = code
+    if since:
+        block["since"] = since
+    return block
+
+
 def _bm25_only_via_sqlite(
     query: str,
     palace_path: str,
@@ -458,6 +480,8 @@ def _bm25_only_via_sqlite(
     n_results: int = 5,
     max_candidates: int = 500,
     _include_internal: bool = False,
+    vector_disabled_code: str = "",
+    vector_disabled_since: str = "",
 ) -> dict:
     """BM25-only search reading drawers directly from chroma.sqlite3.
 
@@ -662,10 +686,7 @@ def _bm25_only_via_sqlite(
         "filters": {"wing": wing, "room": room},
         "total_before_filter": len(candidates),
         "results": hits,
-        "fallback": {
-            "mode": "bm25_only_via_sqlite",
-            "reason": "vector_search_disabled",
-        },
+        "fallback": _vector_disabled_fallback_block(vector_disabled_code, vector_disabled_since),
     }
 
 
@@ -789,6 +810,8 @@ def search_memories(
     max_distance: float = 0.0,
     vector_disabled: bool = False,
     candidate_strategy: str = "vector",
+    vector_disabled_code: str = "",
+    vector_disabled_since: str = "",
 ) -> dict:
     """Programmatic search — returns a dict instead of printing.
 
@@ -808,6 +831,14 @@ def search_memories(
             (#1222). Set by the MCP server when the HNSW capacity probe
             detects a divergence that would segfault chromadb on segment
             load.
+        vector_disabled_code: Machine-readable cause for the disabled state
+            (#51) — e.g. ``"probe_lease_expired"`` vs
+            ``"divergence_confirmed"``. Emitted as ``fallback.cause`` so a
+            caller reading the degraded receipt can tell a slow probe apart
+            from real corruption. Empty string omits the key.
+        vector_disabled_since: ISO timestamp of the last vector-state
+            transition, emitted as ``fallback.since``. Empty string omits
+            the key.
         candidate_strategy: How candidates for the hybrid re-rank are gathered.
 
             * ``"vector"`` (default) — preserves historical behavior: top
@@ -839,6 +870,8 @@ def search_memories(
             wing=wing,
             room=room,
             n_results=n_results,
+            vector_disabled_code=vector_disabled_code,
+            vector_disabled_since=vector_disabled_since,
         )
 
     try:
