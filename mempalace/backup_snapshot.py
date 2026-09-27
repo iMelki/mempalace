@@ -57,6 +57,7 @@ import shutil
 import sqlite3
 import sys
 import time
+import uuid
 from contextlib import contextmanager
 
 # datetime.UTC is a 3.11+ alias; CI runs 3.9, where only timezone.utc exists.
@@ -158,6 +159,110 @@ def default_maintenance_marker() -> Path | None:
     return Path(local_app_data) / "MemSys" / ".maintenance"
 
 
+def _marker_matches_identity(
+    path: Path, identity: os.stat_result, *, content_immutable: bool = True
+) -> bool:
+    current = os.stat(path, follow_symlinks=False)
+    return (
+        stat.S_ISREG(current.st_mode)
+        and current.st_dev == identity.st_dev
+        and current.st_ino == identity.st_ino
+        and (
+            not content_immutable
+            or (current.st_size == identity.st_size and current.st_mtime_ns == identity.st_mtime_ns)
+        )
+    )
+
+
+def _unlink_owned_marker(
+    path: Path, identity: os.stat_result, *, content_immutable: bool = True
+) -> None:
+    if not _marker_matches_identity(path, identity, content_immutable=content_immutable):
+        raise PalaceSnapshotError("maintenance marker ownership changed; foreign marker preserved")
+    path.unlink()
+
+
+def _open_prepared_marker(path: Path):
+    """Create a Windows writer that denies competing writes and path removal.
+
+    Keeping this handle open through ``os.link`` binds publication to the
+    prepared object. A plain Python ``Path.open`` permits a second writer on
+    Windows and cannot provide that proof.
+    """
+
+    if os.name != "nt":
+        # Preserve the existing POSIX explicit-marker behavior. Its pathname
+        # hard-link publication is not an object-bound concurrency proof.
+        return path.open("x", encoding="utf-8", newline="\r\n")
+
+    import ctypes
+    import msvcrt
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create = kernel32.CreateFileW
+    create.argtypes = [
+        ctypes.c_wchar_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+    ]
+    create.restype = ctypes.c_void_p
+    # CREATE_NEW + FILE_SHARE_READ: no competing write, rename, or unlink.
+    handle = create(str(path), 0x40000000, 0x1, None, 0x1, 0x80, None)
+    if handle == ctypes.c_void_p(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        fd = msvcrt.open_osfhandle(handle, os.O_WRONLY)
+    except BaseException:
+        kernel32.CloseHandle(ctypes.c_void_p(handle))
+        raise
+    try:
+        return os.fdopen(fd, "w", encoding="utf-8", newline="\r\n")
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _create_maintenance_marker(marker: Path) -> os.stat_result:
+    """Publish only a complete marker through a no-replace, same-volume link.
+
+    A pre-link write, flush, or fstat failure leaves no active pause marker.
+    A close failure after linking may retain only a complete recoverable marker.
+    ``os.link`` is intentionally fail-closed on filesystems without hard links.
+    """
+
+    prepared = marker.with_name(f".maintenance.prepared-{uuid.uuid4().hex}")
+    prepared_identity: os.stat_result | None = None
+    try:
+        # Recovery's Get-MemSysRecoveryExpectedText requires literal CRLF.
+        with _open_prepared_marker(prepared) as stream:
+            prepared_identity = os.fstat(stream.fileno())
+            stream.write(f"mempalace backup-snapshot lease {_utc_now()} pid={os.getpid()}\n")
+            stream.flush()
+            prepared_identity = os.fstat(stream.fileno())
+            os.link(prepared, marker)
+        _unlink_owned_marker(prepared, prepared_identity)
+        return prepared_identity
+    except BaseException:
+        # A native link may have succeeded even if a wrapper raises afterward.
+        # Only remove the exact prepared object; a foreign destination stays.
+        if prepared_identity is not None:
+            try:
+                if _marker_matches_identity(marker, prepared_identity):
+                    _unlink_owned_marker(marker, prepared_identity)
+            except OSError:
+                pass  # A remaining complete marker needs attended exact recovery.
+        if prepared_identity is not None:
+            try:
+                _unlink_owned_marker(prepared, prepared_identity, content_immutable=False)
+            except OSError:
+                pass  # Never unlink a foreign replacement at the prepared path.
+        raise
+
+
 @contextmanager
 def clean_client_lease(
     palace_path: Path,
@@ -188,10 +293,7 @@ def clean_client_lease(
     if marker is not None:
         try:
             marker.parent.mkdir(parents=True, exist_ok=True)
-            with marker.open("x", encoding="utf-8", newline="\n") as stream:
-                stream.write(f"mempalace backup-snapshot lease {_utc_now()} pid={os.getpid()}\n")
-                stream.flush()
-                marker_identity = os.fstat(stream.fileno())
+            marker_identity = _create_maintenance_marker(marker)
             marker_created = True
         except FileExistsError as exc:
             raise PalaceSnapshotError(
@@ -220,19 +322,8 @@ def clean_client_lease(
     finally:
         if marker_created and marker is not None:
             try:
-                current_identity = os.stat(marker, follow_symlinks=False)
-                if (
-                    marker_identity is None
-                    or not stat.S_ISREG(current_identity.st_mode)
-                    or current_identity.st_dev != marker_identity.st_dev
-                    or current_identity.st_ino != marker_identity.st_ino
-                    or current_identity.st_size != marker_identity.st_size
-                    or current_identity.st_mtime_ns != marker_identity.st_mtime_ns
-                ):
-                    raise PalaceSnapshotError(
-                        "maintenance marker ownership changed; foreign marker preserved"
-                    )
-                marker.unlink()
+                assert marker_identity is not None
+                _unlink_owned_marker(marker, marker_identity)
             except FileNotFoundError as exc:
                 raise PalaceSnapshotError("maintenance marker disappeared before release") from exc
             except OSError as exc:

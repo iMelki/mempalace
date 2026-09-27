@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 import json
+import base64
+import os
+import re
+import shutil
 import sqlite3
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -103,9 +108,68 @@ def test_lease_raises_the_shared_maintenance_marker_and_lowers_it(palace, tmp_pa
     marker = tmp_path / "MemSys" / ".maintenance"
     with clean_client_lease(palace, maintenance_marker=marker) as lease:
         assert marker.exists()
+        assert re.fullmatch(
+            rb"mempalace backup-snapshot lease \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ pid=\d+\r\n",
+            marker.read_bytes(),
+        )
         assert lease["palaceLockHeld"] is True
         assert lease["maintenanceMarkerRaisedByLease"] is True
     assert not marker.exists()
+
+
+def test_marker_bytes_match_the_canonical_windows_recovery_consumer(palace, tmp_path):
+    """Evaluate only the actual PowerShell function AST, never its recovery main."""
+
+    consumer = (
+        Path(__file__).resolve().parents[4]
+        / "agent-settings/shared/tools/Invoke-MemSysMaintenanceMarkerRecovery.ps1"
+    )
+    powershell = shutil.which("pwsh")
+    if not consumer.is_file() or powershell is None:
+        pytest.skip("canonical MemSys recovery consumer and pwsh are not installed")
+
+    script = """
+    $tokens = $null; $errors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseFile($args[0], [ref]$tokens, [ref]$errors)
+    if ($errors.Count -ne 0) { throw 'consumer parse failed' }
+    $function = $ast.Find({ param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq 'Get-MemSysRecoveryExpectedText'
+    }, $true)
+    if ($null -eq $function) { throw 'consumer function missing' }
+    . ([scriptblock]::Create($function.Extent.Text))
+    $expected = Get-MemSysRecoveryExpectedText -LeaseStartedAtUtc (
+        [datetimeoffset]::Parse($args[1])
+    ) -OwnerProcessId ([int]$args[2])
+    [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($expected))
+    """
+    marker = tmp_path / "MemSys" / ".maintenance"
+    with clean_client_lease(palace, maintenance_marker=marker):
+        payload = marker.read_bytes()
+        match = re.fullmatch(
+            rb"mempalace backup-snapshot lease (\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ) pid=(\d+)\r\n",
+            payload,
+        )
+        assert match is not None
+        result = subprocess.run(
+            [
+                powershell,
+                "-NoProfile",
+                "-NonInteractive",
+                "-CommandWithArgs",
+                script,
+                str(consumer),
+                match.group(1).decode("ascii"),
+                match.group(2).decode("ascii"),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        )
+        expected = base64.b64decode(result.stdout.strip())
+        assert payload == expected
+        assert payload.replace(b"\r\n", b"\n") != expected
 
 
 def test_lease_blocks_and_preserves_a_pre_existing_maintenance_marker(palace, tmp_path):
@@ -116,22 +180,165 @@ def test_lease_blocks_and_preserves_a_pre_existing_maintenance_marker(palace, tm
         with clean_client_lease(palace, maintenance_marker=marker):
             pytest.fail("a foreign pause cannot be borrowed for a snapshot")
     assert marker.read_text(encoding="utf-8") == "another operator"
+    assert not list(marker.parent.glob(".maintenance.prepared-*"))
 
 
 def test_lease_refuses_marker_created_at_exclusive_open(palace, tmp_path, monkeypatch):
     marker = tmp_path / "MemSys" / ".maintenance"
-    original_open = Path.open
+    real_link = os.link
 
-    def inject_racer(path, mode="r", *args, **kwargs):
-        if path == marker and mode == "x":
+    def inject_racer(source, target, *args, **kwargs):
+        if target == marker:
             marker.write_text("late owner", encoding="utf-8")
-        return original_open(path, mode, *args, **kwargs)
+        return real_link(source, target, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "open", inject_racer)
+    monkeypatch.setattr(backup_snapshot.os, "link", inject_racer)
     with pytest.raises(PalaceSnapshotError, match="maintenance marker already exists"):
         with clean_client_lease(palace, maintenance_marker=marker):
             pytest.fail("a late pause cannot be borrowed for a snapshot")
     assert marker.read_text(encoding="utf-8") == "late owner"
+    assert not list(marker.parent.glob(".maintenance.prepared-*"))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows CreateFile share mode proof")
+def test_windows_pre_link_prepared_object_cannot_be_replaced_or_rewritten(
+    palace, tmp_path, monkeypatch
+):
+    marker = tmp_path / "MemSys" / ".maintenance"
+    real_link = os.link
+    attempted = []
+
+    def attempt_foreign_replacement(source, target, *args, **kwargs):
+        try:
+            source.rename(source.with_name("retired-prepared"))
+        except OSError:
+            attempted.append("rename-blocked")
+        else:
+            pytest.fail("prepared path was replaced before publication")
+        try:
+            with source.open("w", encoding="utf-8") as foreign:
+                foreign.write("partial foreign bytes")
+        except OSError:
+            attempted.append("write-blocked")
+        else:
+            pytest.fail("prepared object was rewritten before publication")
+        return real_link(source, target, *args, **kwargs)
+
+    monkeypatch.setattr(backup_snapshot.os, "link", attempt_foreign_replacement)
+    with clean_client_lease(palace, maintenance_marker=marker):
+        assert attempted == ["rename-blocked", "write-blocked"]
+        assert re.fullmatch(rb"mempalace backup-snapshot lease .* pid=\d+\r\n", marker.read_bytes())
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("fault", ["write", "flush", "fstat-first", "fstat-second", "close"])
+def test_lease_preparation_failure_never_publishes_partial_marker(
+    palace, tmp_path, monkeypatch, fault
+):
+    marker = tmp_path / "MemSys" / ".maintenance"
+    real_open = backup_snapshot._open_prepared_marker
+    real_fstat = os.fstat
+    fstat_calls = 0
+
+    class FaultyStream:
+        def __init__(self, stream):
+            self.stream = stream
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            result = self.stream.__exit__(*args)
+            if fault == "close":
+                raise OSError("injected close failure")
+            return result
+
+        def fileno(self):
+            return self.stream.fileno()
+
+        def write(self, value):
+            if fault == "write":
+                self.stream.write("partial")
+                raise OSError("injected write failure")
+            return self.stream.write(value)
+
+        def flush(self):
+            if fault == "flush":
+                raise OSError("injected flush failure")
+            return self.stream.flush()
+
+    def fault_open(path):
+        return FaultyStream(real_open(path))
+
+    def fault_fstat(fd):
+        nonlocal fstat_calls
+        fstat_calls += 1
+        if fault == "fstat-first" and fstat_calls == 1:
+            raise OSError("injected first fstat failure")
+        if fault == "fstat-second" and fstat_calls == 2:
+            raise OSError("injected second fstat failure")
+        return real_fstat(fd)
+
+    monkeypatch.setattr(backup_snapshot, "_open_prepared_marker", fault_open)
+    monkeypatch.setattr(backup_snapshot.os, "fstat", fault_fstat)
+    with pytest.raises(PalaceSnapshotError, match="maintenance marker cannot be raised"):
+        with clean_client_lease(palace, maintenance_marker=marker):
+            pytest.fail("failed preparation cannot grant a lease")
+    assert not marker.exists()
+
+
+def test_lease_preserves_foreign_prepared_file_and_removes_own_marker(
+    palace, tmp_path, monkeypatch
+):
+    marker = tmp_path / "MemSys" / ".maintenance"
+    real_unlink_owned = backup_snapshot._unlink_owned_marker
+    replaced = False
+
+    def inject_replacement(path, identity, **kwargs):
+        nonlocal replaced
+        if path != marker and not replaced:
+            replaced = True
+            retired = path.with_name("retired-prepared")
+            path.rename(retired)
+            path.write_text("foreign prepared file", encoding="utf-8")
+        return real_unlink_owned(path, identity, **kwargs)
+
+    monkeypatch.setattr(backup_snapshot, "_unlink_owned_marker", inject_replacement)
+    with pytest.raises(PalaceSnapshotError, match="ownership changed"):
+        with clean_client_lease(palace, maintenance_marker=marker):
+            pytest.fail("a foreign prepared file must not be removed")
+    assert not marker.exists()
+    assert (
+        next(marker.parent.glob(".maintenance.prepared-*")).read_text() == "foreign prepared file"
+    )
+
+
+@pytest.mark.parametrize("release_denied", [False, True])
+def test_lease_recovers_or_preserves_complete_marker_after_post_link_error(
+    palace, tmp_path, monkeypatch, release_denied
+):
+    marker = tmp_path / "MemSys" / ".maintenance"
+    real_link = os.link
+    real_unlink = Path.unlink
+
+    def link_then_fail(source, target, *args, **kwargs):
+        real_link(source, target, *args, **kwargs)
+        raise OSError("injected post-link failure")
+
+    def deny_marker_release(path, *args, **kwargs):
+        if release_denied and path == marker:
+            raise OSError("injected release failure")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(backup_snapshot.os, "link", link_then_fail)
+    monkeypatch.setattr(Path, "unlink", deny_marker_release)
+    with pytest.raises(PalaceSnapshotError, match="maintenance marker cannot be raised"):
+        with clean_client_lease(palace, maintenance_marker=marker):
+            pytest.fail("a failed publication cannot grant the lease")
+    if release_denied:
+        assert re.fullmatch(rb"mempalace backup-snapshot lease .* pid=\d+\r\n", marker.read_bytes())
+    else:
+        assert not marker.exists()
 
 
 def test_lease_preserves_replacement_marker_during_release(palace, tmp_path):
