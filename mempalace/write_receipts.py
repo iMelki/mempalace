@@ -2620,6 +2620,16 @@ def _validated_collection_row(
 def _delete_filters_for_validated_row(
     row: _ValidatedCollectionRow,
 ) -> tuple[dict, Optional[dict]]:
+    """Build Arm-B delete filters: ids caller + indexed metadata where.
+
+    Prefer HOLD (#677 / mempalace issue-57 bench): everyday purge deletes use
+    ``ids`` plus ownership/content-hash metadata ``where``. Do **not** attach
+    ``where_document`` ``$regex`` on this hot path (bench: ~2.6× slower).
+
+    There is no separate rare/opt-in regex API today; do not invent one here.
+    Content is still bound by the pre-delete exact row re-read under exclusive
+    managed-write scope, plus stamped content-hash metadata when present.
+    """
     metadata = dict(row.metadata)
     conditions = []
     source_identity = metadata.get(META_SOURCE_IDENTITY)
@@ -2644,7 +2654,6 @@ def _delete_filters_for_validated_row(
         conditions.append({META_RECEIPT_ID: receipt_id})
 
     content_hash = metadata.get(META_OUTPUT_CONTENT_HASH)
-    content_hash_matches_document = False
     if content_hash is not None:
         try:
             _require_sha256(content_hash, "validated row content hash")
@@ -2655,28 +2664,25 @@ def _delete_filters_for_validated_row(
             content_hash,
             sha256_bytes(row.document.encode("utf-8")),
         )
+        if not content_hash_matches_document and not row.document:
+            raise ReceiptRecoveryError(
+                "stale content hash on empty row cannot be content-bound for conditional deletion"
+            )
     elif not row.document:
         raise ReceiptRecoveryError(
             "legacy empty row cannot be content-bound for conditional deletion"
         )
 
     where = conditions[0] if len(conditions) == 1 else {"$and": conditions}
-    if content_hash_matches_document:
-        where_document = None
-    elif row.document:
-        where_document = {"$regex": f"(?s)^{re.escape(row.document)}$"}
-    else:
-        raise ReceiptRecoveryError(
-            "stale content hash on empty row cannot be content-bound for conditional deletion"
-        )
-    return where, where_document
+    # Prefer HOLD: never emit where_document regex on the managed purge hot path.
+    return where, None
 
 
 def _delete_validated_collection_rows(
     collection: Any,
     capability: _ManagedPurgeCapability,
 ) -> list[str]:
-    """Consume private recovery authority using ID+ownership+content filters."""
+    """Consume private recovery authority using ID+ownership metadata filters."""
     if (
         not isinstance(capability, _ManagedPurgeCapability)
         or capability.authority is not _PURGE_AUTHORITY
@@ -2738,16 +2744,23 @@ def _delete_collection_row_with_exact_filters(
     collection: Any,
     delete_kwargs: Mapping[str, Any],
 ) -> None:
-    """Use an exact-filter-capable delete surface or fail closed."""
+    """Use an ownership-filter-capable delete surface or fail closed.
+
+    Prefer HOLD hot path passes ``ids`` + metadata ``where`` only. Require
+    ``where_document`` support only when that rare kwarg is actually present.
+    """
     method = getattr(collection, "delete", None)
     if not callable(method):
         raise ReceiptRecoveryError("collection has no conditional delete surface")
-    if not _callable_accepts_keyword(method, "where_document"):
+    required = [key for key in ("where", "where_document") if key in delete_kwargs]
+    if required and not all(_callable_accepts_keyword(method, key) for key in required):
         raw_collection = getattr(collection, "_collection", None)
         method = getattr(raw_collection, "delete", None)
-        if not callable(method) or not _callable_accepts_keyword(method, "where_document"):
+        if not callable(method) or not all(
+            _callable_accepts_keyword(method, key) for key in required
+        ):
             raise ReceiptRecoveryError(
-                "collection cannot enforce content-bound conditional deletion"
+                "collection cannot enforce ownership-bound conditional deletion"
             )
     result = method(**dict(delete_kwargs))
     if isinstance(result, Mapping) and "deleted" in result:

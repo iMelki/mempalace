@@ -1997,7 +1997,8 @@ def test_matching_stamped_hash_uses_metadata_binding_without_document_regex(tmp_
 
 
 @pytest.mark.parametrize("hash_state", ["missing", "stale"])
-def test_legacy_or_stale_hash_retains_exact_document_regex(tmp_path, hash_state):
+def test_legacy_or_stale_hash_uses_metadata_where_without_document_regex(tmp_path, hash_state):
+    """Prefer HOLD (#677): missing/stale hash still deletes via ids+where, not regex."""
     _, _, collection, _, _, _ = _seed_receipted_recovery_source(tmp_path)
     document, metadata = collection.rows["baseline-row"]
     metadata = dict(metadata)
@@ -2010,9 +2011,16 @@ def test_legacy_or_stale_hash_retains_exact_document_regex(tmp_path, hash_state)
         (document, metadata, None),
     )
 
-    _, where_document = write_receipts_module._delete_filters_for_validated_row(row)
+    where, where_document = write_receipts_module._delete_filters_for_validated_row(row)
 
-    assert where_document == {"$regex": f"(?s)^{re.escape(document)}$"}
+    assert where_document is None
+    assert isinstance(where, dict)
+    clauses = where["$and"] if "$and" in where else [where]
+    assert any(META_SOURCE_IDENTITY in clause for clause in clauses)
+    if hash_state == "stale":
+        assert {META_OUTPUT_CONTENT_HASH: metadata[META_OUTPUT_CONTENT_HASH]} in clauses
+    else:
+        assert all(META_OUTPUT_CONTENT_HASH not in clause for clause in clauses)
 
 
 def test_stale_hash_on_empty_row_fails_closed(tmp_path):
@@ -2355,6 +2363,8 @@ def test_identity_selector_rejects_contradictory_foreign_source_file(tmp_path):
 
 
 def test_exact_delete_uses_capable_raw_collection_behind_legacy_wrapper(tmp_path):
+    """Prefer HOLD (#677): unwrap to raw when wrapper cannot take metadata where."""
+
     class LegacyDeleteWrapper:
         def __init__(self, raw):
             self._collection = raw
@@ -2362,8 +2372,9 @@ def test_exact_delete_uses_capable_raw_collection_behind_legacy_wrapper(tmp_path
         def get(self, **kwargs):
             return self._collection.get(**kwargs)
 
-        def delete(self, *, ids=None, where=None):
-            raise AssertionError(f"unsafe wrapper delete reached: {ids!r} {where!r}")
+        def delete(self, *, ids=None):
+            # ids-only surface is unsafe for ownership-bound purge; must unwrap.
+            raise AssertionError(f"unsafe wrapper delete reached (ids-only): {ids!r}")
 
     _, store, raw, source_locator, baseline, snapshot = _seed_receipted_recovery_source(tmp_path)
     rewrite, recovery_path = _begin_recovery_rewrite(store, source_locator, baseline, snapshot)
@@ -2386,23 +2397,26 @@ def test_exact_delete_uses_capable_raw_collection_behind_legacy_wrapper(tmp_path
     assert rewrite.receipt_id
 
 
-def test_exact_delete_fails_closed_when_wrapper_cannot_forward_content_filter(tmp_path):
+def test_exact_delete_fails_closed_when_wrapper_cannot_forward_ownership_filter(tmp_path):
+    """Prefer HOLD (#677): fail closed when neither wrapper nor raw can take where."""
+
     class UnsupportedDeleteWrapper:
         def __init__(self, raw):
-            self.raw = raw
+            self.raw = raw  # deliberately not `_collection` — no unwrap path
 
         def get(self, **kwargs):
             return self.raw.get(**kwargs)
 
-        def delete(self, *, ids=None, where=None):
-            self.raw.delete(ids=ids, where=where)
+        def delete(self, *, ids=None):
+            # ids-only; cannot forward ownership metadata where
+            self.raw.delete(ids=ids)
 
     _, store, raw, source_locator, baseline, snapshot = _seed_receipted_recovery_source(tmp_path)
     _, recovery_path = _begin_recovery_rewrite(store, source_locator, baseline, snapshot)
     wrapper = UnsupportedDeleteWrapper(raw)
 
     with _managed_write_scope(store):
-        with pytest.raises(ReceiptRecoveryError, match="content-bound conditional deletion"):
+        with pytest.raises(ReceiptRecoveryError, match="ownership-bound conditional deletion"):
             purge_managed_source_snapshot(
                 wrapper,
                 snapshot,

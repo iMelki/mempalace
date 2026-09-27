@@ -54,3 +54,4 @@ Contiguous blocks per arm to prevent cross-arm WAL-compaction contamination:
 1. **Document Regex Penalty**: Deleting with `where_document` regex (Arms C & D) is **2.3× to 2.5× slower** than ID-only (Arm A) or ID + metadata filtering (Arm B).
 2. **Metadata Filtering is Cheap**: Arm B adds only ~4.8 ms (15.7%) over raw ID deletion in the block design, while Arm C adds ~45 ms (126%).
 3. **Architectural Recommendation**: For bulk purge and write receipts, use **Arm B** (`ids` + indexed metadata conjunction). Avoid `where_document` regex matching in delete paths unless content ambiguity cannot be resolved by metadata hash invariants.
+4. **Prefer HOLD-fix (memsys#677)**: Managed remine purge in `write_receipts._delete_filters_for_validated_row` now always returns `where_document=None` on the hot path (ids + metadata `where` only), including legacy/missing or stale content-hash rows. No new rare/opt-in regex API was added.

@@ -17,6 +17,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   source mitigation, not current-marker recovery, installed adoption, or a
   completed exact-object release proof.
 
+- **Managed purge Prefer HOLD: ids + metadata `where`, not document regex
+  (memsys#677).** `_delete_filters_for_validated_row` no longer attaches
+  `where_document` `$regex` on the remine/managed-write delete hot path —
+  including legacy/missing or stale content-hash rows. Everyday deletes stay
+  Arm-B shaped (`collection.delete(ids=..., where=...)`). Bench on
+  `bench/issue-57-three-arm-delete` showed regex arms ~2.6–3× slower than
+  ids/ids+where at N=10k. No new rare/opt-in regex API (none existed). Pre-delete
+  exact row re-read under exclusive managed-write scope plus stamped ownership /
+  content-hash metadata remain the binding. Empty rows without a matching stamped
+  hash still fail closed.
+
 - Normalize the upstream workflow line endings to the existing LF attributes, eliminating persistent clean-checkout drift without changing workflow behavior (#48).
 
 - **Native HTTP MCP default port is now `18787`.** `mempalace-mcp-http` and
