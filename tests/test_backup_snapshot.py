@@ -108,14 +108,41 @@ def test_lease_raises_the_shared_maintenance_marker_and_lowers_it(palace, tmp_pa
     assert not marker.exists()
 
 
-def test_lease_leaves_a_pre_existing_maintenance_marker_alone(palace, tmp_path):
+def test_lease_blocks_and_preserves_a_pre_existing_maintenance_marker(palace, tmp_path):
     marker = tmp_path / "MemSys" / ".maintenance"
     marker.parent.mkdir(parents=True)
     marker.write_text("another operator", encoding="utf-8")
-    with clean_client_lease(palace, maintenance_marker=marker) as lease:
-        assert lease["maintenanceMarkerPreExisting"] is True
-        assert lease["maintenanceMarkerRaisedByLease"] is False
+    with pytest.raises(PalaceSnapshotError, match="maintenance marker already exists"):
+        with clean_client_lease(palace, maintenance_marker=marker):
+            pytest.fail("a foreign pause cannot be borrowed for a snapshot")
     assert marker.read_text(encoding="utf-8") == "another operator"
+
+
+def test_lease_refuses_marker_created_at_exclusive_open(palace, tmp_path, monkeypatch):
+    marker = tmp_path / "MemSys" / ".maintenance"
+    original_open = Path.open
+
+    def inject_racer(path, mode="r", *args, **kwargs):
+        if path == marker and mode == "x":
+            marker.write_text("late owner", encoding="utf-8")
+        return original_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", inject_racer)
+    with pytest.raises(PalaceSnapshotError, match="maintenance marker already exists"):
+        with clean_client_lease(palace, maintenance_marker=marker):
+            pytest.fail("a late pause cannot be borrowed for a snapshot")
+    assert marker.read_text(encoding="utf-8") == "late owner"
+
+
+def test_lease_preserves_replacement_marker_during_release(palace, tmp_path):
+    marker = tmp_path / "MemSys" / ".maintenance"
+    retired = tmp_path / "MemSys" / "retired-owned-marker"
+    with pytest.raises(PalaceSnapshotError, match="ownership changed"):
+        with clean_client_lease(palace, maintenance_marker=marker):
+            marker.rename(retired)
+            marker.write_text("replacement owner", encoding="utf-8")
+    assert retired.read_text(encoding="utf-8").startswith("mempalace backup-snapshot lease ")
+    assert marker.read_text(encoding="utf-8") == "replacement owner"
 
 
 def test_lease_fails_closed_when_a_writer_already_holds_the_palace_lock(palace, tmp_path):

@@ -1,10 +1,19 @@
 # MemPalace Open Tasks
 
-Last updated: 2026-09-15
+Last updated: 2026-09-27
 
 This file is the durable local index for active `mempalace` issues.
 
 ## Active Issues
+
+- [#67 - Fail closed on snapshot maintenance-marker ownership and exact release](https://github.com/iMelki/mempalace/issues/67)
+  - Source mitigation rejects pre-existing and late-arriving markers at exclusive
+    child lease acquisition, and preserves a replacement detected at release.
+    Focused snapshot tests passed 29/29. A path-based release race and natural
+    scheduled-run proof remain open; the current MemSys marker still needs its
+    separately approved exact-object quarantine. See
+    `docs/research/snapshot-maintenance-marker-ownership-2026-09-27.md` and
+    [MemSys #466](https://github.com/iMelki/memsys/issues/466).
 
 - [[memsys#680](https://github.com/iMelki/memsys/issues/680) / [memsys#692](https://github.com/iMelki/memsys/issues/692) - Record the SQLite WAL mode decision for the 26.5 GB chroma.sqlite3]
   - Architecture Decision Record completed: `docs/rfcs/003-chroma-sqlite-wal-decision-record.md`.

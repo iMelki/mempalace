@@ -52,6 +52,7 @@ import argparse
 import hashlib
 import json
 import os
+import stat
 import shutil
 import sqlite3
 import sys
@@ -171,8 +172,8 @@ def clean_client_lease(
     :class:`PalaceSnapshotError` rather than queueing behind a multi-hour miner.
 
     Layer 2 is the shared MemSys maintenance marker, which asks the schedulers
-    and watchdogs not to start new work.  It is best effort: a marker that
-    another operator already raised is left exactly as found on release.
+    and watchdogs not to start new work.  A pre-existing marker belongs to
+    another operation (or an interrupted one) and must block this lease.
     """
 
     resolved = Path(palace_path).expanduser().resolve()
@@ -183,20 +184,23 @@ def clean_client_lease(
         )
 
     marker_created = False
-    marker_pre_existing = False
+    marker_identity: os.stat_result | None = None
     if marker is not None:
-        marker_pre_existing = marker.exists()
-        if not marker_pre_existing:
-            try:
-                marker.parent.mkdir(parents=True, exist_ok=True)
-                marker.write_text(
-                    f"mempalace backup-snapshot lease {_utc_now()} pid={os.getpid()}\n",
-                    encoding="utf-8",
-                )
-                marker_created = True
-            except OSError:
-                # Best effort only. The palace lock below is the hard boundary.
-                marker = None
+        try:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            with marker.open("x", encoding="utf-8", newline="\n") as stream:
+                stream.write(f"mempalace backup-snapshot lease {_utc_now()} pid={os.getpid()}\n")
+                stream.flush()
+                marker_identity = os.fstat(stream.fileno())
+            marker_created = True
+        except FileExistsError as exc:
+            raise PalaceSnapshotError(
+                "clean-client lease unavailable: maintenance marker already exists"
+            ) from exc
+        except OSError as exc:
+            raise PalaceSnapshotError(
+                "clean-client lease unavailable: maintenance marker cannot be raised"
+            ) from exc
 
     try:
         with mine_palace_lock(str(resolved)):
@@ -206,7 +210,7 @@ def clean_client_lease(
                 "palaceLockScope": "exclusive-cross-process",
                 "maintenanceMarkerPath": str(marker) if marker is not None else "",
                 "maintenanceMarkerRaisedByLease": marker_created,
-                "maintenanceMarkerPreExisting": marker_pre_existing,
+                "maintenanceMarkerPreExisting": False,
             }
     except MineAlreadyRunning as exc:
         raise PalaceSnapshotError(
@@ -216,9 +220,23 @@ def clean_client_lease(
     finally:
         if marker_created and marker is not None:
             try:
-                marker.unlink(missing_ok=True)
-            except OSError:
-                pass
+                current_identity = os.stat(marker, follow_symlinks=False)
+                if (
+                    marker_identity is None
+                    or not stat.S_ISREG(current_identity.st_mode)
+                    or current_identity.st_dev != marker_identity.st_dev
+                    or current_identity.st_ino != marker_identity.st_ino
+                    or current_identity.st_size != marker_identity.st_size
+                    or current_identity.st_mtime_ns != marker_identity.st_mtime_ns
+                ):
+                    raise PalaceSnapshotError(
+                        "maintenance marker ownership changed; foreign marker preserved"
+                    )
+                marker.unlink()
+            except FileNotFoundError as exc:
+                raise PalaceSnapshotError("maintenance marker disappeared before release") from exc
+            except OSError as exc:
+                raise PalaceSnapshotError("maintenance marker release failed") from exc
 
 
 # --------------------------------------------------------------------------

@@ -10,6 +10,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Snapshot leases now refuse a pre-existing MemSys maintenance marker
+  (#67).** The child acquires the marker with exclusive creation, including
+  when it appears after the wrapper's early check, and preserves a foreign
+  replacement observed at release. Focused tests passed 29/29. This is a
+  source mitigation, not current-marker recovery, installed adoption, or a
+  completed exact-object release proof.
+
 - Normalize the upstream workflow line endings to the existing LF attributes, eliminating persistent clean-checkout drift without changing workflow behavior (#48).
 
 - **Native HTTP MCP default port is now `18787`.** `mempalace-mcp-http` and
