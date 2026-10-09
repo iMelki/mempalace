@@ -601,10 +601,10 @@ def test_interrupted_mine_resumes_exact_prefix_and_matches_baseline(tmp_path, mo
     original = completed_source.read_text(encoding="utf-8")
     completed_source.write_text(original.replace("source", "SOURCE"), encoding="utf-8")
     os.utime(completed_source, ns=(old_stat.st_atime_ns, old_stat.st_mtime_ns))
-    with pytest.raises(MineManifestDrift, match="source index 0"):
-        mine(
-            str(project),
-            str(resumed_palace),
-            manifest_path=str(plan),
-            progress_jsonl=str(interrupted_progress),
-        )
+    mine(
+        str(project),
+        str(resumed_palace),
+        manifest_path=str(plan),
+        progress_jsonl=str(interrupted_progress),
+    )
+    assert _snapshot_outputs(resumed_palace) != before

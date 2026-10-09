@@ -550,21 +550,32 @@ class ReceiptStore:
         index_path = self.sources_dir / f"{_digest_value(source_identity)}.json"
         indexed: Optional[tuple[dict, Path]] = None
         if index_path.exists():
+            stage = "read-index"
             try:
                 index = _read_json(index_path)
+                stage = "index-schema"
                 if index.get("schema") != CURRENT_INDEX_SCHEMA:
                     raise ValueError("receipt index schema is invalid")
+                stage = "index-source-identity"
                 if index.get("source_identity") != source_identity:
                     raise ValueError("receipt index source identity does not match its key")
+                stage = "event-path"
                 event_path = (self.root / index["event_path"]).resolve()
                 if self.root != event_path and self.root not in event_path.parents:
                     raise ValueError("receipt index path escapes the journal root")
+                stage = "read-event"
                 event = _read_json(event_path)
+                stage = "index-event-match"
                 if not _index_matches_event(index, event, source_identity):
                     raise ValueError("receipt index does not match its journal event")
                 indexed = (event, event_path)
             except (KeyError, OSError, ValueError, json.JSONDecodeError) as exc:
-                raise ReceiptConflictError("current receipt index is inconsistent") from exc
+                errno = getattr(exc, "errno", None)
+                winerror = getattr(exc, "winerror", None)
+                raise ReceiptConflictError(
+                    "current receipt index is inconsistent: "
+                    f"stage={stage}; cause={type(exc).__name__}; errno={errno}; winerror={winerror}"
+                ) from exc
 
         candidates = self._complete_events_for_source(source_identity)
         if indexed is not None:

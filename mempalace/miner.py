@@ -1972,9 +1972,15 @@ def _verify_progress_prefix_against_palace(
     manifest_items: list,
     collection,
     closets_col,
+    wing: str,
+    rooms: list,
+    agent: str,
 ) -> int:
     """Re-prove every persisted cursor entry against the selected palace."""
+    from .mine_refresh import PrefixRefreshJournal, refresh_completed_source
+
     records = progress.records()
+    refresh = PrefixRefreshJournal(progress)
     for source_index, record in enumerate(records):
         item = manifest_items[source_index]
         filepath = source_path_for_item(project_path, item)
@@ -1983,35 +1989,19 @@ def _verify_progress_prefix_against_palace(
             raise MineProgressJournalError(
                 "mine progress belongs to a different palace or source identity"
             )
-        try:
-            with mine_lock(os.path.normcase(str(filepath))):
-                stat_before = filepath.stat()
-                source_bytes = filepath.read_bytes()
-                stat_after = filepath.stat()
-                validate_source_bytes(
-                    path=filepath,
-                    project_path=project_path,
-                    item=item,
-                    content=source_bytes,
-                    stat_before=stat_before,
-                    stat_after=stat_after,
-                )
-        except OSError as exc:
-            raise MineManifestDrift(f"source index {source_index} is no longer readable") from exc
-        receipt, verification = _verify_manifest_source_receipt(
+        refresh_completed_source(
+            journal=refresh,
+            index=source_index,
+            filepath=filepath,
+            project_path=project_path,
             receipt_store=receipt_store,
             receipt_run=receipt_run,
-            filepath=filepath,
-            item=item,
             collection=collection,
             closets_col=closets_col,
+            wing=wing,
+            rooms=rooms,
+            agent=agent,
         )
-        if receipt["receipt_id"] != record["receipt_id"]:
-            raise MineProgressJournalError(
-                f"source index {source_index} progress no longer names the current receipt"
-            )
-        if len(verification.represented) != record["represented_count"]:
-            raise MineProgressJournalError(f"source index {source_index} represented count changed")
     return len(records)
 
 
@@ -2323,6 +2313,9 @@ def _mine_impl(
                 manifest_items=manifest_items,
                 collection=collection,
                 closets_col=closets_col,
+                wing=wing,
+                rooms=rooms,
+                agent=agent,
             )
             if verified_against_palace != verified_prefix:
                 raise MineProgressJournalError(
