@@ -8,6 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [3.3.5] — unreleased
 
+### Fixed
+
+- Snapshot maintenance markers on Windows retain the legacy lease line and now
+  record owner PID, exact native process creation time and normalized OS boot
+  identity (#67; MemSys #857). Identity lookup failure refuses publication;
+  the shared lease reader can distinguish dead, reused and pre-boot owners.
+  This source change does not recover a live marker or prove runtime adoption.
+
 ### Changed
 
 - **Snapshot leases now refuse a pre-existing MemSys maintenance marker
