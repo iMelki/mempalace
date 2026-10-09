@@ -28,6 +28,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Native backend worker/permit observations (#73), source candidate.** The
+  authenticated memory-only `/__memsys/work-state` route observes the exact
+  native gate, with opaque app/attempt generations, bounded lifecycle records
+  and conservative unknown/null accounting. An abandoned caller is not reported
+  as a finished worker. Existing cancellation and permit ownership are retained;
+  this is not semantic readiness, installed adoption or runtime recovery proof.
+  Final source qualification passed all 83 tests across the complete backend-call,
+  HTTP and dispatch modules, plus Ruff check/format-check and the actual
+  admission-checkpoint red/restored proof. One inherited Starlette TestClient
+  deprecation warning remains. Independent acceptance, normal publication hooks,
+  full-repository acceptance and CTO landing remain pending; no live adoption is claimed.
+
 - **Bounded conversation chunks retain their parent question and stable identity
   (#49).** ChatGPT exports now have an additive per-conversation/per-turn path
   that preserves current-node and multimodal behavior while hashing provider

@@ -1,10 +1,24 @@
 # MemPalace Open Tasks
 
-Last updated: 2026-09-27
+Last updated: 2026-10-09
 
 This file is the durable local index for active `mempalace` issues.
 
 ## Active Issues
+
+- [#73 - Expose generation-bound backend worker and permit telemetry](https://github.com/iMelki/mempalace/issues/73)
+  - Isolated source candidate extracts the existing gate without changing its
+    cancellation/concurrency behavior and adds authenticated memory-only work
+    state. The narrow admission-checkpoint accounting repair and nonce-outside-lock
+    regressions now pass actual red/restored controls and the entire three-module
+    source cohort: 83 passed, zero failed/skipped/deselected (27 backend-call,
+    51 HTTP, five dispatch), plus Ruff check/format-check. Final independent review,
+    unbypassed normal publication hooks, full-repository acceptance and CTO landing
+    remain pending. No installed/live adoption or mining handback is claimed.
+  - Source-only follow-up: research the single inherited Starlette TestClient
+    `httpx` deprecation warning at `tests/test_mcp_http.py:24` and an evidence-backed
+    compatibility plan; no dependency change/install is authorized by this note.
+    Contract and boundaries: `docs/mcp-backend-work-state.md`.
 
 - [#67 - Fail closed on snapshot maintenance-marker ownership and exact release](https://github.com/iMelki/mempalace/issues/67)
   - Source mitigation rejects pre-existing and late-arriving markers at exclusive

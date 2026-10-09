@@ -4,14 +4,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import functools
 import hmac
 import json
 import logging
 import math
 import os
 import re
-import threading
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
@@ -37,7 +35,8 @@ except ModuleNotFoundError as exc:  # pragma: no cover - exercised without the o
         "Native HTTP MCP support requires Python 3.10+ and `pip install 'mempalace[mcp-http]'`."
     ) from exc
 
-from .mcp_dispatch import ToolDispatchError, dispatch_tool, list_tool_specs
+from .mcp_backend_calls import BackendCallGate, UnobservedBackendCalls
+from .mcp_dispatch import ToolDispatchError, list_tool_specs
 from .evaluation_identity import (
     EvaluationCorpusManifestError,
     load_evaluation_corpus_manifest,
@@ -150,62 +149,6 @@ class StrictOriginMiddleware:
             await response(scope, receive, send)
             return
         await self.app(scope, receive, send)
-
-
-class BackendCallGate:
-    """Run synchronous palace handlers off-loop with bounded parallelism."""
-
-    def __init__(self, tools: ToolRegistry, max_concurrency: int):
-        if max_concurrency < 1:
-            raise ValueError("max_concurrency must be at least 1")
-        self.tools = tools
-        self._limiter = anyio.CapacityLimiter(max_concurrency)
-
-    async def run(self, tool_name: str, arguments: Mapping[str, Any] | None) -> Any:
-        call = functools.partial(dispatch_tool, self.tools, tool_name, arguments)
-        # The MCP waiter may be abandoned, so the worker owns a separate
-        # backend permit and releases it only after dispatch has exited.
-        borrower = object()
-        await self._limiter.acquire_on_behalf_of(borrower)
-
-        handoff_lock = threading.Lock()
-        worker_started = False
-        host_released = False
-        abandoned_before_start = object()
-
-        def call_with_permit() -> Any:
-            nonlocal worker_started
-            with handoff_lock:
-                if host_released:
-                    return abandoned_before_start
-                worker_started = True
-
-            try:
-                return call()
-            finally:
-                anyio.from_thread.run_sync(
-                    self._limiter.release_on_behalf_of,
-                    borrower,
-                )
-
-        try:
-            result = await anyio.to_thread.run_sync(
-                call_with_permit,
-                abandon_on_cancel=True,
-            )
-        except BaseException:
-            release_from_host = False
-            with handoff_lock:
-                if not worker_started:
-                    host_released = True
-                    release_from_host = True
-            if release_from_host:
-                self._limiter.release_on_behalf_of(borrower)
-            raise
-
-        if result is abandoned_before_start:  # pragma: no cover - cancelled waiter ignores it
-            raise RuntimeError("Backend worker was abandoned before dispatch")
-        return result
 
 
 class ActiveAwareSessionManager(StreamableHTTPSessionManager):
@@ -683,6 +626,16 @@ def create_http_app(
         mcp_server._restore_stdout()
         tools = mcp_server.TOOLS
 
+    if runner is None:
+        work_state = BackendCallGate(
+            tools,
+            max_concurrency,
+            instance_id=instance_id,
+            startup_source_revision=package_digest,
+        )
+        runner = work_state.run
+    else:
+        work_state = UnobservedBackendCalls(instance_id, package_digest)
     server = build_mcp_server(tools, max_concurrency=max_concurrency, runner=runner)
     manager = ActiveAwareSessionManager(
         app=server,
@@ -744,10 +697,14 @@ def create_http_app(
             }
         )
 
+    async def memsys_work_state(_request: Any) -> JSONResponse:
+        return JSONResponse(work_state.snapshot())
+
     app = Starlette(
         routes=[
             Route("/healthz", endpoint=healthz, methods=["GET"]),
             Route("/__memsys/identity", endpoint=memsys_identity, methods=["GET"]),
+            Route("/__memsys/work-state", endpoint=memsys_work_state, methods=["GET"]),
             Route("/mcp", endpoint=_StreamableHttpEndpoint(manager)),
         ],
         middleware=[
@@ -757,6 +714,8 @@ def create_http_app(
         lifespan=lifespan,
     )
     app.state.mcp_session_manager = manager
+    app.state.backend_work_state = work_state
+    app.state.backend_call_gate = work_state if isinstance(work_state, BackendCallGate) else None
     return app
 
 
