@@ -6,6 +6,12 @@ This file is the durable local index for active `mempalace` issues.
 
 ## Active Issues
 
+- [#75 - Recover completed-prefix refresh after a journal-less successor mine](https://github.com/iMelki/mempalace/issues/75)
+  - Hard-exit fixtures reproduced the wedge. Local lineage recovery and canonical
+    snapshot locks are prepared; publication requires operator approval, followed
+    by two independent reviews and acting CTO acceptance. Runtime adoption remains
+    separately gated. See [refresh operations](docs/operations/mine-prefix-refresh.md).
+
 - [#71 - Close resume fixture snapshot readers](https://github.com/iMelki/mempalace/issues/71)
   - Lifecycle fix and deterministic native-view proof prepared in PR #70;
     hosted Windows verification pending. The original native fault trigger

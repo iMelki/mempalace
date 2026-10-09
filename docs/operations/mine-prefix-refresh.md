@@ -20,6 +20,40 @@ recovers that exact successor and records completion without another write.
 Known failed attempts can retry through the normal managed recovery path. A
 later source change is a separate snapshot and successor, retaining history.
 
+## Recovery after an intervening mine (#75)
+
+A journal-less project mine can publish another successor after a refresh process
+exits between COMPLETE publication and `represented`. Recovery resolves the
+authoritative current head without filtering away a different content/configuration
+successor. It walks that head's stored `predecessor_receipt_id` chain and requires
+a COMPLETE link whose predecessor is the recorded progress receipt, whose content
+and version hashes match the pending snapshot, and whose configuration digest
+matches the resume run. Matching bytes alone cannot prove that link.
+
+The existing receipt reader still rejects disconnected branches, forks, missing
+predecessors and invalid COMPLETE events. Recovery verifies exact current-head
+outputs, including reused and zero-output representations, rather than expecting
+superseded ancestor rows to survive. An unrelated successor or unrepresented head
+is refused before writing refresh events or advancing progress.
+
+The recovered `represented` event retains its original `prepared_digest` and pins
+the actual head with `recovered_head.content_hash` and `config_digest`. Its optional
+`item` records a fresh source descriptor only when the current source bytes match
+that verified head; otherwise it retains the historical prepared snapshot. This
+does not claim that the historical snapshot describes later edited bytes. A new
+snapshot then refreshes those bytes normally. A different head configuration also
+forces a managed successor under the resume configuration. The pinned head and
+the original prepared receipt ancestry are reverified after an interruption between
+recording recovery and that rewrite. A false but structurally valid saved recovery
+claim does not grant authority to skip the ancestor check.
+Existing events without these optional fields retain their original semantics.
+Older readers can refuse the extended recovery state; do not mix miner versions
+within a retained generation without its existing adoption review.
+
+Snapshots and `process_file` use the same `normcase(canonical_source_locator(...))`
+lock key. The existing palace lock still spans resume validation and processing;
+this correction introduces no lock or lease mechanism.
+
 Missing sources, changed path identity, corrupted sidecars, foreign receipts,
 unverified outputs and changed uncompleted sources remain errors. Prefix
 refresh does not relax the existing palace lock or receipt lineage checks.
@@ -60,6 +94,28 @@ Sources: [deterministic mining #25](https://github.com/iMelki/mempalace/issues/2
 and [Chroma shared-directory concurrency #7040](https://github.com/chroma-core/chroma/issues/7040).
 The repair reuses existing immutable durable publication and managed rewrite
 primitives. It does not change database journal mode or create a new lease.
+
+The #75 investigation read both independent [#70 reviews](https://github.com/iMelki/mempalace/pull/70)
+and the [reported interleaving](https://github.com/iMelki/mempalace/issues/75).
+Upstream-first research checked [changed-file refresh #645](https://github.com/MemPalace/mempalace/issues/645),
+[refresh issues](https://github.com/MemPalace/mempalace/issues?q=refresh),
+[receipt pull requests](https://github.com/MemPalace/mempalace/pulls?q=receipt),
+[v3.10.0](https://github.com/MemPalace/mempalace/releases/tag/v3.10.0), and the
+[upstream changelog](https://github.com/MemPalace/mempalace/blob/develop/CHANGELOG.md)
+on 2026-10-09. That bounded search found no matching completed-prefix receipt-lineage
+repair to port. Python's [hard-exit contract](https://docs.python.org/3/library/os.html#os._exit)
+and [path normalization](https://docs.python.org/3/library/os.path.html#os.path.normcase)
+inform the crash and cross-platform lock fixtures.
+
+The child exits after real COMPLETE publication and before `represented`; the
+parent independently reads the pending event and successor receipts. Cases cover
+same bytes, further edits, changed configuration, two intervening successors,
+another unmined edit, and interruption after recovery publication. The old
+implementation failed the original three interleavings and the lock-key assertion.
+Removing the ancestor gate deliberately makes initial and saved unrelated-head
+refusal tests fail. See `tests/fixtures/mine_refresh_lineage_negative.py` and the attributed
+before/restored results in `.gate-evidence.json`. Fixtures use disposable stores;
+these source results do not prove installed or live adoption.
 
 Tests use deterministic embeddings and disposable stores under a fresh lane
 TEMP root. Coverage includes size/mtime/hash drift, same-stat content change,

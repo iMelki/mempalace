@@ -22,3 +22,8 @@ MemPalace is a local-first memory repository with upstream project history and a
 - Python changes must preserve the existing test suite and avoid network/API requirements by default.
 - Documentation changes should preserve upstream guidance and clearly mark fork-specific operations.
 - Run the smallest relevant verification command and record it in the PR.
+- For receipt-backed recovery changes, test a hard exit between durable publication
+  and checkpointing, followed by another writer advancing the authoritative head.
+  Recheck the saved checkpoint on a fresh resume: structurally valid checkpoint
+  metadata must not replace original receipt lineage and current-output proof.
+  See [completed-prefix recovery](docs/operations/mine-prefix-refresh.md).

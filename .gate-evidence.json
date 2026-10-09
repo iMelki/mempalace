@@ -4,6 +4,48 @@
   "exclude": [],
   "gates": [
     {
+      "id": "mine-prefix-refresh-descendant-recovery",
+      "path": "mempalace/mine_refresh_recovery.py",
+      "description": "Recover a current head descended from the prepared refresh without accepting unrelated heads.",
+      "negativeFixture": "tests/fixtures/mine_refresh_hard_exit.py",
+      "observedFailure": {
+        "date": "2026-10-09",
+        "command": "python -u -m pytest tests/test_mine_refresh.py -k hard_exit_then_journalless -q -o faulthandler_timeout=90",
+        "exitCode": 1,
+        "output": "3 failed, 17 deselected, 6 warnings in 34.88s; predecessor rejection for same bytes; no matching terminal managed receipt for further edit and changed configuration",
+        "reason": "At base f79d625ce53629aa59c7eb3302d70841d310fd75 the child exited 29 after COMPLETE publication, a whole-project journal-less mine advanced the receipt head, and all three resumes failed.",
+        "restoredPass": "python -u -m pytest tests/test_mine_refresh.py tests/test_mine_refresh_saved_lineage.py -q -o faulthandler_timeout=90; exit 0; 31 passed, 54 warnings in 73.85s; includes exact receipt/journal readbacks and repeated-resume idempotence"
+      }
+    },
+    {
+      "id": "mine-prefix-refresh-ancestor-enforcement",
+      "path": "mempalace/mine_refresh_recovery.py",
+      "description": "Initial and saved recovered heads require the original committed prepared-refresh ancestor.",
+      "negativeFixture": "tests/fixtures/mine_refresh_lineage_negative.py",
+      "observedFailure": {
+        "date": "2026-10-09",
+        "command": "python tests/fixtures/mine_refresh_lineage_negative.py --broken",
+        "exitCode": 1,
+        "output": "Failed: DID NOT RAISE MineProgressError; 4 failed, 8 warnings in 8.81s; both other-bytes and other-config initial/saved claims were incorrectly accepted",
+        "reason": "The committed fixture removes only the ancestor requirement while retaining exact current-head output verification. Four semantic refusal tests detect the fail-open. Separately, both saved-lineage tests failed before saved-state revalidation was implemented (exit 1, 5.38s).",
+        "restoredPass": "python tests/fixtures/mine_refresh_lineage_negative.py; exit 0; 4 passed, 8 warnings in 5.69s; progress and sidecar bytes unchanged for all unrelated claims"
+      }
+    },
+    {
+      "id": "mine-prefix-refresh-canonical-source-lock",
+      "path": "mempalace/mine_refresh.py",
+      "description": "Snapshot and managed writer share a normcased canonical local source locator lock key.",
+      "negativeFixture": "tests/test_mine_refresh.py",
+      "observedFailure": {
+        "date": "2026-10-09",
+        "command": "python -m pytest tests/test_mine_refresh.py::test_snapshot_and_writer_use_same_normcased_canonical_lock -q",
+        "exitCode": 1,
+        "output": "AssertionError: snapshot and writer lock keys differ; 1 failed in 1.83s",
+        "reason": "Original snapshot used raw case-preserving spelling; writer used the normcased canonical locator. The fixture captures both actual lock entry points with Windows normalization on every platform.",
+        "restoredPass": "python -u -m pytest tests/test_mine_refresh.py tests/test_mine_refresh_saved_lineage.py -q -o faulthandler_timeout=90; exit 0; 31 passed in 73.85s; canonical lock assertion included"
+      }
+    },
+    {
       "id": "mine-snapshot-reader-lifecycle",
       "path": "tests/test_mine_progress.py",
       "description": "Snapshot readers release their owned clients so a broken native view can genuinely reopen.",

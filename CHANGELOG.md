@@ -10,6 +10,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Recover completed-prefix refreshes after an intervening journal-less mine (#75).**
+  Verify the pending refresh's committed ancestor and the current descendant's
+  exact outputs before advancing the sidecar. Restore the resume configuration
+  when needed, retain unrelated-head refusals, and use the writer's normcased
+  canonical source lock for snapshots.
+
 - **Resume fixture snapshot readers release their native client ownership (#71).**
   Close readers after successful and failed reads so existing Chroma view recovery
   can replace the shared system; a deliberate retained-reader probe proves this can fail.
