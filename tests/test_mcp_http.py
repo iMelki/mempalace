@@ -630,6 +630,13 @@ def test_cancelled_sync_handler_keeps_backend_gate_until_worker_exits():
             with ThreadPoolExecutor(max_workers=2) as pool:
                 first = pool.submit(_post_call, client, session_id, 51, 1)
                 assert first_started.wait(timeout=3)
+                work = client.get(
+                    "/__memsys/work-state",
+                    headers=_headers(session_id),
+                ).json()
+                assert work["workerState"] == "busy"
+                assert work["counts"]["activeDispatches"] == 1
+                assert work["counts"]["borrowedPermits"] == 1
 
                 cancelled = client.post(
                     "/mcp",
@@ -1610,3 +1617,68 @@ def test_healthz_does_not_recount_the_palace_on_every_probe(monkeypatch):
         assert body["drawers"] == 4321
         assert body["drawerCount"] == 4321
     assert len(calls) == 1, f"expected one count across five probes, got {len(calls)}"
+
+
+def test_work_state_reads_only_exact_app_gate_not_search_or_drawer_count(monkeypatch):
+    import mempalace.status as status_module
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Work-state must not invoke a backend or count drawers")
+
+    monkeypatch.setattr(status_module, "get_cached_drawer_count", forbidden)
+    monkeypatch.setattr(mcp_http_module, "run_in_threadpool", forbidden)
+    app = create_http_app(auth_token=AUTH_FIXTURE, tools=_registry(forbidden))
+    with TestClient(app, base_url="http://127.0.0.1:18787") as client:
+        first = client.get("/__memsys/work-state", headers=_headers()).json()
+        second = client.get("/__memsys/work-state", headers=_headers()).json()
+    assert app.state.backend_call_gate is app.state.backend_work_state
+    assert first["appGenerationId"] == second["appGenerationId"]
+    assert first["sequence"] < second["sequence"]
+    assert first["startupSourceRevision"].startswith("sha256:")
+    assert first["workerState"] == "quiescent"
+    assert all(value == 0 for value in first["counts"].values())
+    assert first["semanticReadiness"] == "not-assessed"
+
+
+@pytest.mark.parametrize(
+    "headers,status",
+    [
+        ([], 401),
+        ([("Authorization", "Bearer wrong-token")], 401),
+        ([("Authorization", f"Bearer {AUTH_FIXTURE}")] * 2, 401),
+        ([("Authorization", f"Bearer {AUTH_FIXTURE}"), ("Origin", "https://example.com")], 403),
+        (
+            [
+                ("Authorization", f"Bearer {AUTH_FIXTURE}"),
+                ("Origin", "http://localhost"),
+                ("Origin", "http://localhost"),
+            ],
+            403,
+        ),
+    ],
+)
+def test_work_state_preserves_auth_and_origin_rejection(headers, status):
+    app = create_http_app(auth_token=AUTH_FIXTURE, tools=_registry(lambda: None))
+    with TestClient(app, base_url="http://127.0.0.1:18787") as client:
+        response = client.get("/__memsys/work-state", headers=headers)
+    assert response.status_code == status
+    assert "counts" not in response.json()
+
+
+def test_work_state_custom_runner_is_unknown_and_generations_are_distinct():
+    async def runner(*args):
+        pytest.fail("Reading work-state must not invoke the custom runner")
+
+    first = create_http_app(auth_token=AUTH_FIXTURE, tools=_registry(lambda: None), runner=runner)
+    second = create_http_app(auth_token=AUTH_FIXTURE, tools=_registry(lambda: None), runner=runner)
+    states = []
+    for app in (first, second):
+        with TestClient(app, base_url="http://127.0.0.1:18787") as client:
+            response = client.get("/__memsys/work-state", headers=_headers())
+            assert response.status_code == 200
+            states.append(response.json())
+    assert states[0]["appGenerationId"] != states[1]["appGenerationId"]
+    for state in states:
+        assert state["workerState"] == "unknown"
+        assert state["accounting"] == "unsupported-runner"
+        assert all(value is None for value in state["counts"].values())
