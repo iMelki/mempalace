@@ -75,6 +75,20 @@ def _assert_unknown(snapshot):
     assert all(value is None for value in snapshot["counts"].values())
 
 
+def _replace_statistics(monkeypatch, gate, borrowed, waiting):
+    actual = gate._limiter
+
+    class StatisticsFixture:
+        acquire_on_behalf_of = actual.acquire_on_behalf_of
+        release_on_behalf_of = actual.release_on_behalf_of
+
+        def statistics(self):
+            return SimpleNamespace(borrowed_tokens=borrowed, tasks_waiting=waiting)
+
+    # Newer AnyIO limiters are slotted; replace only this gate's test dependency.
+    monkeypatch.setattr(gate, "_limiter", StatisticsFixture())
+
+
 def test_cold_snapshot_is_memory_only_and_generation_bound():
     async def check():
         gate = BackendCallGate(_registry(lambda: pytest.fail("Must not dispatch")), 1)
@@ -360,14 +374,7 @@ def test_active_accounting_overflow_is_sticky_unknown_not_silent_eviction():
 def test_broken_public_statistics_never_manufacture_quiescence(monkeypatch, borrowed, waiting):
     async def check():
         gate = BackendCallGate(_registry(lambda: None), 1)
-        monkeypatch.setattr(
-            gate._limiter,
-            "statistics",
-            lambda: SimpleNamespace(
-                borrowed_tokens=borrowed,
-                tasks_waiting=waiting,
-            ),
-        )
+        _replace_statistics(monkeypatch, gate, borrowed, waiting)
         _assert_unknown(gate.snapshot())
 
     _scenario(check)
@@ -478,8 +485,8 @@ def test_actual_notified_waiter_is_still_pending_work_before_it_resumes(monkeypa
             actual_release(borrower, attempt)
             raw = gate._limiter.statistics()
             pending = sum(item.stage == "waiting" for item in gate._ledger._active.values())
-            if raw.borrowed_tokens == 0 and raw.tasks_waiting == 0 and pending == 1:
-                captured.append(gate.snapshot())
+            if raw.borrowed_tokens in {0, 1} and raw.tasks_waiting == 0 and pending == 1:
+                captured.append((raw.borrowed_tokens, gate.snapshot()))
 
         monkeypatch.setattr(gate, "_release", release_then_observe)
         try:
@@ -490,14 +497,36 @@ def test_actual_notified_waiter_is_still_pending_work_before_it_resumes(monkeypa
                 await _wait(gate, lambda s: s["counts"]["gateWaiters"] == 1)
                 handler.release.set()
             assert len(captured) == 1
-            state = captured[0]
+            borrowed, state = captured[0]
             assert state["accounting"] == "complete"
             assert state["workerState"] == "busy"
-            assert state["counts"]["borrowedPermits"] == state["counts"]["gateWaiters"] == 0
+            assert state["counts"]["borrowedPermits"] == borrowed
+            assert state["counts"]["gateWaiters"] == 0
             assert state["counts"]["admissionsPending"] == 1
+            assert state["counts"]["workerStartsPending"] == 0
+            assert state["counts"]["activeDispatches"] == 0
+            assert handler.calls == 2
             _assert_quiescent(gate.snapshot())
         finally:
             handler.release.set()
+
+    _scenario(check)
+
+
+@pytest.mark.parametrize("borrowed", [0, 1])
+def test_notified_pending_admission_is_busy_with_either_borrower_count(monkeypatch, borrowed):
+    async def check():
+        gate = BackendCallGate(_registry(lambda: None), 1)
+        gate._ledger.begin()
+        _replace_statistics(monkeypatch, gate, borrowed, 0)
+        state = gate.snapshot()
+        assert state["accounting"] == "complete"
+        assert state["workerState"] == "busy"
+        assert state["counts"]["borrowedPermits"] == borrowed
+        assert state["counts"]["gateWaiters"] == 0
+        assert state["counts"]["admissionsPending"] == 1
+        assert state["counts"]["workerStartsPending"] == 0
+        assert state["counts"]["activeDispatches"] == 0
 
     _scenario(check)
 
@@ -506,14 +535,7 @@ def test_pending_admission_cannot_explain_both_borrowed_and_queued_permits(monke
     async def check():
         gate = BackendCallGate(_registry(lambda: None), 1)
         gate._ledger.begin()
-        monkeypatch.setattr(
-            gate._limiter,
-            "statistics",
-            lambda: SimpleNamespace(
-                borrowed_tokens=1,
-                tasks_waiting=1,
-            ),
-        )
+        _replace_statistics(monkeypatch, gate, 1, 1)
         _assert_unknown(gate.snapshot())
 
     _scenario(check)
