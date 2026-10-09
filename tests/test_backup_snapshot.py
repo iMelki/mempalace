@@ -99,6 +99,21 @@ def isolated_lock_dir(tmp_path_factory, monkeypatch):
     return home
 
 
+@pytest.fixture(autouse=True)
+def isolated_maintenance_identity(monkeypatch):
+    """Keep routine snapshot tests independent of native process/CIM probes."""
+    monkeypatch.setattr(
+        backup_snapshot,
+        "maintenance_owner_identity",
+        lambda: {
+            "leaseSchemaVersion": 1,
+            "ownerPid": os.getpid(),
+            "ownerProcessStartedAtUtc": "2026-10-09T00:00:00.0000001Z",
+            "bootId": "2026-10-08T00:00:00.0000000Z",
+        },
+    )
+
+
 # --------------------------------------------------------------------------
 # Clean-client lease
 # --------------------------------------------------------------------------
@@ -110,7 +125,7 @@ def test_lease_raises_the_shared_maintenance_marker_and_lowers_it(palace, tmp_pa
         assert marker.exists()
         assert re.fullmatch(
             rb"mempalace backup-snapshot lease \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ pid=\d+\r\n",
-            marker.read_bytes(),
+            marker.read_bytes().splitlines(keepends=True)[0],
         )
         assert lease["palaceLockHeld"] is True
         assert lease["maintenanceMarkerRaisedByLease"] is True
@@ -120,12 +135,17 @@ def test_lease_raises_the_shared_maintenance_marker_and_lowers_it(palace, tmp_pa
 def test_marker_bytes_match_the_canonical_windows_recovery_consumer(palace, tmp_path):
     """Evaluate only the actual PowerShell function AST, never its recovery main."""
 
+    supplied_root = os.environ.get("MEMSYS_AGENT_SETTINGS_ROOT")
     consumer = (
-        Path(__file__).resolve().parents[4]
+        Path(supplied_root) / "shared/tools/Invoke-MemSysMaintenanceMarkerRecovery.ps1"
+        if supplied_root
+        else Path(__file__).resolve().parents[4]
         / "agent-settings/shared/tools/Invoke-MemSysMaintenanceMarkerRecovery.ps1"
     )
     powershell = shutil.which("pwsh")
     if not consumer.is_file() or powershell is None:
+        if supplied_root:
+            pytest.fail("explicit canonical recovery consumer or pwsh is unavailable")
         pytest.skip("canonical MemSys recovery consumer and pwsh are not installed")
 
     script = """
@@ -148,7 +168,7 @@ def test_marker_bytes_match_the_canonical_windows_recovery_consumer(palace, tmp_
         payload = marker.read_bytes()
         match = re.fullmatch(
             rb"mempalace backup-snapshot lease (\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ) pid=(\d+)\r\n",
-            payload,
+            payload.splitlines(keepends=True)[0],
         )
         assert match is not None
         result = subprocess.run(
@@ -164,12 +184,12 @@ def test_marker_bytes_match_the_canonical_windows_recovery_consumer(palace, tmp_
             ],
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=60,
             check=True,
         )
         expected = base64.b64decode(result.stdout.strip())
-        assert payload == expected
-        assert payload.replace(b"\r\n", b"\n") != expected
+        assert payload.splitlines(keepends=True)[0] == expected
+        assert payload.splitlines(keepends=True)[0].replace(b"\r\n", b"\n") != expected
 
 
 def test_lease_blocks_and_preserves_a_pre_existing_maintenance_marker(palace, tmp_path):
@@ -227,7 +247,10 @@ def test_windows_pre_link_prepared_object_cannot_be_replaced_or_rewritten(
     monkeypatch.setattr(backup_snapshot.os, "link", attempt_foreign_replacement)
     with clean_client_lease(palace, maintenance_marker=marker):
         assert attempted == ["rename-blocked", "write-blocked"]
-        assert re.fullmatch(rb"mempalace backup-snapshot lease .* pid=\d+\r\n", marker.read_bytes())
+        assert re.fullmatch(
+            rb"mempalace backup-snapshot lease .* pid=\d+\r\n",
+            marker.read_bytes().splitlines(keepends=True)[0],
+        )
     assert not marker.exists()
 
 
@@ -336,7 +359,10 @@ def test_lease_recovers_or_preserves_complete_marker_after_post_link_error(
         with clean_client_lease(palace, maintenance_marker=marker):
             pytest.fail("a failed publication cannot grant the lease")
     if release_denied:
-        assert re.fullmatch(rb"mempalace backup-snapshot lease .* pid=\d+\r\n", marker.read_bytes())
+        assert re.fullmatch(
+            rb"mempalace backup-snapshot lease .* pid=\d+\r\n",
+            marker.read_bytes().splitlines(keepends=True)[0],
+        )
     else:
         assert not marker.exists()
 

@@ -4,6 +4,19 @@
   "exclude": [],
   "gates": [
     {
+      "id": "snapshot-maintenance-owner-identity",
+      "path": "mempalace/backup_snapshot.py",
+      "description": "Refuse snapshot marker publication when Windows owner identity cannot be obtained.",
+      "negativeFixture": "tests/fixtures/maintenance_identity_unavailable.py",
+      "observedFailure": {
+        "date": "2026-10-09",
+        "command": "python tests/fixtures/maintenance_identity_unavailable.py --broken <fresh-lane-scratch>/broken",
+        "exitCode": 1,
+        "reason": "Injected identity provider raises gate-proof-owner-identity-unavailable at the actual _create_maintenance_marker boundary; fixture asserts no marker was published.",
+        "restoredPass": "python tests/fixtures/maintenance_identity_unavailable.py --restored <fresh-lane-scratch>/restored; exit 0; gate-proof-restored-complete-identity-published. Retained CRLF fields independently read back."
+      }
+    },
+    {
       "id": "conversation-continuation-context-gate",
       "path": "mempalace/conversation_chunking.py",
       "description": "Requires every continuation of an assistant answer to carry bounded, labelled parent-question context.",

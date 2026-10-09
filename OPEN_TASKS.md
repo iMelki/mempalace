@@ -7,6 +7,11 @@ This file is the durable local index for active `mempalace` issues.
 ## Active Issues
 
 - [#67 - Fail closed on snapshot maintenance-marker ownership and exact release](https://github.com/iMelki/mempalace/issues/67)
+  - Windows snapshot marker identity is expanded for
+    [MemSys #857](https://github.com/iMelki/memsys/issues/857) and the shared
+    [agent-settings #1506](https://github.com/iMelki/agent-settings/issues/1506)
+    reader. See `docs/research/snapshot-maintenance-identity-2026-10-09.md`.
+    Shared-reader adoption and natural-run proof remain separate requirements.
   - Source mitigation rejects pre-existing and late-arriving markers at exclusive
     child lease acquisition, and preserves a replacement detected at release.
     Focused snapshot tests passed 29/29. A path-based release race and natural

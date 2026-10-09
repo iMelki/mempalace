@@ -66,6 +66,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .palace import MineAlreadyRunning, mine_palace_lock
+from .maintenance_identity import maintenance_owner_identity
 
 SNAPSHOT_RECEIPT_SCHEMA = "mempalace-backup-snapshot-receipt/v1"
 SNAPSHOT_RECEIPT_FILENAME = "backup-snapshot-receipt.json"
@@ -234,13 +235,16 @@ def _create_maintenance_marker(marker: Path) -> os.stat_result:
     ``os.link`` is intentionally fail-closed on filesystems without hard links.
     """
 
+    identity = maintenance_owner_identity()
+    text = f"mempalace backup-snapshot lease {_utc_now()} pid={os.getpid()}\n"
+    text += "".join(f"{key}={value}\n" for key, value in identity.items())
     prepared = marker.with_name(f".maintenance.prepared-{uuid.uuid4().hex}")
     prepared_identity: os.stat_result | None = None
     try:
         # Recovery's Get-MemSysRecoveryExpectedText requires literal CRLF.
         with _open_prepared_marker(prepared) as stream:
             prepared_identity = os.fstat(stream.fileno())
-            stream.write(f"mempalace backup-snapshot lease {_utc_now()} pid={os.getpid()}\n")
+            stream.write(text)
             stream.flush()
             prepared_identity = os.fstat(stream.fileno())
             os.link(prepared, marker)
