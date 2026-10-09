@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-10-09 — Retain exact snapshot lease releases (#67 / memsys#466)
+
+- Publish PID/process-start/boot identity using the existing PR72 companion contract.
+- Cover catchable acquisition interrupts and workload exits with exact owned release.
+- Rename Windows lease objects under a no-write/no-delete-sharing native handle,
+  with no-replace destination and identity readback. Retain release/prepared evidence.
+- Qualify forced non-unwinding exits against the actual shared stale reader.
+- Source qualification only; CTO merge, coordinated reader/recovery installation
+  and natural scheduled-run proof remain pending.
+
 All notable changes to [MemPalace](https://github.com/MemPalace/mempalace) are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/).

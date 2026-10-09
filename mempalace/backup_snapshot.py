@@ -66,6 +66,8 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .palace import MineAlreadyRunning, mine_palace_lock
+from .maintenance_identity import maintenance_owner_identity
+from .snapshot_lease_release import rename_owned_marker
 
 SNAPSHOT_RECEIPT_SCHEMA = "mempalace-backup-snapshot-receipt/v1"
 SNAPSHOT_RECEIPT_FILENAME = "backup-snapshot-receipt.json"
@@ -174,12 +176,17 @@ def _marker_matches_identity(
     )
 
 
-def _unlink_owned_marker(
+def _retain_owned_marker(
     path: Path, identity: os.stat_result, *, content_immutable: bool = True
 ) -> None:
-    if not _marker_matches_identity(path, identity, content_immutable=content_immutable):
-        raise PalaceSnapshotError("maintenance marker ownership changed; foreign marker preserved")
-    path.unlink()
+    kind = "retained-prepared" if path.name.startswith(".maintenance.prepared-") else "released"
+    destination = path.with_name(f".maintenance.{kind}-{uuid.uuid4().hex}")
+    try:
+        rename_owned_marker(path, identity, destination, content_immutable=content_immutable)
+    except OSError as exc:
+        if "ownership changed" in str(exc):
+            raise PalaceSnapshotError(str(exc)) from exc
+        raise
 
 
 def _open_prepared_marker(path: Path):
@@ -234,17 +241,20 @@ def _create_maintenance_marker(marker: Path) -> os.stat_result:
     ``os.link`` is intentionally fail-closed on filesystems without hard links.
     """
 
+    identity = maintenance_owner_identity()
+    text = f"mempalace backup-snapshot lease {_utc_now()} pid={os.getpid()}\n"
+    text += "".join(f"{key}={value}\n" for key, value in identity.items())
     prepared = marker.with_name(f".maintenance.prepared-{uuid.uuid4().hex}")
     prepared_identity: os.stat_result | None = None
     try:
         # Recovery's Get-MemSysRecoveryExpectedText requires literal CRLF.
         with _open_prepared_marker(prepared) as stream:
             prepared_identity = os.fstat(stream.fileno())
-            stream.write(f"mempalace backup-snapshot lease {_utc_now()} pid={os.getpid()}\n")
+            stream.write(text)
             stream.flush()
             prepared_identity = os.fstat(stream.fileno())
             os.link(prepared, marker)
-        _unlink_owned_marker(prepared, prepared_identity)
+        _retain_owned_marker(prepared, prepared_identity)
         return prepared_identity
     except BaseException:
         # A native link may have succeeded even if a wrapper raises afterward.
@@ -252,13 +262,13 @@ def _create_maintenance_marker(marker: Path) -> os.stat_result:
         if prepared_identity is not None:
             try:
                 if _marker_matches_identity(marker, prepared_identity):
-                    _unlink_owned_marker(marker, prepared_identity)
-            except OSError:
+                    _retain_owned_marker(marker, prepared_identity)
+            except (OSError, PalaceSnapshotError):
                 pass  # A remaining complete marker needs attended exact recovery.
         if prepared_identity is not None:
             try:
-                _unlink_owned_marker(prepared, prepared_identity, content_immutable=False)
-            except OSError:
+                _retain_owned_marker(prepared, prepared_identity, content_immutable=False)
+            except (OSError, PalaceSnapshotError):
                 pass  # Never unlink a foreign replacement at the prepared path.
         raise
 
@@ -290,21 +300,20 @@ def clean_client_lease(
 
     marker_created = False
     marker_identity: os.stat_result | None = None
-    if marker is not None:
-        try:
-            marker.parent.mkdir(parents=True, exist_ok=True)
-            marker_identity = _create_maintenance_marker(marker)
-            marker_created = True
-        except FileExistsError as exc:
-            raise PalaceSnapshotError(
-                "clean-client lease unavailable: maintenance marker already exists"
-            ) from exc
-        except OSError as exc:
-            raise PalaceSnapshotError(
-                "clean-client lease unavailable: maintenance marker cannot be raised"
-            ) from exc
-
     try:
+        if marker is not None:
+            try:
+                marker.parent.mkdir(parents=True, exist_ok=True)
+                marker_identity = _create_maintenance_marker(marker)
+                marker_created = True
+            except FileExistsError as exc:
+                raise PalaceSnapshotError(
+                    "clean-client lease unavailable: maintenance marker already exists"
+                ) from exc
+            except OSError as exc:
+                raise PalaceSnapshotError(
+                    "clean-client lease unavailable: maintenance marker cannot be raised"
+                ) from exc
         with mine_palace_lock(str(resolved)):
             yield {
                 "kind": LEASE_KIND,
@@ -320,10 +329,9 @@ def clean_client_lease(
             f"(mine or MCP managed write) holds the palace lock for {resolved}"
         ) from exc
     finally:
-        if marker_created and marker is not None:
+        if marker_identity is not None and marker is not None:
             try:
-                assert marker_identity is not None
-                _unlink_owned_marker(marker, marker_identity)
+                _retain_owned_marker(marker, marker_identity)
             except FileNotFoundError as exc:
                 raise PalaceSnapshotError("maintenance marker disappeared before release") from exc
             except OSError as exc:
