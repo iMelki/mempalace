@@ -269,6 +269,11 @@ def _create_maintenance_marker(
             try:
                 if _marker_matches_identity(marker, prepared_identity):
                     _retain_owned_marker(marker, prepared_identity)
+                if ownership is not None:
+                    ownership.clear()  # Released, or active name belongs to another object.
+            except FileNotFoundError:
+                if ownership is not None:
+                    ownership.clear()  # No active object remains from this acquisition.
             except (OSError, PalaceSnapshotError):
                 pass  # A remaining complete marker needs attended exact recovery.
         if prepared_identity is not None:
@@ -314,12 +319,10 @@ def clean_client_lease(
                 marker_identity = _create_maintenance_marker(marker, ownership=ownership)
                 marker_created = True
             except FileExistsError as exc:
-                ownership.clear()  # Acquisition already handled its own failed publication.
                 raise PalaceSnapshotError(
                     "clean-client lease unavailable: maintenance marker already exists"
                 ) from exc
             except OSError as exc:
-                ownership.clear()
                 raise PalaceSnapshotError(
                     "clean-client lease unavailable: maintenance marker cannot be raised"
                 ) from exc

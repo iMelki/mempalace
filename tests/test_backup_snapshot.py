@@ -355,10 +355,15 @@ def test_lease_recovers_or_preserves_complete_marker_after_post_link_error(
 
     monkeypatch.setattr(backup_snapshot.os, "link", link_then_fail)
     monkeypatch.setattr(backup_snapshot, "rename_owned_marker", deny_marker_release)
-    with pytest.raises(PalaceSnapshotError, match="maintenance marker cannot be raised"):
+    message = "maintenance marker release failed" if release_denied else "marker cannot be raised"
+    with pytest.raises(PalaceSnapshotError, match=message) as caught:
         with clean_client_lease(palace, maintenance_marker=marker):
             pytest.fail("a failed publication cannot grant the lease")
     if release_denied:
+        assert isinstance(caught.value.__cause__, OSError)
+        assert str(caught.value.__cause__) == "injected release failure"
+        assert b"ownerProcessStartedAtUtc=" in marker.read_bytes()
+        assert b"bootId=" in marker.read_bytes()
         assert re.fullmatch(
             rb"mempalace backup-snapshot lease .* pid=\d+\r\n",
             marker.read_bytes().splitlines(keepends=True)[0],

@@ -84,7 +84,7 @@ def test_interrupt_immediately_after_acquisition_releases(tmp_path, failure):
     assert len(list(tmp_path.glob(".maintenance.released-*"))) == 1
 
 
-@pytest.mark.parametrize("failure", [KeyboardInterrupt, SystemExit])
+@pytest.mark.parametrize("failure", [KeyboardInterrupt, SystemExit, OSError, TimeoutError])
 def test_interrupt_at_acquisition_return_handoff_releases(tmp_path, failure):
     marker = tmp_path / ".maintenance"
 
@@ -96,9 +96,15 @@ def test_interrupt_at_acquisition_return_handoff_releases(tmp_path, failure):
 
     try:
         sys.settrace(interrupt)
-        with pytest.raises(failure, match="acquisition return handoff"):
+        expected = snapshot.PalaceSnapshotError if issubclass(failure, OSError) else failure
+        message = (
+            "cannot be raised" if issubclass(failure, OSError) else "acquisition return handoff"
+        )
+        with pytest.raises(expected, match=message) as caught:
             with snapshot.clean_client_lease(tmp_path / "palace", maintenance_marker=marker):
                 pytest.fail("interrupt must occur before ownership assignment")
+        if issubclass(failure, OSError):
+            assert type(caught.value.__cause__) is failure
     finally:
         sys.settrace(None)
     assert not marker.exists(), "catchable acquisition-return interrupt leaked lease"

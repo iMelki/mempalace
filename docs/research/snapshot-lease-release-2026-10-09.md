@@ -94,8 +94,10 @@ Final boundary testing also reproduced an interrupt at the acquisition function'
 return, before the caller stores its returned identity. The writer now hands the
 prepared object's identity to the caller before publication. Cleanup therefore
 retains custody even when the return is interrupted. The pinned intermediate
-source fails this assertion; restored source passes. Both KeyboardInterrupt and
-SystemExit return-boundary regressions are covered by the 66-case focused suite.
+source fails this assertion; restored source passes. KeyboardInterrupt,
+SystemExit, OSError and TimeoutError return-boundary regressions are covered.
+Acquisition errors retain custody until exact cleanup or absence is confirmed;
+caller error wrapping preserves the original cause without discarding identity.
 
 CTO owns two independent reviews and merge ordering with PR72 and PR1736.
 Runtime custodian must separately install/select exact writer and stale-reader
