@@ -200,6 +200,20 @@
         "command": "python -B tests/fixtures/maintenance_identity_unavailable.py --broken <fresh-temp>"
       },
       "id": "snapshot-complete-identity-publication"
+    },
+    {
+      "id": "snapshot-acquisition-return-custody",
+      "path": "mempalace/backup_snapshot.py",
+      "negativeFixture": "tests/fixtures/snapshot_lease_release_probe.py",
+      "description": "Prepared identity custody survives interruption before the acquisition return reaches its caller.",
+      "observedFailure": {
+        "date": "2026-10-09",
+        "command": "python -B tests/fixtures/snapshot_lease_release_probe.py --legacy-handoff <fresh-temp>",
+        "exitCode": 1,
+        "output": "AssertionError: catchable acquisition-return interrupt leaked active lease",
+        "reason": "Pinned ae362026 source interrupted at acquisition return before caller assignment left the active marker.",
+        "restoredPass": "Same fixture --restored-handoff, exit 0: acquisition-return interrupt released exact owned object"
+      }
     }
   ],
   "snapshotLeaseQualification": {
@@ -209,9 +223,9 @@
     "releaseSourceSha256": "2ce98c9d606374668940d07de8d806aa3769f4b536c6bcf758e0500aeec2ac5c",
     "legacySourceRevision": "f79d625ce53629aa59c7eb3302d70841d310fd75",
     "baseline": "Original source graceful retention assertion failed; separately reproduced actual abrupt-exit active pause and acquisition-boundary leak.",
-    "snapshotSourceSha256": "677aaaaebcad7377079dea1d49217f14716ccff2ce0f673955bfd71ad40ef906",
+    "snapshotSourceSha256": "88f0f39f05717895243f64f1d3534dcd5cbcc75c05ea0e80f535b291e5b156f9",
     "sharedReaderSha256": "16a2ef9439e711337370778347a77a53627c3ed3e28150fa66d1633e56bc2c1c",
-    "focusedEvidence": "Final post-format combined suite: 63 passed, 1 skipped in 93.80s. Skipped historical-header case explicitly supplied shared root: 1 passed, 38 deselected in 1.47s. All 64 unique focused cases qualified.",
+    "focusedEvidence": "Explicit-root focused suite: 66 passed, zero failed/skipped in 85.46s; includes both acquisition-return interrupts.",
     "prePushGateAtSourceCheckpoint": "pending-host-pressure"
   }
 }

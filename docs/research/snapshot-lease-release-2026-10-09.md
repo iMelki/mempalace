@@ -90,6 +90,13 @@ host file, checkout selection, timeout, service, mine, or live lease changed.
 
 ## Remaining acceptance
 
+Final boundary testing also reproduced an interrupt at the acquisition function's
+return, before the caller stores its returned identity. The writer now hands the
+prepared object's identity to the caller before publication. Cleanup therefore
+retains custody even when the return is interrupted. The pinned intermediate
+source fails this assertion; restored source passes. Both KeyboardInterrupt and
+SystemExit return-boundary regressions are covered by the 66-case focused suite.
+
 CTO owns two independent reviews and merge ordering with PR72 and PR1736.
 Runtime custodian must separately install/select exact writer and stale-reader
 and generic recovery bytes and verify that the task really executes them. No new snapshot is

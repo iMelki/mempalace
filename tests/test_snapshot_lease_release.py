@@ -84,6 +84,27 @@ def test_interrupt_immediately_after_acquisition_releases(tmp_path, failure):
     assert len(list(tmp_path.glob(".maintenance.released-*"))) == 1
 
 
+@pytest.mark.parametrize("failure", [KeyboardInterrupt, SystemExit])
+def test_interrupt_at_acquisition_return_handoff_releases(tmp_path, failure):
+    marker = tmp_path / ".maintenance"
+
+    def interrupt(frame, event, arg):
+        if event == "return" and frame.f_code is snapshot._create_maintenance_marker.__code__:
+            sys.settrace(None)
+            raise failure("injected acquisition return handoff")
+        return interrupt
+
+    try:
+        sys.settrace(interrupt)
+        with pytest.raises(failure, match="acquisition return handoff"):
+            with snapshot.clean_client_lease(tmp_path / "palace", maintenance_marker=marker):
+                pytest.fail("interrupt must occur before ownership assignment")
+    finally:
+        sys.settrace(None)
+    assert not marker.exists(), "catchable acquisition-return interrupt leaked lease"
+    assert len(list(tmp_path.glob(".maintenance.released-*"))) == 1
+
+
 def test_release_cannot_replace_path_between_proof_and_mutation(tmp_path, monkeypatch):
     if os.name != "nt":
         pytest.skip("native no-delete-sharing proof is Windows-only")
