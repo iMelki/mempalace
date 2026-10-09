@@ -10,6 +10,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Resume fixture snapshot readers release their native client ownership (#71).**
+  Close readers after successful and failed reads so existing Chroma view recovery
+  can replace the shared system; a deliberate retained-reader probe proves this can fail.
+
 - **Completed-prefix sources now refresh without blocking later sources
   ([#69](https://github.com/iMelki/mempalace/issues/69), MemSys #857).** Preserve
   immutable plan/progress and journal a changed snapshot, then verify its new

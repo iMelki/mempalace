@@ -1,10 +1,15 @@
 # MemPalace Open Tasks
 
-Last updated: 2026-09-27
+Last updated: 2026-10-09
 
 This file is the durable local index for active `mempalace` issues.
 
 ## Active Issues
+
+- [#71 - Close resume fixture snapshot readers](https://github.com/iMelki/mempalace/issues/71)
+  - Lifecycle fix and deterministic native-view proof prepared in PR #70;
+    hosted Windows verification pending. The original native fault trigger
+    remains unproven. Owner: test/lifecycle maintainer, acting CTO review.
 
 - [#69 - Refresh changed completed mine sources without losing receipt history](https://github.com/iMelki/mempalace/issues/69)
   - Source repair and disposable fixtures prepared for CTO review; preserves

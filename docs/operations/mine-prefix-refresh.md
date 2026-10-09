@@ -67,3 +67,9 @@ empty output, unchanged retry, failure before write, crash after COMPLETE,
 deleted source and receipt-index classification. `.gate-evidence.json` records
 actual missing-event and substituted-predecessor exit-1 probes and restored
 exit-0 readbacks. Source tests are separate from installed and live proof.
+
+Snapshot fixture readers must release their own Chroma clients after each read,
+including failed reads. Otherwise a peer can retain the shared native system and
+prevent the existing backend reopen from replacing a broken vector view (#71).
+The regression forces a stale view until actual system replacement, then reads
+exact embeddings; it preserves production retry limits and failure behavior.

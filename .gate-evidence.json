@@ -4,6 +4,20 @@
   "exclude": [],
   "gates": [
     {
+      "id": "mine-snapshot-reader-lifecycle",
+      "path": "tests/test_mine_progress.py",
+      "description": "Snapshot readers release their owned clients so a broken native view can genuinely reopen.",
+      "negativeFixture": "tests/fixtures/snapshot_reader_negative.py",
+      "observedFailure": {
+        "date": "2026-10-09",
+        "command": "python tests/fixtures/snapshot_reader_negative.py",
+        "exitCode": 1,
+        "output": "EmbeddingVisibilityError: fixture stale native view",
+        "reason": "Disabled the helper's close callback; retained real snapshot peers kept the old shared native System alive after backend reopen.",
+        "restoredPass": "python -u -m pytest tests/test_mine_progress.py tests/test_mine_refresh.py -q -o faulthandler_timeout=90; exit 0; 31 passed in 160.76 seconds; exact vectors read after actual System replacement and failed reader closed"
+      }
+    },
+    {
       "id": "mine-prefix-refresh-predecessor",
       "path": "mempalace/mine_refresh.py",
       "description": "Rejects a refresh bound to a different predecessor without rewriting immutable progress.",
