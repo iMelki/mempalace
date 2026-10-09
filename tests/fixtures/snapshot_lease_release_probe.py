@@ -12,6 +12,8 @@ import types
 from contextlib import contextmanager
 from pathlib import Path
 
+LEGACY_SNAPSHOT_REVISION = "f79d625ce53629aa59c7eb3302d70841d310fd75"
+
 
 def load_snapshot(legacy=False):
     repo = Path(__file__).resolve().parents[2]
@@ -29,7 +31,7 @@ def load_snapshot(legacy=False):
     sys.modules["mempalace.palace"] = palace
     if legacy:
         source = subprocess.run(
-            ["git", "show", "origin/dev:mempalace/backup_snapshot.py"],
+            ["git", "show", f"{LEGACY_SNAPSHOT_REVISION}:mempalace/backup_snapshot.py"],
             cwd=repo,
             check=True,
             capture_output=True,
