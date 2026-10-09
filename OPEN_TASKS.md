@@ -1,10 +1,23 @@
 # MemPalace Open Tasks
 
-Last updated: 2026-09-27
+Last updated: 2026-10-09
 
 This file is the durable local index for active `mempalace` issues.
 
 ## Active Issues
+
+- [#71 - Close resume fixture snapshot readers](https://github.com/iMelki/mempalace/issues/71)
+  - Lifecycle fix and deterministic native-view proof prepared in PR #70;
+    hosted Windows verification pending. The original native fault trigger
+    remains unproven. Owner: test/lifecycle maintainer, acting CTO review.
+
+- [#69 - Refresh changed completed mine sources without losing receipt history](https://github.com/iMelki/mempalace/issues/69)
+  - Source repair and disposable fixtures prepared for CTO review; preserves
+    immutable evidence and fails closed on receipt/journal corruption.
+    [MemSys #857](https://github.com/iMelki/memsys/issues/857) owns retained-run
+    generation adoption and live mining authorization. Historical receipt-event
+    cause remains unknown under [agent-settings #1459](https://github.com/iMelki/agent-settings/issues/1459).
+    See [resume operations](docs/operations/mine-prefix-refresh.md).
 
 - [#67 - Fail closed on snapshot maintenance-marker ownership and exact release](https://github.com/iMelki/mempalace/issues/67)
   - Source mitigation rejects pre-existing and late-arriving markers at exclusive

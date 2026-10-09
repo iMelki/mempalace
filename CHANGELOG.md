@@ -10,6 +10,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Resume fixture snapshot readers release their native client ownership (#71).**
+  Close readers after successful and failed reads so existing Chroma view recovery
+  can replace the shared system; a deliberate retained-reader probe proves this can fail.
+
+- **Completed-prefix sources now refresh without blocking later sources
+  ([#69](https://github.com/iMelki/mempalace/issues/69), MemSys #857).** Preserve
+  immutable plan/progress and journal a changed snapshot, then verify its new
+  managed successor receipt before continuing. Recover committed pending
+  refreshes without replaying writes. Receipt conflicts retain their refusal
+  and report the safe stage, cause class and OS error codes. Old pinned
+  generations still require reviewed migration or replanning; no live mine
+  or runtime installation was performed.
+
 - **Snapshot leases now refuse a pre-existing MemSys maintenance marker
   (#67).** The child acquires the marker with exclusive creation, including
   when it appears after the wrapper's early check, and preserves a foreign

@@ -4,6 +4,48 @@
   "exclude": [],
   "gates": [
     {
+      "id": "mine-snapshot-reader-lifecycle",
+      "path": "tests/test_mine_progress.py",
+      "description": "Snapshot readers release their owned clients so a broken native view can genuinely reopen.",
+      "negativeFixture": "tests/fixtures/snapshot_reader_negative.py",
+      "observedFailure": {
+        "date": "2026-10-09",
+        "command": "python tests/fixtures/snapshot_reader_negative.py",
+        "exitCode": 1,
+        "output": "EmbeddingVisibilityError: fixture stale native view",
+        "reason": "Disabled the helper's close callback; retained real snapshot peers kept the old shared native System alive after backend reopen.",
+        "restoredPass": "python -u -m pytest tests/test_mine_progress.py tests/test_mine_refresh.py -q -o faulthandler_timeout=90; exit 0; 31 passed in 160.76 seconds; exact vectors read after actual System replacement and failed reader closed"
+      }
+    },
+    {
+      "id": "mine-prefix-refresh-predecessor",
+      "path": "mempalace/mine_refresh.py",
+      "description": "Rejects a refresh bound to a different predecessor without rewriting immutable progress.",
+      "negativeFixture": "tests/fixtures/mine_refresh_gate_probe.py",
+      "observedFailure": {
+        "date": "2026-10-09",
+        "command": "python tests/fixtures/mine_refresh_gate_probe.py --gate refresh --broken",
+        "exitCode": 1,
+        "output": "MineProgressError: refresh journal predecessor receipt changed",
+        "reason": "Fixture changed and rehashed the predecessor receipt; semantic lineage validation still rejected it.",
+        "restoredPass": "python tests/fixtures/mine_refresh_gate_probe.py --gate refresh; exit 0; PASS: exact refresh predecessor and prepared snapshot read back"
+      }
+    },
+    {
+      "id": "receipt-index-conflict-stage",
+      "path": "mempalace/write_receipts.py",
+      "description": "Indexed-event failures remain refusals and retain bounded stage, cause and OS error codes.",
+      "negativeFixture": "tests/fixtures/mine_refresh_gate_probe.py",
+      "observedFailure": {
+        "date": "2026-10-09",
+        "command": "python tests/fixtures/mine_refresh_gate_probe.py --broken",
+        "exitCode": 1,
+        "output": "ReceiptConflictError: current receipt index is inconsistent: stage=read-event; cause=FileNotFoundError; errno=2; winerror=None",
+        "reason": "Fixture read back its changed index naming a nonexistent COMPLETE event. The actual current receipt reader rejected that missing event.",
+        "restoredPass": "python tests/fixtures/mine_refresh_gate_probe.py; exit 0; PASS: exact indexed terminal receipt read back"
+      }
+    },
+    {
       "id": "conversation-continuation-context-gate",
       "path": "mempalace/conversation_chunking.py",
       "description": "Requires every continuation of an assistant answer to carry bounded, labelled parent-question context.",
