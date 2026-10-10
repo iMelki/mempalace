@@ -144,6 +144,102 @@
         "reason": "In an isolated archive candidate, asserted an exact one-site replacement forcing _capacity_is_proven_healthy to return True. The real handler test failed with: confirmed divergence did not disable vector search -- the #1222 segfault guard is inert. Negative raw output: .tmp/fleet-git-hygiene-20260908/mempalace-gate-negative.log in the workspace.",
         "restoredPass": "Restored exact original SHA256 961f75713e26a338007abd1bcf4c7f2fa689818ceb5692ac34a85ca3b2561917; reran same pytest node: exit 0. Scope isolated HOME, deterministic embeddings, no live palace."
       }
+    },
+    {
+      "path": "mempalace/snapshot_lease_release.py",
+      "negativeFixture": "tests/fixtures/snapshot_lease_release_probe.py",
+      "description": "Exact owned Windows lease release retains object and rejects foreign objects.",
+      "observedFailure": {
+        "restoredPass": "Same fixture --restored, exit 0: PASS: 5 catchable exits; exact object retained; canonical identity present",
+        "reason": "Confirmed in-process release callback replaced with no-op; real clean_client_lease left active marker.",
+        "date": "2026-10-09",
+        "exitCode": 1,
+        "output": "AssertionError: owned active lease leaked on catchable exit",
+        "command": "python -B tests/fixtures/snapshot_lease_release_probe.py --broken <fresh-temp>"
+      },
+      "id": "snapshot-owned-release"
+    },
+    {
+      "path": "mempalace/maintenance_identity.py",
+      "negativeFixture": "tests/fixtures/snapshot_stale_reader_probe.py",
+      "description": "Complete canonical snapshot identity permits stale reader to ignore dead owners without mutating lease.",
+      "observedFailure": {
+        "restoredPass": "Same fixture --restored, exit 0: reader stale/active=False/owner-pid-gone; exact marker bytes unchanged",
+        "reason": "Executed original origin/dev snapshot module in fixture-owned abruptly exiting process; retained PID-only marker still blocked canonical reader.",
+        "date": "2026-10-09",
+        "exitCode": 1,
+        "output": "fixture exit=124; reader status=unverifiable active=True reason=identity-incomplete; AssertionError: nightly lease remains an active pause after owner abrupt exit",
+        "command": "python -B tests/fixtures/snapshot_stale_reader_probe.py --legacy <fresh-temp> <shared-reader>"
+      },
+      "id": "snapshot-abrupt-owner-stale"
+    },
+    {
+      "path": "mempalace/backup_snapshot.py",
+      "negativeFixture": "tests/fixtures/snapshot_lease_release_probe.py",
+      "description": "Cleanup covers catchable interruption immediately after successful marker acquisition.",
+      "observedFailure": {
+        "restoredPass": "Same fixture --restored-interrupt, exit 0: caught acquisition-boundary interrupt released exact object",
+        "reason": "Line trace injected KeyboardInterrupt after original source acquisition and before its cleanup try; assertion confirmed active marker leaked.",
+        "date": "2026-10-09",
+        "exitCode": 1,
+        "output": "AssertionError: catchable post-acquisition interrupt leaked active lease",
+        "command": "python -B tests/fixtures/snapshot_lease_release_probe.py --legacy-interrupt <fresh-temp>"
+      },
+      "id": "snapshot-acquisition-interrupt-release"
+    },
+    {
+      "path": "mempalace/maintenance_identity.py",
+      "negativeFixture": "tests/fixtures/maintenance_identity_unavailable.py",
+      "description": "Incomplete owner identity must fail before publishing any active marker.",
+      "observedFailure": {
+        "restoredPass": "Same fixture --restored with existing project interpreter, exit 0: complete identity published",
+        "reason": "Confirmed identity provider deliberately replaced with failing probe; active marker absent after refusal.",
+        "date": "2026-10-09",
+        "exitCode": 1,
+        "output": "OSError: gate-proof-owner-identity-unavailable",
+        "command": "python -B tests/fixtures/maintenance_identity_unavailable.py --broken <fresh-temp>"
+      },
+      "id": "snapshot-complete-identity-publication"
+    },
+    {
+      "id": "snapshot-acquisition-return-custody",
+      "path": "mempalace/backup_snapshot.py",
+      "negativeFixture": "tests/fixtures/snapshot_lease_release_probe.py",
+      "description": "Prepared identity custody survives interruption before the acquisition return reaches its caller.",
+      "observedFailure": {
+        "date": "2026-10-09",
+        "command": "python -B tests/fixtures/snapshot_lease_release_probe.py --legacy-handoff <fresh-temp>",
+        "exitCode": 1,
+        "output": "AssertionError: catchable acquisition-return interrupt leaked active lease",
+        "reason": "Pinned ae362026 source interrupted at acquisition return before caller assignment left the active marker.",
+        "restoredPass": "Same fixture --restored-handoff, exit 0: acquisition-return interrupt released exact owned object"
+      }
+    },
+    {
+      "id": "snapshot-acquisition-error-custody",
+      "path": "mempalace/backup_snapshot.py",
+      "negativeFixture": "tests/test_snapshot_lease_release.py",
+      "description": "Caller error wrapping preserves exact lease custody across acquisition-return OSError and TimeoutError.",
+      "observedFailure": {
+        "date": "2026-10-09",
+        "command": "python -B -m pytest tests/test_snapshot_lease_release.py -k acquisition_return -q --basetemp <fresh-temp>",
+        "exitCode": 1,
+        "output": "2 failed, 2 passed, 14 deselected in 14.05s: catchable acquisition-return interrupt leaked lease",
+        "reason": "At 9a55e31 return-event OSError and TimeoutError erased caller custody while active lease remained.",
+        "restoredPass": "Same return-boundary tests plus post-link recovery/denial: 6 passed, 51 deselected in 11.85s, exit 0; exact owned release and preserved original cause."
+      }
     }
-  ]
+  ],
+  "snapshotLeaseQualification": {
+    "identitySourceRevision": "37f6b4826e1a01ed9ac6987099fba63451ce0d08",
+    "productionMutation": false,
+    "date": "2026-10-09",
+    "releaseSourceSha256": "2ce98c9d606374668940d07de8d806aa3769f4b536c6bcf758e0500aeec2ac5c",
+    "legacySourceRevision": "f79d625ce53629aa59c7eb3302d70841d310fd75",
+    "baseline": "Original source graceful retention assertion failed; separately reproduced actual abrupt-exit active pause and acquisition-boundary leak.",
+    "snapshotSourceSha256": "d87347a85c99cdbaf1d120b45b10ca1c79d8309dd54cfb30e83f799fa46cf9d9",
+    "sharedReaderSha256": "16a2ef9439e711337370778347a77a53627c3ed3e28150fa66d1633e56bc2c1c",
+    "focusedEvidence": "Expanded suite:67 passed and one changed-error-message assertion failed in92.22s. Corrected denial assertion then6 related cases passed,51 deselected in11.85s. All68 unique focused cases qualified; no all-green full-suite rerun claimed.",
+    "prePushGateAtSourceCheckpoint": "pending-host-pressure"
+  }
 }

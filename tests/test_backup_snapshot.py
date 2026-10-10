@@ -99,6 +99,21 @@ def isolated_lock_dir(tmp_path_factory, monkeypatch):
     return home
 
 
+@pytest.fixture(autouse=True)
+def isolated_maintenance_identity(monkeypatch):
+    """Keep routine snapshot tests independent of native process/CIM probes."""
+    monkeypatch.setattr(
+        backup_snapshot,
+        "maintenance_owner_identity",
+        lambda: {
+            "leaseSchemaVersion": 1,
+            "ownerPid": os.getpid(),
+            "ownerProcessStartedAtUtc": "2026-10-09T00:00:00.0000001Z",
+            "bootId": "2026-10-08T00:00:00.0000000Z",
+        },
+    )
+
+
 # --------------------------------------------------------------------------
 # Clean-client lease
 # --------------------------------------------------------------------------
@@ -110,22 +125,27 @@ def test_lease_raises_the_shared_maintenance_marker_and_lowers_it(palace, tmp_pa
         assert marker.exists()
         assert re.fullmatch(
             rb"mempalace backup-snapshot lease \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ pid=\d+\r\n",
-            marker.read_bytes(),
+            marker.read_bytes().splitlines(keepends=True)[0],
         )
         assert lease["palaceLockHeld"] is True
         assert lease["maintenanceMarkerRaisedByLease"] is True
     assert not marker.exists()
 
 
-def test_marker_bytes_match_the_canonical_windows_recovery_consumer(palace, tmp_path):
-    """Evaluate only the actual PowerShell function AST, never its recovery main."""
+def test_marker_header_matches_the_historical_windows_recovery_consumer(palace, tmp_path):
+    """Header compatibility only; augmented markers require PR1736 generic recovery."""
 
+    supplied_root = os.environ.get("MEMSYS_AGENT_SETTINGS_ROOT")
     consumer = (
-        Path(__file__).resolve().parents[4]
+        Path(supplied_root) / "shared/tools/Invoke-MemSysMaintenanceMarkerRecovery.ps1"
+        if supplied_root
+        else Path(__file__).resolve().parents[4]
         / "agent-settings/shared/tools/Invoke-MemSysMaintenanceMarkerRecovery.ps1"
     )
     powershell = shutil.which("pwsh")
     if not consumer.is_file() or powershell is None:
+        if supplied_root:
+            pytest.fail("explicit canonical recovery consumer or pwsh is unavailable")
         pytest.skip("canonical MemSys recovery consumer and pwsh are not installed")
 
     script = """
@@ -148,7 +168,7 @@ def test_marker_bytes_match_the_canonical_windows_recovery_consumer(palace, tmp_
         payload = marker.read_bytes()
         match = re.fullmatch(
             rb"mempalace backup-snapshot lease (\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ) pid=(\d+)\r\n",
-            payload,
+            payload.splitlines(keepends=True)[0],
         )
         assert match is not None
         result = subprocess.run(
@@ -164,12 +184,12 @@ def test_marker_bytes_match_the_canonical_windows_recovery_consumer(palace, tmp_
             ],
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=60,
             check=True,
         )
         expected = base64.b64decode(result.stdout.strip())
-        assert payload == expected
-        assert payload.replace(b"\r\n", b"\n") != expected
+        assert payload.splitlines(keepends=True)[0] == expected
+        assert payload.splitlines(keepends=True)[0].replace(b"\r\n", b"\n") != expected
 
 
 def test_lease_blocks_and_preserves_a_pre_existing_maintenance_marker(palace, tmp_path):
@@ -227,7 +247,10 @@ def test_windows_pre_link_prepared_object_cannot_be_replaced_or_rewritten(
     monkeypatch.setattr(backup_snapshot.os, "link", attempt_foreign_replacement)
     with clean_client_lease(palace, maintenance_marker=marker):
         assert attempted == ["rename-blocked", "write-blocked"]
-        assert re.fullmatch(rb"mempalace backup-snapshot lease .* pid=\d+\r\n", marker.read_bytes())
+        assert re.fullmatch(
+            rb"mempalace backup-snapshot lease .* pid=\d+\r\n",
+            marker.read_bytes().splitlines(keepends=True)[0],
+        )
     assert not marker.exists()
 
 
@@ -291,7 +314,7 @@ def test_lease_preserves_foreign_prepared_file_and_removes_own_marker(
     palace, tmp_path, monkeypatch
 ):
     marker = tmp_path / "MemSys" / ".maintenance"
-    real_unlink_owned = backup_snapshot._unlink_owned_marker
+    real_unlink_owned = backup_snapshot._retain_owned_marker
     replaced = False
 
     def inject_replacement(path, identity, **kwargs):
@@ -303,7 +326,7 @@ def test_lease_preserves_foreign_prepared_file_and_removes_own_marker(
             path.write_text("foreign prepared file", encoding="utf-8")
         return real_unlink_owned(path, identity, **kwargs)
 
-    monkeypatch.setattr(backup_snapshot, "_unlink_owned_marker", inject_replacement)
+    monkeypatch.setattr(backup_snapshot, "_retain_owned_marker", inject_replacement)
     with pytest.raises(PalaceSnapshotError, match="ownership changed"):
         with clean_client_lease(palace, maintenance_marker=marker):
             pytest.fail("a foreign prepared file must not be removed")
@@ -319,7 +342,7 @@ def test_lease_recovers_or_preserves_complete_marker_after_post_link_error(
 ):
     marker = tmp_path / "MemSys" / ".maintenance"
     real_link = os.link
-    real_unlink = Path.unlink
+    real_release = backup_snapshot.rename_owned_marker
 
     def link_then_fail(source, target, *args, **kwargs):
         real_link(source, target, *args, **kwargs)
@@ -328,15 +351,23 @@ def test_lease_recovers_or_preserves_complete_marker_after_post_link_error(
     def deny_marker_release(path, *args, **kwargs):
         if release_denied and path == marker:
             raise OSError("injected release failure")
-        return real_unlink(path, *args, **kwargs)
+        return real_release(path, *args, **kwargs)
 
     monkeypatch.setattr(backup_snapshot.os, "link", link_then_fail)
-    monkeypatch.setattr(Path, "unlink", deny_marker_release)
-    with pytest.raises(PalaceSnapshotError, match="maintenance marker cannot be raised"):
+    monkeypatch.setattr(backup_snapshot, "rename_owned_marker", deny_marker_release)
+    message = "maintenance marker release failed" if release_denied else "marker cannot be raised"
+    with pytest.raises(PalaceSnapshotError, match=message) as caught:
         with clean_client_lease(palace, maintenance_marker=marker):
             pytest.fail("a failed publication cannot grant the lease")
     if release_denied:
-        assert re.fullmatch(rb"mempalace backup-snapshot lease .* pid=\d+\r\n", marker.read_bytes())
+        assert isinstance(caught.value.__cause__, OSError)
+        assert str(caught.value.__cause__) == "injected release failure"
+        assert b"ownerProcessStartedAtUtc=" in marker.read_bytes()
+        assert b"bootId=" in marker.read_bytes()
+        assert re.fullmatch(
+            rb"mempalace backup-snapshot lease .* pid=\d+\r\n",
+            marker.read_bytes().splitlines(keepends=True)[0],
+        )
     else:
         assert not marker.exists()
 
