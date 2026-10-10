@@ -1,7 +1,7 @@
 # Snapshot lease release and forced termination
 
 Tracked by [MemPalace #67](https://github.com/iMelki/mempalace/issues/67) and
-[MemSys #466](https://github.com/iMelki/memsys/issues/466). Source qualification
+maintainer's private tracker. Source qualification
 is separate from installation and a successful natural backup.
 
 ## Requested outcome and proof
@@ -42,13 +42,13 @@ path. Related upstream PR2305 concerns idle MCP writer locks; PR2569 concerns
 legacy repair palace locking. Neither implements this fork's MemSys marker
 release. Existing fork design and native primitives are reused instead.
 
-Related research: [MemSys #567](https://github.com/iMelki/memsys/issues/567)
-(output-cap rescue), [#572](https://github.com/iMelki/memsys/issues/572)
+Related research: maintainer's private tracker
+(output-cap rescue), maintainer's private tracker
 (reliability and current independent source custody),
-[#585](https://github.com/iMelki/memsys/issues/585) (pin ordering),
+maintainer's private tracker (pin ordering),
 [MemPalace #40](https://github.com/iMelki/mempalace/issues/40) (content counts),
-[agent-settings #1506](https://github.com/iMelki/agent-settings/issues/1506) and
-[PR1736](https://github.com/iMelki/agent-settings/pull/1736) (canonical lease).
+maintainer's private tracker and
+maintainer's private tracker (canonical lease).
 These guards and timeout budgets are preserved; no snapshot reliability or
 content-proof closure is claimed by a lease fix.
 
