@@ -1,10 +1,24 @@
 # MemPalace Open Tasks
 
-Last updated: 2026-10-09
+Last updated: 2026-10-11
 
 This file is the durable local index for active `mempalace` issues.
 
 ## Active Issues
+
+- [MemSys #572 - Nightly snapshot budget and freshness](https://github.com/iMelki/memsys/issues/572)
+  - The SQLite snapshot helper belongs to this fork. Production-size copy checks
+    completed with both the original helper and a larger-cache prototype; the
+    prototype did not improve total time and was rejected. No timing fix is proven.
+    The draft investigation and real corruption fixtures preserve the evidence.
+    Next: capture actual API/commit/integrity phase boundaries and worker metrics
+    under #569 before selecting a fix. Capacity, lease ownership and full-generation
+    recovery proof remain separate gates. Owner: diagnosis lane and runtime backup
+    owner, with acting CTO review. See the
+    [investigation](docs/research/snapshot-budget-2026-10-11.md).
+    [#40](https://github.com/iMelki/mempalace/issues/40) owns the separate empty
+    logical-count proof, and [MemSys #569](https://github.com/iMelki/memsys/issues/569)
+    owns incomplete worker observability.
 
 - [#71 - Close resume fixture snapshot readers](https://github.com/iMelki/mempalace/issues/71)
   - Lifecycle fix and deterministic native-view proof prepared in PR #70;

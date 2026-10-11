@@ -8,6 +8,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [3.3.5] — unreleased
 
+### Added
+
+- **Record snapshot timeout diagnosis and real SQLite corruption checks
+  ([MemSys #572](https://github.com/iMelki/memsys/issues/572)).** Document the last
+  15 retained runs and production-size copied-database measurements. Reject the
+  larger-cache proposal after the original helper completed slightly faster.
+  Add read-only, missing-index and FTS5 characterization checks; no runtime
+  behavior, verification policy or budget changes are proposed.
+
 ### Changed
 
 - **Resume fixture snapshot readers release their native client ownership (#71).**

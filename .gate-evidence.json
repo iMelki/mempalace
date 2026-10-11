@@ -4,6 +4,20 @@
   "exclude": [],
   "gates": [
     {
+      "id": "snapshot-full-integrity-reader",
+      "path": "mempalace/backup_snapshot.py",
+      "description": "The actual full SQLite verifier rejects missing index rows that quick_check admits.",
+      "negativeFixture": "tests/fixtures/snapshot_integrity_negative.py",
+      "observedFailure": {
+        "date": "2026-10-11",
+        "command": "python tests/fixtures/snapshot_integrity_negative.py --broken",
+        "exitCode": 1,
+        "output": "PalaceSnapshotError: snapshot SQLite integrity check did not return ok: row 1 missing from index by_value",
+        "reason": "An empty but structurally valid index passes quick_check; the actual full snapshot verifier rejects its missing table rows.",
+        "restoredPass": "python tests/fixtures/snapshot_integrity_negative.py; exit 0; PASS: full snapshot integrity check accepted the restored index"
+      }
+    },
+    {
       "id": "mine-snapshot-reader-lifecycle",
       "path": "tests/test_mine_progress.py",
       "description": "Snapshot readers release their owned clients so a broken native view can genuinely reopen.",
