@@ -7,6 +7,11 @@ This file is the durable local index for active `mempalace` issues.
 ## Active Issues
 
 - [MemSys #572 - Nightly snapshot budget and freshness](https://github.com/iMelki/memsys/issues/572)
+  - S572b implements the CTO's nightly quick-check / weekly full-integrity split
+    locally on top of `2742ab49`. Public push/PR approval and live installation
+    are pending. Weekly health consumption and new task registration remain
+    runtime-owner work; no live changes are authorized by this candidate.
+    See the [source contract](docs/research/nightly-weekly-snapshot-verification.md).
   - The SQLite snapshot helper belongs to this fork. Production-size copy checks
     completed with both the original helper and a larger-cache prototype; the
     prototype did not improve total time and was rejected. No timing fix is proven.

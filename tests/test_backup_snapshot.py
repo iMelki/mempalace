@@ -379,7 +379,8 @@ def test_snapshot_stages_catalog_segments_and_metadata(palace, tmp_path):
     assert receipt["snapshotConsistencyProven"] is True
     assert receipt["contentIdentityProven"] is True
     assert receipt["leaseProven"] is True
-    assert receipt["sqliteSnapshot"]["integrityCheck"] == "ok"
+    assert receipt["sqliteSnapshot"]["integrityCheck"] == "deferred-weekly"
+    assert receipt["sqliteSnapshot"]["quickCheck"] == "ok"
     assert receipt["sqliteSnapshot"]["method"] == "sqlite-online-backup"
 
     assert (staged / "chroma.sqlite3").is_file()
@@ -564,7 +565,7 @@ def test_defer_verification_copies_without_running_integrity_check_or_hashing(
     hash_calls = []
     monkeypatch.setattr(
         backup_snapshot,
-        "_sqlite_integrity_check",
+        "_sqlite_quick_check",
         lambda *a, **k: integrity_calls.append(1) or "ok",
     )
     monkeypatch.setattr(
@@ -615,7 +616,8 @@ def test_verify_staged_snapshot_proves_a_previously_unverified_generation(palace
     assert final_receipt["leaseProven"] is True
     assert final_receipt["snapshotConsistencyProven"] is True
     assert final_receipt["contentIdentityProven"] is True
-    assert final_receipt["sqliteSnapshot"]["integrityCheck"] == "ok"
+    assert final_receipt["sqliteSnapshot"]["integrityCheck"] == "deferred-weekly"
+    assert final_receipt["sqliteSnapshot"]["quickCheck"] == "ok"
     assert final_receipt["contentIdentity"]["fileCount"] > 0
     assert final_receipt["verification"]["status"] == "complete"
 
@@ -644,9 +646,9 @@ def test_verify_staged_snapshot_reports_a_failed_integrity_check_without_silentl
 
     monkeypatch.setattr(
         backup_snapshot,
-        "_sqlite_integrity_check",
+        "_sqlite_quick_check",
         lambda *a, **k: (_ for _ in ()).throw(
-            PalaceSnapshotError("snapshot SQLite integrity check did not return ok: corrupt")
+            PalaceSnapshotError("snapshot SQLite quick check did not return ok: corrupt")
         ),
     )
 

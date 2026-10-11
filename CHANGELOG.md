@@ -10,6 +10,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Split snapshot verification into nightly structural and weekly full checks.**
+  Nightly copy verification uses `quick_check` plus page/freelist/schema comparison.
+  A separately bounded, copy-only full check writes an identity-bound weekly
+  receipt; readback reports missing or stale weekly proof explicitly.
+
 - **Record snapshot timeout diagnosis and real SQLite corruption checks
   ([MemSys #572](https://github.com/iMelki/memsys/issues/572)).** Document the last
   15 retained runs and production-size copied-database measurements. Reject the

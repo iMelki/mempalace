@@ -4,6 +4,76 @@
   "exclude": [],
   "gates": [
     {
+      "id": "snapshot-weekly-native-cli",
+      "path": "mempalace/backup_snapshot.py",
+      "description": "Native module CLI reports an attributed weekly refusal and saved-copy success.",
+      "negativeFixture": "tests/test_snapshot_quick_weekly.py",
+      "observedFailure": {
+        "date": "2026-10-11",
+        "command": "python -B -m mempalace.backup_snapshot --weekly-verify-root . --weekly-budget-seconds 0 --json",
+        "exitCode": 1,
+        "output": "{\"caller\":\"mempalace-weekly-integrity\",\"generatedAt\":\"2026-10-11T20:11:53Z\",\"message\":\"weekly budget must be finite and positive\",\"mutationIntent\":\"weekly-sidecar-only\",\"schema\":\"mempalace-weekly-integrity-receipt/v1\",\"status\":\"error\"}",
+        "reason": "Invalid zero budget is refused in the weekly schema. The native entrypoint previously escaped as a traceback; its regression test failed first with JSONDecodeError on empty stdout.",
+        "restoredPass": "python -B -m pytest tests/test_snapshot_quick_weekly.py tests/test_backup_snapshot.py tests/test_snapshot_integrity_contract.py -q; exit 0; 71 passed, 1 skipped in 41.73s. Native subprocess success returns 0 and complete weekly JSON; invalid budget returns 1 and error JSON without traceback."
+      }
+    },
+    {
+      "id": "snapshot-weekly-full-integrity",
+      "path": "mempalace/snapshot_verification.py",
+      "description": "Copy-only weekly-full verification",
+      "negativeFixture": "tests/fixtures/snapshot_split_negative.py",
+      "observedFailure": {
+        "date": "2026-10-11",
+        "command": "python -B tests/fixtures/snapshot_split_negative.py --gate weekly-full --broken",
+        "exitCode": 1,
+        "output": "PalaceSnapshotError: snapshot SQLite integrity check did not return ok: [('row 1 missing from index by_value',), ('row 2 missing from index by_value',), ('wrong # of entries in index by_value',)]",
+        "reason": "PalaceSnapshotError: snapshot SQLite integrity check did not return ok: [('row 1 missing from index by_value',), ('row 2 missing from index by_value',), ('wrong # of entries in index by_value',)]",
+        "restoredPass": "python -B tests/fixtures/snapshot_split_negative.py --gate weekly-full; exit 0; PASS: weekly-full restored input accepted"
+      }
+    },
+    {
+      "id": "snapshot-sqlite-structure",
+      "path": "mempalace/backup_snapshot.py",
+      "description": "Copy-only structure verification",
+      "negativeFixture": "tests/fixtures/snapshot_split_negative.py",
+      "observedFailure": {
+        "date": "2026-10-11",
+        "command": "python -B tests/fixtures/snapshot_split_negative.py --gate structure --broken",
+        "exitCode": 1,
+        "output": "PalaceSnapshotError: snapshot SQLite page count, freelist or schema hash mismatch",
+        "reason": "PalaceSnapshotError: snapshot SQLite page count, freelist or schema hash mismatch",
+        "restoredPass": "python -B tests/fixtures/snapshot_split_negative.py --gate structure; exit 0; PASS: structure restored input accepted"
+      }
+    },
+    {
+      "id": "snapshot-weekly-receipt-presence",
+      "path": "mempalace/snapshot_verification.py",
+      "description": "Copy-only weekly verification",
+      "negativeFixture": "tests/fixtures/snapshot_split_negative.py",
+      "observedFailure": {
+        "date": "2026-10-11",
+        "command": "python -B tests/fixtures/snapshot_split_negative.py --gate weekly --broken",
+        "exitCode": 1,
+        "output": "PalaceSnapshotError: weekly-integrity-receipt-missing",
+        "reason": "PalaceSnapshotError: weekly-integrity-receipt-missing",
+        "restoredPass": "python -B tests/fixtures/snapshot_split_negative.py --gate weekly; exit 0; PASS: weekly restored input accepted"
+      }
+    },
+    {
+      "id": "snapshot-nightly-quick-check",
+      "path": "mempalace/snapshot_verification.py",
+      "description": "Copy-only quick verification",
+      "negativeFixture": "tests/fixtures/snapshot_split_negative.py",
+      "observedFailure": {
+        "date": "2026-10-11",
+        "command": "python -B tests/fixtures/snapshot_split_negative.py --gate quick --broken",
+        "exitCode": 1,
+        "output": "PalaceSnapshotError: snapshot SQLite quick check did not return ok: [('*** in database main ***\\nTree 3 page 3: btreeInitPage() returns error code 11',)]",
+        "reason": "PalaceSnapshotError: snapshot SQLite quick check did not return ok: [('*** in database main ***\\nTree 3 page 3: btreeInitPage() returns error code 11',)]",
+        "restoredPass": "python -B tests/fixtures/snapshot_split_negative.py --gate quick; exit 0; PASS: quick restored input accepted"
+      }
+    },
+    {
       "id": "snapshot-full-integrity-reader",
       "path": "mempalace/backup_snapshot.py",
       "description": "The actual full SQLite verifier rejects missing index rows that quick_check admits.",

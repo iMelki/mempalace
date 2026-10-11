@@ -1,5 +1,9 @@
 # Snapshot budget investigation, 2026-10-11
 
+Historical S572 evidence below is retained. The S572b CTO policy decision and
+local source follow-up are documented in
+[nightly/weekly verification](nightly-weekly-snapshot-verification.md).
+
 Owner: [MemSys #572](https://github.com/iMelki/memsys/issues/572).
 Status: **PARTIAL**. No nightly timing fix or historical SQLite root cause is
 proven. This draft records evidence and real corruption checks for CTO review.

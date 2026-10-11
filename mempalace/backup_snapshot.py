@@ -21,7 +21,7 @@ the order the ``agent-settings`` backup gate demands them:
 
 2. **Staged consistent snapshot** - :func:`stage_palace_snapshot` copies
    ``chroma.sqlite3`` with the SQLite *online backup API* rather than a byte
-   copy, then ``PRAGMA integrity_check`` s the result, then copies only the
+   copy, then ``PRAGMA quick_check`` s the result, then copies only the
    segment directories the *snapshot's own* catalog references.
 
 3. **Content-identity proof** - every staged file is hashed, and the
@@ -66,6 +66,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .palace import MineAlreadyRunning, mine_palace_lock
+from .snapshot_errors import PalaceSnapshotError
 
 SNAPSHOT_RECEIPT_SCHEMA = "mempalace-backup-snapshot-receipt/v1"
 SNAPSHOT_RECEIPT_FILENAME = "backup-snapshot-receipt.json"
@@ -73,11 +74,9 @@ SNAPSHOT_METHOD = "sqlite-online-backup+catalog-scoped-segment-copy/v1"
 LEASE_KIND = "mempalace-clean-client-lease/v1"
 
 #: Interim status written by ``stage_palace_snapshot(..., verify=False)``. A
-#: growing palace makes ``PRAGMA integrity_check`` plus full-tree hashing take
-#: non-linearly longer (memsys#423: 26 minutes on a 25 GiB database), which can
-#: blow a bounded copy-timeout budget even though the copy itself finished
-#: cleanly. This status lets the copy phase finish and hand off the slow
-#: proof work to a separately scheduled, separately timed verification pass
+#: growing palace can make quick checking plus full-tree hashing exceed the
+#: copy-timeout budget even though copying finished cleanly. This status lets
+#: the copy phase hand off nightly proof to a separately timed verification pass
 #: (:func:`verify_staged_snapshot`) without ever claiming a proof that was
 #: never actually run.
 SNAPSHOT_STATUS_AWAITING_VERIFICATION = "staged-awaiting-verification"
@@ -109,10 +108,6 @@ KNOWN_METADATA_CHILDREN = (
 
 FILE_ATTRIBUTE_REPARSE_POINT = 0x400
 _HASH_BLOCK = 8 * 1024 * 1024
-
-
-class PalaceSnapshotError(RuntimeError):
-    """A snapshot precondition, lease, or proof failed.  Always fail closed."""
 
 
 def _utc_now() -> str:
@@ -404,12 +399,39 @@ def _snapshot_sqlite(source: Path, destination: Path, *, progress: bool = False)
             reader.close()
     except sqlite3.Error as exc:
         raise PalaceSnapshotError(f"palace SQLite online backup failed: {exc}") from exc
+    structure = _validate_sqlite_structure(source, destination)
     return {
         "method": "sqlite-online-backup",
         "pagesCopied": pages_done["copied"],
         "pageTotal": pages_done["total"],
         "durationSeconds": round(time.monotonic() - started, 3),
+        "structure": structure,
     }
+
+
+def _validate_sqlite_structure(source: Path, destination: Path) -> dict[str, Any]:
+    from .snapshot_verification import sqlite_structure
+
+    try:
+        expected = sqlite_structure(source.resolve())
+        actual = sqlite_structure(destination.resolve())
+    except sqlite3.Error as exc:
+        raise PalaceSnapshotError(f"snapshot SQLite structural check failed: {exc}") from exc
+    if actual != expected:
+        raise PalaceSnapshotError("snapshot SQLite page count, freelist or schema hash mismatch")
+    return actual
+
+
+def _sqlite_quick_check(snapshot: Path) -> str:
+    from .snapshot_verification import sqlite_check
+
+    return sqlite_check(snapshot.resolve(), "quick_check")
+
+
+def verify_weekly_snapshot(backup_root, *, palace_path, budget_seconds=7200):
+    from .snapshot_verification import verify_weekly_snapshot as verify_weekly
+
+    return verify_weekly(backup_root, palace_path=palace_path, budget_seconds=budget_seconds)
 
 
 def _sqlite_integrity_check(snapshot: Path) -> str:
@@ -582,8 +604,8 @@ def stage_palace_snapshot(
     ``<staging_dir>/backup-snapshot-receipt.json``.  The staged restore set
     itself lives in ``<staging_dir>/palace``.
 
-    ``verify=True`` (default) is the original, self-contained behavior: the
-    sqlite ``PRAGMA integrity_check`` and the full-tree content-identity hash
+    ``verify=True`` (default) is the self-contained nightly behavior: the
+    sqlite ``PRAGMA quick_check`` and the full-tree content-identity hash
     both run inline, and the receipt is written with ``status="complete"``
     and all three proof flags true.
 
@@ -634,12 +656,10 @@ def stage_palace_snapshot(
             sqlite_result = _snapshot_sqlite(
                 source_sqlite, staged_root / "chroma.sqlite3", progress=progress
             )
-            # A growing palace makes this non-linearly slower (memsys#423: 26
-            # minutes on a 25 GiB database) and is exactly what verify=False
-            # defers to the separate Verify-PalaceSnapshotStaging lane.
-            integrity = (
-                _sqlite_integrity_check(staged_root / "chroma.sqlite3") if verify else "deferred"
-            )
+            # Nightly structural verification runs only against the COPY.
+            # Full index/table and UNIQUE validation has its own weekly budget.
+            quick = _sqlite_quick_check(staged_root / "chroma.sqlite3") if verify else "deferred"
+            integrity = "deferred-weekly" if verify else "deferred"
 
             # The snapshot's own catalog decides what else belongs in the
             # restore set. Reading the live catalog instead would let a
@@ -777,7 +797,7 @@ def stage_palace_snapshot(
             "contentIdentityDigest": None,
             # The copy phase DID prove the lease (reaching this line means the
             # clean-client lease context manager completed without raising).
-            # It deliberately did NOT run integrity_check or hashing.
+            # It deliberately did NOT run quick_check or hashing.
             "leaseProven": True,
             "snapshotConsistencyProven": False,
             "contentIdentityProven": False,
@@ -829,6 +849,7 @@ def stage_palace_snapshot(
         "sqliteSnapshot": {
             **sqlite_result,
             "integrityCheck": integrity,
+            "quickCheck": quick,
         },
         "stagedEntries": staged_entries,
         "contentIdentity": content_identity,
@@ -847,7 +868,7 @@ def stage_palace_snapshot(
 
 
 def verify_staged_snapshot(staging_dir: str | os.PathLike[str]) -> dict[str, Any]:
-    """Finish a deferred verification: sqlite integrity_check + first hashing.
+    """Finish deferred nightly verification: sqlite quick_check + first hashing.
 
     Companion to ``stage_palace_snapshot(..., verify=False)``. That call
     copies the palace and writes an interim receipt with
@@ -934,7 +955,13 @@ def verify_staged_snapshot(staging_dir: str | os.PathLike[str]) -> dict[str, Any
         return failure
 
     try:
-        integrity = _sqlite_integrity_check(staged_sqlite)
+        quick = _sqlite_quick_check(staged_sqlite)
+        from .snapshot_verification import sqlite_structure
+
+        structure = sqlite_structure(staged_sqlite.resolve())
+        if sqlite_result.get("structure") != structure:
+            raise PalaceSnapshotError("snapshot SQLite structural check mismatch")
+        integrity = "deferred-weekly"
     except PalaceSnapshotError as exc:
         return _write_failure(str(exc), integrity_result="failed")
 
@@ -974,7 +1001,7 @@ def verify_staged_snapshot(staging_dir: str | os.PathLike[str]) -> dict[str, Any
         "palaceRoot": palace_root_text,
         "stagedRoot": staged_root_text,
         "lease": lease_record,
-        "sqliteSnapshot": {**sqlite_result, "integrityCheck": integrity},
+        "sqliteSnapshot": {**sqlite_result, "integrityCheck": integrity, "quickCheck": quick},
         "stagedEntries": staged_entries,
         "contentIdentity": content_identity,
         "contentIdentityDigest": identity_digest,
@@ -1060,6 +1087,8 @@ def verify_snapshot_receipt(
     else:
         problems.append("staged-root-unavailable")
 
+    from .snapshot_verification import weekly_status
+
     return {
         "schema": "mempalace-backup-snapshot-verification/v1",
         "generatedAt": _utc_now(),
@@ -1070,6 +1099,7 @@ def verify_snapshot_receipt(
         "fileCount": len(files),
         "valid": not problems,
         "problems": problems,
+        "weeklyVerification": weekly_status(path, receipt),
     }
 
 
@@ -1111,14 +1141,63 @@ def _print(payload: dict[str, Any], as_json: bool) -> None:
         return
     print(f"MemPalace snapshot verification: valid={payload.get('valid')}")
     print(f"  Files:    {payload.get('fileCount')}  hashed={payload.get('hashesVerified')}")
+    weekly = payload.get("weeklyVerification")
+    if weekly:
+        print(f"  Weekly full integrity: {weekly['status']}")
+        if weekly.get("problem"):
+            print(f"  WEEKLY    {weekly['problem']}")
     for problem in payload.get("problems", []):
         print(f"  PROBLEM   {problem}")
+
+
+def _run_weekly_cli(args) -> int:
+    if args.verify_receipt or args.verify_staged_dir or args.staging_dir:
+        raise PalaceSnapshotError("weekly verification cannot be combined with snapshot actions")
+    result = verify_weekly_snapshot(
+        args.weekly_verify_root,
+        palace_path=args.palace_path,
+        budget_seconds=args.weekly_budget_seconds,
+    )
+    if args.json:
+        print(json.dumps(result, sort_keys=True))
+    else:
+        print(f"MemPalace weekly integrity: {result['status']}")
+        if result.get("message"):
+            print(result["message"])
+    return 0 if result["status"] == "complete" else 2
+
+
+def _cli_failure(args, exc):
+    if args.weekly_verify_root:
+        from .snapshot_verification import WEEKLY_SCHEMA
+
+        return {
+            "schema": WEEKLY_SCHEMA,
+            "status": "error",
+            "generatedAt": _utc_now(),
+            "caller": "mempalace-weekly-integrity",
+            "mutationIntent": "weekly-sidecar-only",
+            "message": str(exc),
+        }
+    return {
+        "schema": SNAPSHOT_RECEIPT_SCHEMA,
+        "status": "error",
+        "generatedAt": _utc_now(),
+        "leaseProven": False,
+        "snapshotConsistencyProven": False,
+        "contentIdentityProven": False,
+        "message": str(exc),
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="mempalace backup-snapshot")
     parser.add_argument("--palace-path", default=str(Path.home() / ".mempalace" / "palace"))
     parser.add_argument("--staging-dir", default="")
+    parser.add_argument(
+        "--weekly-verify-root", default="", help="Full check of latest complete COPY"
+    )
+    parser.add_argument("--weekly-budget-seconds", type=float, default=7200)
     parser.add_argument("--verify-receipt", default="", help="Verify an existing receipt instead")
     parser.add_argument(
         "--staged-root", default="", help="Override staged root during verification"
@@ -1127,7 +1206,7 @@ def main(argv: list[str] | None = None) -> int:
         "--verify-staged-dir",
         default="",
         help=(
-            "Finish a deferred verification (integrity_check + first hashing) for a "
+            "Finish a deferred nightly verification (quick_check + first hashing) for a "
             "generation staged earlier with --defer-verification"
         ),
     )
@@ -1138,7 +1217,7 @@ def main(argv: list[str] | None = None) -> int:
         "--defer-verification",
         action="store_true",
         help=(
-            "Copy the palace only; skip PRAGMA integrity_check and content-identity "
+            "Copy the palace only; skip PRAGMA quick_check and content-identity "
             "hashing so a separately scheduled, separately timed lane can run "
             "--verify-staged-dir against this generation afterward"
         ),
@@ -1147,6 +1226,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
+        if args.weekly_verify_root:
+            return _run_weekly_cli(args)
         if args.verify_receipt:
             result = verify_snapshot_receipt(
                 args.verify_receipt,
@@ -1171,19 +1252,12 @@ def main(argv: list[str] | None = None) -> int:
         _print(receipt, args.json)
         return 0
     except (PalaceSnapshotError, OSError, ValueError) as exc:
-        failure = {
-            "schema": SNAPSHOT_RECEIPT_SCHEMA,
-            "status": "error",
-            "generatedAt": _utc_now(),
-            "leaseProven": False,
-            "snapshotConsistencyProven": False,
-            "contentIdentityProven": False,
-            "message": str(exc),
-        }
+        failure = _cli_failure(args, exc)
         if args.json:
             print(json.dumps(failure, ensure_ascii=True, separators=(",", ":"), sort_keys=True))
         else:
-            print(f"MemPalace snapshot failed: {exc}", file=sys.stderr)
+            action = "weekly verification" if args.weekly_verify_root else "snapshot"
+            print(f"MemPalace {action} failed: {exc}", file=sys.stderr)
         return 1
 
 
