@@ -73,13 +73,14 @@ def test_interrupt_immediately_after_acquisition_releases(tmp_path, failure):
                 raise failure("injected immediately after acquisition")
         return interrupt
 
+    previous_trace = sys.gettrace()
     try:
         sys.settrace(interrupt)
         with pytest.raises(failure, match="immediately after acquisition"):
             with snapshot.clean_client_lease(tmp_path / "palace", maintenance_marker=marker):
                 pytest.fail("interrupt must occur before workload")
     finally:
-        sys.settrace(None)
+        sys.settrace(previous_trace)
     assert not marker.exists(), "catchable post-acquisition interrupt leaked active lease"
     assert len(list(tmp_path.glob(".maintenance.released-*"))) == 1
 
@@ -94,6 +95,7 @@ def test_interrupt_at_acquisition_return_handoff_releases(tmp_path, failure):
             raise failure("injected acquisition return handoff")
         return interrupt
 
+    previous_trace = sys.gettrace()
     try:
         sys.settrace(interrupt)
         expected = snapshot.PalaceSnapshotError if issubclass(failure, OSError) else failure
@@ -106,9 +108,41 @@ def test_interrupt_at_acquisition_return_handoff_releases(tmp_path, failure):
         if issubclass(failure, OSError):
             assert type(caught.value.__cause__) is failure
     finally:
-        sys.settrace(None)
+        sys.settrace(previous_trace)
     assert not marker.exists(), "catchable acquisition-return interrupt leaked lease"
     assert len(list(tmp_path.glob(".maintenance.released-*"))) == 1
+
+
+@pytest.mark.parametrize(
+    "probe,failure",
+    [
+        (test_interrupt_immediately_after_acquisition_releases, error)
+        for error in (KeyboardInterrupt, SystemExit)
+    ]
+    + [
+        (test_interrupt_at_acquisition_return_handoff_releases, error)
+        for error in (KeyboardInterrupt, SystemExit, OSError, TimeoutError)
+    ],
+)
+def test_interrupt_probes_restore_trace_observer(tmp_path, probe, failure):
+    """Later source calls must remain visible to the observer the probe borrowed."""
+    events = []
+
+    def observer(frame, event, arg):
+        if frame.f_code is snapshot.sha256_file.__code__:
+            events.append(event)
+        return observer
+
+    outer_trace = sys.gettrace()
+    try:
+        sys.settrace(observer)
+        probe(tmp_path, failure)
+        restored = sys.gettrace()
+        snapshot.sha256_file(next(tmp_path.glob(".maintenance.released-*")))
+    finally:
+        sys.settrace(outer_trace)
+    assert restored is observer, "lease interrupt probe discarded the existing trace observer"
+    assert "call" in events, "later source call was invisible to the restored observer"
 
 
 def test_release_cannot_replace_path_between_proof_and_mutation(tmp_path, monkeypatch):

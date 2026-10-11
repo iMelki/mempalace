@@ -69,6 +69,7 @@ def main():
                 raise KeyboardInterrupt("gate-proof-acquisition-return-interrupt")
             return interrupt_handoff
 
+        previous_trace = sys.gettrace()
         try:
             sys.settrace(interrupt_handoff)
             with snapshot.clean_client_lease(root / "palace", maintenance_marker=marker):
@@ -76,7 +77,7 @@ def main():
         except KeyboardInterrupt as exc:
             assert str(exc) == "gate-proof-acquisition-return-interrupt"
         finally:
-            sys.settrace(None)
+            sys.settrace(previous_trace)
         assert not marker.exists(), "catchable acquisition-return interrupt leaked active lease"
         assert len(list(root.glob(".maintenance.released-*"))) == 1
         print("PASS: acquisition-return interrupt released exact owned object")
@@ -91,6 +92,7 @@ def main():
                     raise KeyboardInterrupt("gate-proof-post-acquisition-interrupt")
             return interrupt
 
+        previous_trace = sys.gettrace()
         try:
             sys.settrace(interrupt)
             with snapshot.clean_client_lease(root / "palace", maintenance_marker=marker):
@@ -98,7 +100,7 @@ def main():
         except KeyboardInterrupt as exc:
             assert str(exc) == "gate-proof-post-acquisition-interrupt"
         finally:
-            sys.settrace(None)
+            sys.settrace(previous_trace)
         assert not marker.exists(), "catchable post-acquisition interrupt leaked active lease"
         assert len(list(root.glob(".maintenance.released-*"))) == 1
         print("PASS: caught acquisition-boundary interrupt released exact object")

@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-10-12 — Preserve coverage after snapshot interruption tests (PR #77)
+
+- Restore the borrowed trace observer after lease interruption tests and probe modes.
+- Add six regression cases and an attributed break/restore proof for later source visibility.
+- Keep coverage source selection, exclusions, thresholds and production lease code unchanged.
+- Document the measured coverage loss and inherit the trace-custody testing rule.
+
 ## 2026-10-09 — Retain exact snapshot lease releases (#67 / memsys#466)
 
 - Publish PID/process-start/boot identity using the existing PR72 companion contract.

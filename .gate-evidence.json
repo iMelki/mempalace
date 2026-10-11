@@ -228,6 +228,20 @@
         "reason": "At 9a55e31 return-event OSError and TimeoutError erased caller custody while active lease remained.",
         "restoredPass": "Same return-boundary tests plus post-link recovery/denial: 6 passed, 51 deselected in 11.85s, exit 0; exact owned release and preserved original cause."
       }
+    },
+    {
+      "id": "snapshot-interrupt-trace-custody",
+      "path": "tests/test_snapshot_lease_release.py",
+      "description": "Interruption tests restore the prior trace observer and leave later source calls visible.",
+      "negativeFixture": "tests/fixtures/snapshot_trace_custody_probe.py",
+      "observedFailure": {
+        "date": "2026-10-12",
+        "command": "& $c77Python tests/fixtures/snapshot_trace_custody_probe.py --broken (Join-Path $c77Temp 'broken')",
+        "exitCode": 1,
+        "output": "AssertionError: lease interrupt probe discarded the existing trace observer",
+        "reason": "The fixture verifies exactly two restoration sites, then replaces them with sys.settrace(None) in an in-memory test copy. The actual interruption assertion passes, but observer custody fails. No production source, live marker or file is mutated by the break.",
+        "restoredPass": "& $c77Python tests/fixtures/snapshot_trace_custody_probe.py (Join-Path $c77Temp 'restored'); exit 0; PASS: 6 interruption cases restore the observer and trace a later source call"
+      }
     }
   ],
   "snapshotLeaseQualification": {
