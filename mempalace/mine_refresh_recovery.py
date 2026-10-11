@@ -54,6 +54,29 @@ def recover_pending_head(current, state, verification_args):
     raise MineProgressError("pending refresh has no matching committed refresh ancestor")
 
 
+def _verify_saved_recovery_ancestor(current, state, store):
+    """Bind the saved pin to an exact receipt on the authoritative head's chain."""
+    candidates = store._complete_events_for_source(current["source"]["identity"])
+    receipt = current
+    seen = set()
+    while receipt["receipt_id"] not in seen:
+        seen.add(receipt["receipt_id"])
+        if receipt["receipt_id"] == state["receipt_id"]:
+            recovered = state["recovered_head"]
+            if (
+                receipt["source"]["content_hash"] == recovered["content_hash"]
+                and receipt["source"]["version_hash"] == recovered["content_hash"]
+                and receipt["producer"]["config"]["digest"] == recovered["config_digest"]
+            ):
+                return
+            break
+        predecessor = receipt.get("relations", {}).get("predecessor_receipt_id")
+        if predecessor not in candidates:
+            break
+        receipt = candidates[predecessor][0]
+    raise MineProgressError("saved recovery no longer names a matching committed ancestor")
+
+
 def verify_recorded_head(state, verification_args):
     """Re-prove a recovered head after a second crash before any source rewrite."""
     from .miner import _verify_manifest_source_receipt
@@ -63,14 +86,10 @@ def verify_recorded_head(state, verification_args):
         return _verify_manifest_source_receipt(item=state["item"], **verification_args)
     store = verification_args["receipt_store"]
     source_identity = store.source_identity(str(verification_args["filepath"]), local_path=True)
-    current = store.find_current_read_only(
-        source_identity,
-        content_hash=recovered["content_hash"],
-        version_digest=recovered["content_hash"],
-        config_digest=recovered["config_digest"],
-    )
-    if current is None or current["receipt_id"] != state["receipt_id"]:
+    current = store.find_current_read_only(source_identity)
+    if current is None:
         raise MineProgressError("completed source no longer names the recorded current receipt")
+    _verify_saved_recovery_ancestor(current, state, store)
     pending = state["recovery_pending"]
     original = {"receipt_id": pending["previous_receipt_id"], "pending": pending}
     return current, recover_pending_head(current, original, verification_args)

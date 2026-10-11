@@ -41,11 +41,19 @@ the actual head with `recovered_head.content_hash` and `config_digest`. Its opti
 `item` records a fresh source descriptor only when the current source bytes match
 that verified head; otherwise it retains the historical prepared snapshot. This
 does not claim that the historical snapshot describes later edited bytes. A new
-snapshot then refreshes those bytes normally. A different head configuration also
-forces a managed successor under the resume configuration. The pinned head and
-the original prepared receipt ancestry are reverified after an interruption between
-recording recovery and that rewrite. A false but structurally valid saved recovery
-claim does not grant authority to skip the ancestor check.
+snapshot then refreshes those bytes normally. Source bytes are compared directly
+with the verified head's content hash; equality with a historical descriptor cannot
+skip a rewrite after a metadata-preserving revert. A different head configuration
+also forces a managed successor under the resume configuration.
+
+After an interruption between recording recovery and rewriting, another mine may
+advance the head again. Resume resolves that head without content/configuration
+filters, checks that the exact saved receipt remains on its predecessor chain with
+the recorded hashes/configuration, and rechecks the original prepared ancestor.
+It verifies the new head's actual outputs before appending another `represented`
+event bound to the original `prepared_digest`. Earlier events remain immutable.
+A false but structurally valid saved recovery claim cannot skip either ancestry
+check. Repeated resume without a new head or source change remains a no-op.
 Existing events without these optional fields retain their original semantics.
 Older readers can refuse the extended recovery state; do not mix miner versions
 within a retained generation without its existing adoption review.
@@ -116,6 +124,29 @@ Removing the ancestor gate deliberately makes initial and saved unrelated-head
 refusal tests fail. See `tests/fixtures/mine_refresh_lineage_negative.py` and the attributed
 before/restored results in `.gate-evidence.json`. Fixtures use disposable stores;
 these source results do not prove installed or live adoption.
+
+The PR #78 follow-up adds six crash/recovery/later-writer cases and two
+metadata-preserving revert cases in
+`tests/test_mine_refresh_recovery_interleavings.py`. All eight failed at the
+reviewed head before correction. The later-writer cases independently read back
+the authoritative receipt, unchanged earlier events, and idempotent repeated
+resume. The revert cases restore exact bytes and nanosecond timestamps, assert
+descriptor equality with the prepared item, and require a new receipt for those
+bytes. Python's [timestamp contract](https://docs.python.org/3/library/os.html#os.utime)
+defines the fixture's timestamp restoration. Full results are in the gate ledger.
+Saved-pin refusal tests also substitute the recorded receipt ID, content hash and
+configuration digest while retaining valid journal digests, and withhold current
+output rows. The refusal leaves progress and sidecar bytes unchanged. The
+`mine_refresh_saved_pin_negative.py` fixture removes only saved-pin enforcement;
+all three false-pin cases must then fail with `DID NOT RAISE`.
+
+Upstream-first follow-up research on 2026-10-12 reread refresh #645, the
+[writer handoff discussion](https://github.com/MemPalace/mempalace/pull/2131),
+[releases](https://github.com/MemPalace/mempalace/releases), and the develop
+changelog (blob `200a5b903f4e0939cb30eda060821286807436c6`). The bounded
+[receipt-lineage search](https://github.com/MemPalace/mempalace/issues?q=receipt+lineage)
+returned zero matches. No matching saved-prefix recovery fix was found to port;
+writer handoff concerns a separate lock mechanism.
 
 Tests use deterministic embeddings and disposable stores under a fresh lane
 TEMP root. Coverage includes size/mtime/hash drift, same-stat content change,

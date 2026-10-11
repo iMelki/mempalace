@@ -4,6 +4,48 @@
   "exclude": [],
   "gates": [
     {
+      "id": "mine-prefix-saved-recovery-head-advance",
+      "path": "mempalace/mine_refresh.py",
+      "description": "Saved recovery can advance only through verified descendants while retaining original preparation.",
+      "negativeFixture": "tests/test_mine_refresh_recovery_interleavings.py",
+      "observedFailure": {
+        "date": "2026-10-12",
+        "command": "python -u -m pytest tests/test_mine_refresh_recovery_interleavings.py -q -o faulthandler_timeout=90",
+        "exitCode": 1,
+        "output": "6 later-writer cases failed: completed source no longer names the recorded current receipt",
+        "reason": "At reviewed head 9516abf2f4f497823eb7235fae7fc59210450181, a real hard exit, saved recovery interruption and later mine leave pending empty and pin an obsolete head on every resume.",
+        "restoredPass": "python -u -m pytest tests/test_mine_refresh.py tests/test_mine_refresh_saved_lineage.py tests/test_mine_refresh_recovery_interleavings.py -q -o faulthandler_timeout=90; exit 0; 39 passed, 70 warnings in 221.50s; all six later-writer cases pass with immutable earlier events and repeated-resume readback"
+      }
+    },
+    {
+      "id": "mine-prefix-current-receipt-content-freshness",
+      "path": "mempalace/mine_refresh.py",
+      "description": "A historical descriptor cannot hide a source/hash mismatch with the verified current receipt.",
+      "negativeFixture": "tests/test_mine_refresh_recovery_interleavings.py",
+      "observedFailure": {
+        "date": "2026-10-12",
+        "command": "python -u -m pytest tests/test_mine_refresh_recovery_interleavings.py -q -o faulthandler_timeout=90",
+        "exitCode": 1,
+        "output": "2 exact-bytes/mtime revert cases failed authoritative receipt-ID equality: no corrective successor was written",
+        "reason": "At reviewed head 9516abf2f4f497823eb7235fae7fc59210450181, the restored file descriptor equals the prepared item while the later head still represents different content; both direct and saved recovery wrongly skip rewrite.",
+        "restoredPass": "python -u -m pytest tests/test_mine_refresh.py tests/test_mine_refresh_saved_lineage.py tests/test_mine_refresh_recovery_interleavings.py -q -o faulthandler_timeout=90; exit 0; 39 passed in 221.50s; both reverts publish the restored content hash and verify repeated-resume idempotence"
+      }
+    },
+    {
+      "id": "mine-prefix-saved-recovery-pin-ancestor",
+      "path": "mempalace/mine_refresh_recovery.py",
+      "description": "Advancing saved recovery preserves the exact recorded receipt/hash/config pin on the current chain.",
+      "negativeFixture": "tests/fixtures/mine_refresh_saved_pin_negative.py",
+      "observedFailure": {
+        "date": "2026-10-12",
+        "command": "python -u tests/fixtures/mine_refresh_saved_pin_negative.py --broken",
+        "exitCode": 1,
+        "output": "Failed: DID NOT RAISE MineProgressError; 3 failed, 6 warnings in 22.36s",
+        "reason": "The committed fixture removes only saved-pin enforcement, retaining original prepared ancestry and current-output verification. Validly rehashed false receipt ID/content/config claims are then wrongly accepted by real resume.",
+        "restoredPass": "python -u tests/fixtures/mine_refresh_saved_pin_negative.py; exit 0; 3 passed, 6 warnings in 20.64s; exact refusals preserve progress and sidecar bytes"
+      }
+    },
+    {
       "id": "mine-prefix-refresh-descendant-recovery",
       "path": "mempalace/mine_refresh_recovery.py",
       "description": "Recover a current head descended from the prepared refresh without accepting unrelated heads.",

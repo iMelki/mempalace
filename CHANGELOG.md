@@ -10,6 +10,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Keep saved refresh recovery resumable across later mines (#75, PR #78).**
+  Revalidate the saved receipt and original prepared ancestor on the current
+  head's chain, append recovery advances without changing earlier events, and
+  refresh restored source bytes even when their timestamp matches the old plan.
+
 - **Recover completed-prefix refreshes after an intervening journal-less mine (#75).**
   Verify the pending refresh's committed ancestor and the current descendant's
   exact outputs before advancing the sidecar. Restore the resume configuration
