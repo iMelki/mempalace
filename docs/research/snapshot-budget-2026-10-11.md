@@ -4,7 +4,7 @@ Historical S572 evidence below is retained. The S572b CTO policy decision and
 local source follow-up are documented in
 [nightly/weekly verification](nightly-weekly-snapshot-verification.md).
 
-Owner: [MemSys #572](https://github.com/iMelki/memsys/issues/572).
+Owner: maintainer's private tracker.
 Status: **PARTIAL**. No nightly timing fix or historical SQLite root cause is
 proven. This draft records evidence and real corruption checks for CTO review.
 The retained receipts,
@@ -59,7 +59,7 @@ Time from child launch to the retained SQLite last-write timestamp was
 rates of 4.939, 6.271 and 4.737 MiB/s. These are **not** measured copy durations.
 The worker could still be backing up, committing or checking integrity. Wrapper
 samples identify the Windows virtual-environment launcher, whose CPU/I/O do not
-describe the separate Python worker. [#569](https://github.com/iMelki/memsys/issues/569)
+describe the separate Python worker. maintainer's private tracker
 owns that observability gap. The historical SQLite operation and its external
 storage/antivirus contention remain unproven.
 
@@ -118,10 +118,10 @@ Research before the source proposal:
   No applicable upstream snapshot fix was found. Chroma release changes did
   not establish a fix for this fork's full integrity reader; no upgrade proposed.
 
-Related scope: [#653](https://github.com/iMelki/memsys/issues/653),
-[#466](https://github.com/iMelki/memsys/issues/466),
-[#423](https://github.com/iMelki/memsys/issues/423), and
-[lease cleanup PR #869](https://github.com/iMelki/memsys/pull/869).
+Related scope: maintainer's private tracker,
+maintainer's private tracker,
+maintainer's private tracker, and
+maintainer's private tracker.
 Lease recovery and Meili restore are independent from SQLite verification.
 PR #869 was merged by its owner on October 11 at 17:12:55 UTC; this lane did
 not install it or verify live adoption.

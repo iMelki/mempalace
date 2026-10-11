@@ -6,7 +6,7 @@ This file is the durable local index for active `mempalace` issues.
 
 ## Active Issues
 
-- [MemSys #572 - Nightly snapshot budget and freshness](https://github.com/iMelki/memsys/issues/572)
+- maintainer's private tracker
   - S572b implements the CTO's nightly quick-check / weekly full-integrity split
     locally on top of `2742ab49`. Public push/PR approval and live installation
     are pending. Weekly health consumption and new task registration remain
@@ -22,7 +22,7 @@ This file is the durable local index for active `mempalace` issues.
     owner, with acting CTO review. See the
     [investigation](docs/research/snapshot-budget-2026-10-11.md).
     [#40](https://github.com/iMelki/mempalace/issues/40) owns the separate empty
-    logical-count proof, and [MemSys #569](https://github.com/iMelki/memsys/issues/569)
+    logical-count proof, and maintainer's private tracker
     owns incomplete worker observability.
 
 - [#71 - Close resume fixture snapshot readers](https://github.com/iMelki/mempalace/issues/71)
