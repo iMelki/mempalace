@@ -7,6 +7,8 @@ from contextlib import closing
 import pytest
 
 from mempalace import backup_snapshot
+from mempalace import snapshot_verification
+from mempalace.snapshot_verification import sqlite_check
 
 
 def test_integrity_reader_preserves_settings_and_database_bytes(tmp_path, monkeypatch):
@@ -36,8 +38,8 @@ def test_integrity_reader_preserves_settings_and_database_bytes(tmp_path, monkey
         assert "mode=ro" in args[0]
         return real_connect(*args, factory=Reader, **kwargs)
 
-    monkeypatch.setattr(backup_snapshot.sqlite3, "connect", connect)
-    assert backup_snapshot._sqlite_integrity_check(database) == "ok"
+    monkeypatch.setattr(snapshot_verification.sqlite3, "connect", connect)
+    assert sqlite_check(database, "integrity_check") == "ok"
     assert observed == [(default_cache, default_mmap)]
     assert hashlib.sha256(database.read_bytes()).hexdigest() == before
     assert not database.with_name(database.name + "-wal").exists()
@@ -66,14 +68,14 @@ def test_full_integrity_rejects_index_damage_that_quick_check_accepts(tmp_path):
     with pytest.raises(
         backup_snapshot.PalaceSnapshotError, match="integrity check did not return ok"
     ):
-        backup_snapshot._sqlite_integrity_check(database)
+        sqlite_check(database, "integrity_check")
 
 
 def test_integrity_sqlite_error_is_a_refusal(tmp_path):
     database = tmp_path / "broken.sqlite3"
     database.write_bytes(b"not a SQLite database" * 300)
     with pytest.raises(backup_snapshot.PalaceSnapshotError, match="integrity check failed"):
-        backup_snapshot._sqlite_integrity_check(database)
+        sqlite_check(database, "integrity_check")
 
 
 @pytest.mark.parametrize("damage_content", [False, True])
@@ -93,6 +95,6 @@ def test_integrity_verifies_fts5_trigram_content(tmp_path, damage_content):
             writer.execute("UPDATE ft_content SET c0='xyz'")
     if damage_content:
         with pytest.raises(backup_snapshot.PalaceSnapshotError, match="malformed inverted index"):
-            backup_snapshot._sqlite_integrity_check(database)
+            sqlite_check(database, "integrity_check")
     else:
-        assert backup_snapshot._sqlite_integrity_check(database) == "ok"
+        assert sqlite_check(database, "integrity_check") == "ok"

@@ -74,11 +74,10 @@ def test_weekly_selects_latest_copy_and_preserves_nightly_receipt(tmp_path):
 
 
 def test_weekly_refuses_live_database_even_when_receipt_points_to_it(tmp_path):
-    live, staging, receipt = stage(tmp_path)
-    receipt["stagedRoot"] = str(live)
-    (staging / backup.SNAPSHOT_RECEIPT_FILENAME).write_text(json.dumps(receipt))
-    with pytest.raises(backup.PalaceSnapshotError, match="staged root|live"):
-        backup.verify_weekly_snapshot(staging.parent, palace_path=live, budget_seconds=30)
+    _, staging, receipt = stage(tmp_path)
+    assert receipt["stagedRoot"] == str(staging / "palace")
+    with pytest.raises(backup.PalaceSnapshotError, match="refuses live database$"):
+        backup.verify_weekly_snapshot(staging.parent, palace_path=staging.parent, budget_seconds=30)
 
 
 def test_weekly_reports_timeout_without_nightly_success_rewrite(tmp_path):
@@ -93,7 +92,7 @@ def test_weekly_reports_timeout_without_nightly_success_rewrite(tmp_path):
     )
 
 
-def test_weekly_full_check_rejects_missing_index_rows_that_nightly_accepts(tmp_path):
+def test_weekly_full_check_rejects_missing_index_rows_that_nightly_accepts(tmp_path, capsys):
     live = _build_palace(tmp_path / "live")
     database = live / "chroma.sqlite3"
     with closing(sqlite3.connect(database)) as writer, writer:
@@ -111,6 +110,10 @@ def test_weekly_full_check_rejects_missing_index_rows_that_nightly_accepts(tmp_p
     result = backup.verify_weekly_snapshot(staging.parent, palace_path=live, budget_seconds=30)
     assert result["status"] == "error"
     assert "missing from index by_embedding_id" in result["message"]
+    assert backup.main(["--verify-receipt", str(staging / backup.SNAPSHOT_RECEIPT_FILENAME)]) == 2
+    output = capsys.readouterr().out
+    assert "outcome=failed" in output
+    assert "missing from index by_embedding_id" in output
 
 
 @pytest.mark.parametrize("breakage", ["stale", "identity", "failed", "malformed"])
@@ -134,8 +137,16 @@ def test_weekly_status_never_accepts_bad_receipt(tmp_path, breakage):
     assert result["weeklyVerification"]["status"] != "complete"
 
 
-def test_weekly_checks_newest_generation_and_ignores_pending_copy(tmp_path):
+@pytest.mark.parametrize("producer_now", ["2026-10-13T00:00:00Z", "2040-01-01T00:00:00Z"])
+def test_weekly_checks_newest_generation_and_ignores_pending_copy(
+    tmp_path, monkeypatch, producer_now
+):
+    monkeypatch.setattr(backup, "_utc_now", lambda: producer_now)
     live, first, _ = stage(tmp_path)
+    first_path = first / backup.SNAPSHOT_RECEIPT_FILENAME
+    first_snapshot = json.loads(first_path.read_text())
+    first_snapshot["generatedAt"] = "2026-10-11T00:00:00Z"
+    first_path.write_text(json.dumps(first_snapshot))
     newer = first.parent / "newer"
     backup.stage_palace_snapshot(live, newer, use_maintenance_marker=False)
     path = newer / backup.SNAPSHOT_RECEIPT_FILENAME
@@ -265,7 +276,7 @@ def test_weekly_invalid_budget_is_refused(tmp_path, budget):
 
 def test_cli_readback_reports_missing_weekly_receipt_in_plain_output(tmp_path, capsys):
     _, staging, _ = stage(tmp_path)
-    assert backup.main(["--verify-receipt", str(staging / backup.SNAPSHOT_RECEIPT_FILENAME)]) == 0
+    assert backup.main(["--verify-receipt", str(staging / backup.SNAPSHOT_RECEIPT_FILENAME)]) == 3
     output = capsys.readouterr().out
     assert "Weekly full integrity: missing" in output
     assert "weekly-integrity-receipt-missing" in output

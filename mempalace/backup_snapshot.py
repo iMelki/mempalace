@@ -434,21 +434,6 @@ def verify_weekly_snapshot(backup_root, *, palace_path, budget_seconds=7200):
     return verify_weekly(backup_root, palace_path=palace_path, budget_seconds=budget_seconds)
 
 
-def _sqlite_integrity_check(snapshot: Path) -> str:
-    try:
-        connection = sqlite3.connect(f"file:{snapshot.as_posix()}?mode=ro", uri=True, timeout=5)
-        try:
-            result = connection.execute("PRAGMA integrity_check").fetchone()
-        finally:
-            connection.close()
-    except sqlite3.Error as exc:
-        raise PalaceSnapshotError(f"snapshot SQLite integrity check failed: {exc}") from exc
-    verdict = str(result[0]) if result else "missing"
-    if verdict != "ok":
-        raise PalaceSnapshotError(f"snapshot SQLite integrity check did not return ok: {verdict}")
-    return verdict
-
-
 def read_catalog(sqlite_path: Path) -> list[dict[str, Any]]:
     """Return the collections and their currently referenced segment ids."""
 
@@ -1139,7 +1124,12 @@ def _print(payload: dict[str, Any], as_json: bool) -> None:
         print(f"  Identity:       {payload.get('contentIdentityDigest')}")
         print(f"  Duration:       {payload.get('durationSeconds')}s")
         return
-    print(f"MemPalace snapshot verification: valid={payload.get('valid')}")
+    from .snapshot_verification import receipt_verification_exit_code
+
+    outcome = {0: "complete", 2: "failed", 3: "warning"}[receipt_verification_exit_code(payload)]
+    print(
+        f"MemPalace snapshot verification: outcome={outcome} nightly-valid={payload.get('valid')}"
+    )
     print(f"  Files:    {payload.get('fileCount')}  hashed={payload.get('hashesVerified')}")
     weekly = payload.get("weeklyVerification")
     if weekly:
@@ -1235,7 +1225,9 @@ def main(argv: list[str] | None = None) -> int:
                 verify_hashes=not args.skip_hash_verification,
             )
             _print(result, args.json)
-            return 0 if result["valid"] else 2
+            from .snapshot_verification import receipt_verification_exit_code
+
+            return receipt_verification_exit_code(result)
         if args.verify_staged_dir:
             receipt = verify_staged_snapshot(args.verify_staged_dir)
             _print(receipt, args.json)

@@ -8,7 +8,8 @@ from contextlib import closing
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from mempalace.backup_snapshot import PalaceSnapshotError, _sqlite_integrity_check
+from mempalace.snapshot_errors import PalaceSnapshotError
+from mempalace.snapshot_verification import sqlite_check
 
 
 def main():
@@ -35,7 +36,7 @@ def main():
         with closing(sqlite3.connect(database)) as reader:
             assert reader.execute("PRAGMA quick_check").fetchone()[0] == "ok"
     try:
-        assert _sqlite_integrity_check(database) == "ok"
+        assert sqlite_check(database, "integrity_check") == "ok"
     except PalaceSnapshotError as error:
         if not args.broken or "row 1 missing from index by_value" not in str(error):
             print(f"UNEXPECTED: {error}")

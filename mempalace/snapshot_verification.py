@@ -42,20 +42,33 @@ def sqlite_check(database, pragma, *, deadline=None):
     if pragma not in ("quick_check", "integrity_check"):
         raise ValueError("unsupported snapshot check")
     label = pragma.replace("_", " ")
+    interrupted_by_deadline = False
+
+    def interrupt_on_deadline():
+        nonlocal interrupted_by_deadline
+        interrupted_by_deadline = time.monotonic() >= deadline
+        return int(interrupted_by_deadline)
+
     try:
         with closing(
             sqlite3.connect(database.as_uri() + "?mode=ro", uri=True, timeout=5)
         ) as reader:
             if deadline is not None:
-                reader.set_progress_handler(lambda: int(time.monotonic() >= deadline), 10000)
+                reader.set_progress_handler(interrupt_on_deadline, 10000)
             result = reader.execute("PRAGMA " + pragma).fetchall()
     except sqlite3.Error as exc:
-        if deadline is not None and time.monotonic() >= deadline:
+        # Error codes are available on Python 3.11+. Older runtimes also require
+        # our callback's witness and SQLite's exact interruption diagnostic.
+        code = getattr(exc, "sqlite_errorcode", None)
+        interrupted = (code is not None and code & 0xFF == 9) or (
+            code is None and str(exc) == "interrupted"
+        )
+        if interrupted_by_deadline and interrupted:
             raise PalaceSnapshotError("weekly verification budget exceeded") from exc
         raise PalaceSnapshotError(f"snapshot SQLite {label} failed: {exc}") from exc
-    check_deadline(deadline)
     if result != [("ok",)]:
         raise PalaceSnapshotError(f"snapshot SQLite {label} did not return ok: {result!r}")
+    check_deadline(deadline)
     return "ok"
 
 
@@ -76,10 +89,15 @@ def bounded_hash(path, deadline):
     return "sha256:" + digest.hexdigest()
 
 
-def no_links(path):
+def no_links(path, boundary):
+    """Reject redirects below the writer-accepted backup root, before resolving."""
     from .backup_snapshot import _is_link_or_reparse
 
+    if boundary not in path.parents:
+        raise PalaceSnapshotError("weekly verification path is outside snapshot tree")
     for ancestor in (path, *path.parents):
+        if ancestor == boundary:
+            break
         if _is_link_or_reparse(ancestor):
             raise PalaceSnapshotError("weekly verification refuses links or reparse points")
 
@@ -87,13 +105,13 @@ def no_links(path):
 def latest_snapshot(root):
     from .backup_snapshot import SNAPSHOT_RECEIPT_FILENAME, SNAPSHOT_RECEIPT_SCHEMA
 
-    no_links(root)
+    root = root.resolve(strict=True)
     candidates = []
     for generation in root.iterdir():
         path = generation / SNAPSHOT_RECEIPT_FILENAME
         if not generation.is_dir() or not path.is_file():
             continue
-        no_links(path)
+        no_links(path, root)
         receipt = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(receipt, dict):
             raise PalaceSnapshotError("snapshot receipt is not an object")
@@ -112,7 +130,13 @@ def latest_snapshot(root):
 
 def checked_copy(receipt_path, receipt, live):
     database = receipt_path.parent / "palace" / "chroma.sqlite3"
-    no_links(database)
+    boundary = receipt_path.parent.parent
+    no_links(database, boundary)
+    # Check every segment/metadata entry too; do not follow a redirect before
+    # examining it. os.walk yields child directories before descending into them.
+    for directory, folders, files in os.walk(receipt_path.parent, followlinks=False):
+        for name in folders + files:
+            no_links(Path(directory) / name, boundary)
     if Path(receipt.get("stagedRoot", "")).resolve() != database.parent.resolve():
         raise PalaceSnapshotError("weekly staged root does not match snapshot generation")
     database = database.resolve(strict=True)
@@ -151,7 +175,7 @@ def full_copy_proof(database, path, snapshot, result, deadline):
 
 
 def write_weekly_receipt(target, result):
-    no_links(target)
+    no_links(target, target.parent.parent)
     temporary = target.with_name(target.name + "." + uuid.uuid4().hex + ".tmp")
     with temporary.open("x", encoding="utf-8", newline="\n") as stream:
         json.dump(result, stream, indent=2, sort_keys=True)
@@ -173,7 +197,7 @@ def verify_weekly_snapshot(backup_root, *, palace_path, budget_seconds=7200):
     path, snapshot = latest_snapshot(Path(backup_root).expanduser().absolute())
     database = checked_copy(path, snapshot, Path(palace_path).expanduser().resolve())
     target = path.parent / WEEKLY_FILENAME
-    no_links(target)
+    no_links(target, path.parent.parent)
     result = {
         "schema": WEEKLY_SCHEMA,
         "status": "error",
@@ -202,10 +226,10 @@ def verify_weekly_snapshot(backup_root, *, palace_path, budget_seconds=7200):
 
 def weekly_status(receipt_path, snapshot):
     target = receipt_path.parent / WEEKLY_FILENAME
-    if not target.exists():
-        return {"status": "missing", "problem": "weekly-integrity-receipt-missing"}
     try:
-        no_links(target)
+        no_links(target, receipt_path.parent.parent)
+        if not target.exists():
+            return {"status": "missing", "problem": "weekly-integrity-receipt-missing"}
         weekly = json.loads(target.read_text(encoding="utf-8"))
         if not isinstance(weekly, dict):
             raise ValueError("weekly receipt is not an object")
@@ -228,3 +252,15 @@ def weekly_status(receipt_path, snapshot):
         return {"status": "complete", "finishedAt": weekly["finishedAt"]}
     except (OSError, ValueError, KeyError, TypeError, StopIteration, PalaceSnapshotError) as exc:
         return {"status": "invalid", "problem": str(exc)}
+
+
+def receipt_verification_exit_code(payload):
+    """0=complete proof, 2=failed proof, 3=missing/stale weekly warning."""
+    if not payload.get("valid"):
+        return 2
+    status = payload.get("weeklyVerification", {}).get("status")
+    if status == "complete":
+        return 0
+    if status in ("missing", "stale"):
+        return 3
+    return 2

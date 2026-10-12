@@ -4,6 +4,122 @@
   "exclude": [],
   "gates": [
     {
+      "id": "snapshot-receipt-cli-weekly-outcome",
+      "path": "mempalace/backup_snapshot.py",
+      "description": "Both caller entrypoints must expose weekly status and return nonzero on failure or missing/stale warning; nightly valid remains separate.",
+      "negativeFixture": "tests/test_snapshot_review79.py",
+      "observedFailure": {
+        "date": "2026-10-12",
+        "command": "python -B -m pytest -q tests/test_snapshot_review79.py tests/test_snapshot_integrity_contract.py tests/test_snapshot_quick_weekly.py -k \"receipt_cli_exposes or accepts_writer or accepts_real_junction or inside_generation or corruption_near or retired_integrity or newest_generation or integrity_reader_preserves or production_integrity_requires\"",
+        "exitCode": 1,
+        "output": "Native receipt CLIs: assert 0 == 2 for failed/invalid weekly proof; assert 0 == 3 for missing/stale proof. Command CLI also omitted Weekly full integrity. Combined pre-fix run: 25 failed, 10 passed, 31 deselected in 108.35s.",
+        "reason": "Both caller entrypoints must expose weekly status and return nonzero on failure or missing/stale warning; nightly valid remains separate.",
+        "restoredPass": "python -B -m pytest -q tests/test_snapshot_review79.py tests/test_snapshot_integrity_contract.py tests/test_snapshot_quick_weekly.py tests/test_backup_snapshot.py; exit 0; 104 passed, 1 skipped in 126.89s"
+      }
+    },
+    {
+      "id": "snapshot-command-cli-weekly-outcome",
+      "path": "mempalace/cli.py",
+      "description": "Package command dispatch shares the native module renderer and weekly outcome classifier.",
+      "negativeFixture": "tests/test_snapshot_review79.py",
+      "observedFailure": {
+        "date": "2026-10-12",
+        "command": "python -B -m pytest -q tests/test_snapshot_review79.py tests/test_snapshot_integrity_contract.py tests/test_snapshot_quick_weekly.py -k \"receipt_cli_exposes or accepts_writer or accepts_real_junction or inside_generation or corruption_near or retired_integrity or newest_generation or integrity_reader_preserves or production_integrity_requires\"",
+        "exitCode": 1,
+        "output": "Native receipt CLIs: assert 0 == 2 for failed/invalid weekly proof; assert 0 == 3 for missing/stale proof. Command CLI also omitted Weekly full integrity. Combined pre-fix run: 25 failed, 10 passed, 31 deselected in 108.35s.",
+        "reason": "Both caller entrypoints must expose weekly status and return nonzero on failure or missing/stale warning; nightly valid remains separate.",
+        "restoredPass": "python -B -m pytest -q tests/test_snapshot_review79.py tests/test_snapshot_integrity_contract.py tests/test_snapshot_quick_weekly.py tests/test_backup_snapshot.py; exit 0; 104 passed, 1 skipped in 126.89s"
+      }
+    },
+    {
+      "id": "snapshot-backup-root-link-boundary",
+      "path": "mempalace/snapshot_verification.py",
+      "description": "Accept writer backup roots while rejecting redirects inside snapshot generations. Removing no_links after the fix caused 5 failures; exact bytes restored and 5 passed, 27 deselected.",
+      "negativeFixture": "tests/test_snapshot_review79.py",
+      "observedFailure": {
+        "date": "2026-10-12",
+        "command": "python -B -m pytest -q tests/test_snapshot_review79.py tests/test_snapshot_integrity_contract.py tests/test_snapshot_quick_weekly.py -k \"receipt_cli_exposes or accepts_writer or accepts_real_junction or inside_generation or corruption_near or retired_integrity or newest_generation or integrity_reader_preserves or production_integrity_requires\"",
+        "exitCode": 1,
+        "output": "Accepted root/ancestor and real writer-accepted junction: PalaceSnapshotError: weekly verification refuses links or reparse points. Internal segment reparse fixture: Failed: DID NOT RAISE.",
+        "reason": "Accept writer backup roots while rejecting redirects inside snapshot generations. Removing no_links after the fix caused 5 failures; exact bytes restored and 5 passed, 27 deselected.",
+        "restoredPass": "python -B -m pytest -q tests/test_snapshot_review79.py tests/test_snapshot_integrity_contract.py tests/test_snapshot_quick_weekly.py tests/test_backup_snapshot.py; exit 0; 104 passed, 1 skipped in 126.89s; link-guard mutant produced 5 failures and restored selection passed 5 tests",
+        "restoreVerification": "Exact original bytes compared after each mutation; restored production source SHA256 817e1dd88e732511523eab8d6ded28a6c9ad6bd8e9714344b1688de18774fdd7"
+      }
+    },
+    {
+      "id": "snapshot-production-reader-settings",
+      "path": "mempalace/snapshot_verification.py",
+      "description": "The old helper-backed test was blind to a production cache change. The corrected test targets the production reader and observes its read-only/default-settings/unchanged-bytes contract.",
+      "negativeFixture": "tests/test_snapshot_integrity_contract.py",
+      "observedFailure": {
+        "date": "2026-10-12",
+        "command": "python -B -m pytest -q tests/test_snapshot_integrity_contract.py -k reader_preserves",
+        "exitCode": 1,
+        "output": "Injected reader.execute(\"PRAGMA cache_size=123\") into production sqlite_check at the reviewed head. OLD contract: 1 passed, 4 deselected. Corrected contract: E assert [(123, 0)] == [(-2000, 0)]; 1 failed, 4 deselected.",
+        "reason": "The old helper-backed test was blind to a production cache change. The corrected test targets the production reader and observes its read-only/default-settings/unchanged-bytes contract.",
+        "restoredPass": "Exact source bytes restored and verified. Same command: exit 0; 1 passed, 4 deselected in 0.88s.",
+        "restoreVerification": "Exact original bytes compared after each mutation; restored production source SHA256 817e1dd88e732511523eab8d6ded28a6c9ad6bd8e9714344b1688de18774fdd7"
+      }
+    },
+    {
+      "id": "snapshot-production-integrity-exact-verdict",
+      "path": "mempalace/snapshot_verification.py",
+      "description": "Full integrity must consume all verdicts and accept exactly one ok row.",
+      "negativeFixture": "tests/test_snapshot_review79.py",
+      "observedFailure": {
+        "date": "2026-10-12",
+        "command": "python -B -m pytest -q tests/test_snapshot_review79.py -k production_integrity_requires",
+        "exitCode": 1,
+        "output": "Replaced if result != [(\"ok\",)] with if False in production sqlite_check. Empty and mixed verdicts: Failed: DID NOT RAISE; 2 failed, 30 deselected.",
+        "reason": "Full integrity must consume all verdicts and accept exactly one ok row.",
+        "restoredPass": "Exact source bytes restored and verified. Same command: exit 0; 2 passed, 30 deselected.",
+        "restoreVerification": "Exact original bytes compared after each mutation; restored production source SHA256 817e1dd88e732511523eab8d6ded28a6c9ad6bd8e9714344b1688de18774fdd7"
+      }
+    },
+    {
+      "id": "snapshot-weekly-live-root-refusal",
+      "path": "mempalace/snapshot_verification.py",
+      "description": "The live-root test must reach the actual live database guard rather than fail earlier on stagedRoot identity.",
+      "negativeFixture": "tests/test_snapshot_quick_weekly.py",
+      "observedFailure": {
+        "date": "2026-10-12",
+        "command": "python -B -m pytest -q tests/test_snapshot_quick_weekly.py -k refuses_live_database_even",
+        "exitCode": 1,
+        "output": "Disabled the live_root == database.parent or live_root in database.parents branch. Correct stagedRoot fixture: Failed: DID NOT RAISE; 1 failed, 28 deselected.",
+        "reason": "The live-root test must reach the actual live database guard rather than fail earlier on stagedRoot identity.",
+        "restoredPass": "Exact source bytes restored and verified. Same command: exit 0; 1 passed, 28 deselected.",
+        "restoreVerification": "Exact original bytes compared after each mutation; restored production source SHA256 817e1dd88e732511523eab8d6ded28a6c9ad6bd8e9714344b1688de18774fdd7"
+      }
+    },
+    {
+      "id": "snapshot-generation-fixture-clock-independence",
+      "path": "tests/test_snapshot_quick_weekly.py",
+      "description": "Newest-generation fixture must remain ordered after the fixed date and retain exclusion of a newer pending copy.",
+      "negativeFixture": "tests/test_snapshot_quick_weekly.py",
+      "observedFailure": {
+        "date": "2026-10-12",
+        "command": "python -B -m pytest -q tests/test_snapshot_review79.py tests/test_snapshot_integrity_contract.py tests/test_snapshot_quick_weekly.py -k \"receipt_cli_exposes or accepts_writer or accepts_real_junction or inside_generation or corruption_near or retired_integrity or newest_generation or integrity_reader_preserves or production_integrity_requires\"",
+        "exitCode": 1,
+        "output": "Producer replay: assert '2026-10-13T00:00:00Z' == '2026-10-12T00:00:00Z'; assert '2040-01-01T00:00:00Z' == '2026-10-12T00:00:00Z'. Both cases failed before setting both completed timestamps deterministically.",
+        "reason": "Newest-generation fixture must remain ordered after the fixed date and retain exclusion of a newer pending copy.",
+        "restoredPass": "python -B -m pytest -q tests/test_snapshot_review79.py tests/test_snapshot_integrity_contract.py tests/test_snapshot_quick_weekly.py tests/test_backup_snapshot.py; exit 0; 104 passed, 1 skipped in 126.89s"
+      }
+    },
+    {
+      "id": "snapshot-sqlite-error-deadline-attribution",
+      "path": "mempalace/snapshot_verification.py",
+      "description": "Preserve non-interruption SQLite errors near the budget boundary; a witnessed deadline interruption is still attributed as budget exhaustion.",
+      "negativeFixture": "tests/test_snapshot_review79.py",
+      "observedFailure": {
+        "date": "2026-10-12",
+        "command": "python -B -m pytest -q tests/test_snapshot_review79.py tests/test_snapshot_integrity_contract.py tests/test_snapshot_quick_weekly.py -k \"receipt_cli_exposes or accepts_writer or accepts_real_junction or inside_generation or corruption_near or retired_integrity or newest_generation or integrity_reader_preserves or production_integrity_requires\"",
+        "exitCode": 1,
+        "output": "SQLite DatabaseError: database disk image is malformed at the deadline was wrapped as PalaceSnapshotError: weekly verification budget exceeded; Regex pattern did not match.",
+        "reason": "Preserve non-interruption SQLite errors near the budget boundary; a witnessed deadline interruption is still attributed as budget exhaustion.",
+        "restoredPass": "python -B -m pytest -q tests/test_snapshot_review79.py tests/test_snapshot_integrity_contract.py tests/test_snapshot_quick_weekly.py tests/test_backup_snapshot.py; exit 0; 104 passed, 1 skipped in 126.89s"
+      }
+    },
+    {
       "id": "snapshot-weekly-native-cli",
       "path": "mempalace/backup_snapshot.py",
       "description": "Native module CLI reports an attributed weekly refusal and saved-copy success.",
@@ -75,16 +191,16 @@
     },
     {
       "id": "snapshot-full-integrity-reader",
-      "path": "mempalace/backup_snapshot.py",
-      "description": "The actual full SQLite verifier rejects missing index rows that quick_check admits.",
+      "path": "mempalace/snapshot_verification.py",
+      "description": "Production sqlite_check rejects missing index rows that quick_check admits.",
       "negativeFixture": "tests/fixtures/snapshot_integrity_negative.py",
       "observedFailure": {
-        "date": "2026-10-11",
-        "command": "python tests/fixtures/snapshot_integrity_negative.py --broken",
+        "date": "2026-10-12",
+        "command": "python -B tests/fixtures/snapshot_integrity_negative.py --broken",
         "exitCode": 1,
-        "output": "PalaceSnapshotError: snapshot SQLite integrity check did not return ok: row 1 missing from index by_value",
-        "reason": "An empty but structurally valid index passes quick_check; the actual full snapshot verifier rejects its missing table rows.",
-        "restoredPass": "python tests/fixtures/snapshot_integrity_negative.py; exit 0; PASS: full snapshot integrity check accepted the restored index"
+        "output": "PalaceSnapshotError: snapshot SQLite integrity check did not return ok: [('row 1 missing from index by_value',), ('row 2 missing from index by_value',), ('wrong # of entries in index by_value',)]",
+        "reason": "A real empty index passes quick_check, while production sqlite_check reads and rejects every integrity verdict.",
+        "restoredPass": "python -B tests/fixtures/snapshot_integrity_negative.py; exit 0; PASS: full snapshot integrity check accepted the restored index"
       }
     },
     {

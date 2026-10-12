@@ -19,14 +19,18 @@ owner must disposition those generations separately during adoption.
 Quick check deliberately does not prove UNIQUE constraints or index/table content
 consistency. The existing empty-index fixture still passes quick check and fails
 full integrity. Structurally corrupted index and table pages fail quick check.
-The full helper used by existing independent recovery checks remains unchanged.
+The weekly production checker also backs the independent integrity contract tests.
+The unused producer integrity helper is retired; evaluation-manifest checks retain
+their separate policy.
 The empty logical-count limitation remains a separate recovery-proof issue.
 
 `python -m mempalace.backup_snapshot --weekly-verify-root <backup-root>
 --palace-path <live-root> --weekly-budget-seconds 7200 --json` selects the newest
 complete generation by receipt timestamp (pending copies are not candidates).
-It binds the destination to `<generation>/palace/chroma.sqlite3`, refuses links,
-reparse points and hard links to either the supplied live root or receipt source,
+It resolves the configured backup root exactly as the nightly writer does, so
+root junctions, volume mounts and cloud-backed ancestors are accepted. Within
+each snapshot generation it refuses links and reparse points, including segment
+files, and rejects hard links to either the supplied live root or receipt source,
 and never opens a live SQLite connection or acquires a maintenance lease.
 
 The weekly check validates the nightly receipt, verifies the copy's recorded hash,
@@ -43,6 +47,25 @@ it cannot masquerade as full integrity proof. New daily snapshots normally repor
 missing until selected by a weekly run. Weekly health must consume the latest
 weekly receipt across generations and alert after seven days without success;
 checking only each day's newest snapshot would alert continuously.
+
+Both receipt-verification CLI entrypoints use one outcome classifier and renderer.
+Exit 0 means nightly validity and complete, fresh weekly proof; exit 2 means
+invalid nightly proof or failed/invalid weekly proof; exit 3 is a warning for
+missing/stale weekly proof; exit 1 means the command could not evaluate its input.
+Warnings are nonzero so callers cannot treat missing evidence as a clean result.
+The JSON `valid` field continues to describe only nightly proof. A newly staged
+generation normally warns until its weekly run completes; this command is not a
+replacement for the separately gated cross-generation weekly health consumer.
+Unknown weekly status values fail closed. SQLite error codes, when available,
+distinguish progress-handler interruption from corruption near the deadline;
+only a deadline-associated SQLITE_INTERRUPT is labeled budget exhaustion.
+
+Runtime adoption is gated on consumer handling of warning exit 3. A bounded
+source scan found an archive verifier that allows only exits 0/2 and requires 0
+alongside nightly `valid=true`; it will reject a newly staged generation's missing
+weekly proof under this contract. Its owner must explicitly classify warnings
+before adopting this source, preserve nightly proof requirements, and still
+reject failed/invalid weekly proof. No consumer policy was changed in this review.
 
 ## Research before implementation
 
@@ -131,7 +154,7 @@ seconds**, **1.814x** headroom, below the inner budget but below the requested 2
 margin. Thus the nominal expected duration meets the target; a guaranteed or
 observed whole-nightly 2x margin remains unproven without a matching full generation.
 
-New verification logic is extracted into the 230-line verification module
+New verification logic is extracted into the 266-line verification module
 (largest function 39 lines) and a five-line shared exception module. The existing
 producer remains oversized; its lease/copy flow is preserved, with new small
 wrappers and CLI dispatch. The unchanged large flows require CTO review rather
@@ -144,3 +167,58 @@ is the retained 26,635,059,200-byte COPY with SHA256
 `9670071505e9b4d8b8dd9bf6af280c71437b62be41ca7b1d21eae94fbf66863e`.
 A complete matching HNSW generation was unavailable. Therefore SQLite measurements
 and a planning allowance are not an observed complete nightly run or restore.
+
+## PR 79 review repair research (2026-10-12)
+
+Original upstream was checked first: backup request #1120, absent-integrity-verdict
+fix #2291, index-corruption report #1362, release v3.10.0 and the current develop
+changelog. Bounded upstream searches for snapshot integrity returned no matching
+issue; quick_check PR search found [repair retry #2628](https://github.com/MemPalace/mempalace/pull/2628).
+That open repair change retries read-only refusals on a writable connection.
+A snapshot verification must remain read-only, so that repair policy is not ported.
+The absent-verdict principle in [#2291](https://github.com/MemPalace/mempalace/pull/2291)
+already matches the strict all-rows checker used here; no equivalent root-boundary
+or weekly receipt CLI fix was identified in this bounded review.
+
+- [Microsoft reparse points](https://learn.microsoft.com/en-us/windows/win32/fileio/reparse-points)
+  explains why root mounts and junctions need a boundary rather than an all-ancestor refusal.
+- [Python SQLite exceptions](https://docs.python.org/3.13/library/sqlite3.html#sqlite3.Error)
+  documents SQLite error codes and names for distinguishing interrupted checks.
+- [SQLite maintainer discussion](https://sqlite.org/forum/forumpost/f3ad6b1bb5)
+  confirms that quick_check can miss cross-reference defects and full checks take time.
+
+The production integrity contract now covers the exact single-ok result,
+unchanged database bytes, read-only URI and default cache/mmap settings.
+Future-clock replay sets both completed-generation timestamps explicitly and
+keeps a later pending generation excluded. The live-copy refusal fixture now
+passes the staged-root identity check and reaches the actual live-root guard.
+
+
+Review-repair maintainability: verification module 230 -> 266 lines, largest
+function still 39 lines. Producer 1265 -> 1257 lines and largest function 276;
+CLI 1843 -> 1844 lines and largest function 557. Those pre-existing oversized
+flows remain unchanged except the small receipt dispatch; this review removes
+one dead helper and shares the outcome classifier/renderer instead of adding a
+second policy. The review regression file is 162 lines, largest test 40 lines.
+No scheduler, service, runtime-consumer or maintenance-lease adoption is claimed.
+
+
+## Review repair validation and unresolved full-suite checks
+
+Failing-first review regressions: 25 failed, 10 passed, 31 deselected. Corrected
+focused snapshot suites: 104 passed, one unavailable cross-repository fixture
+skipped. Production settings/verdict/link/live mutations caused 9 attributed
+failures; all restored selections passed after byte-exact restore verification.
+The production integrity fixture rejects a real empty index and accepts clean data.
+
+Two complete CI-shaped coverage runs used the project virtual environment and
+fresh temporary storage. First: 2202 passed, 1 failed, 9 skipped; coverage 83.90%.
+Second: 2201 passed, 2 failed, 9 skipped; coverage 83.91%. Both exceed the 80%
+coverage gate, and all snapshot regressions passed. The package suite is NOT green.
+The unchanged fact-checker performance assertion exceeded 0.200s twice (0.201289s
+and 0.216083s). The second run also hit permission denied while a project-scanner
+fixture wrote a temporary Git object. Isolated diagnostics passed, but those
+passes do not clear the whole-suite failures. No threshold, quarantine, skip,
+ACL or unrelated module was changed. The acting CTO/test owners must resolve
+these separately before package acceptance; public bug filing remains separately
+gated. Review repairs are local commits only, with publication/runtime gates open.
