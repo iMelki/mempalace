@@ -4,6 +4,132 @@
   "exclude": [],
   "gates": [
     {
+      "id": "mine-prefix-grok-five-step-prepared-rewrite",
+      "path": "mempalace/mine_refresh_recovery.py",
+      "description": "The exact P/F/U/G sequence recovers a later mine after a crashed pending follow-up rewrite.",
+      "negativeFixture": "tests/fixtures/mine_refresh_grok_sequence.py",
+      "observedFailure": {
+        "date": "2026-10-12",
+        "command": "python -u tests/fixtures/mine_refresh_grok_sequence.py (exported original head 72d07e326338d4749c7ff2c9932cf4128f63d15e)",
+        "exitCode": 1,
+        "output": "MineProgressError: pending refresh has no matching committed refresh ancestor; 1 failed, 2 warnings in 15.89s",
+        "reason": "Original production source was exported and verified against its Git blob, with only the new fixture/helpers copied in. A hard exit after R1(P), a mine of F, a hard exit after durable prepared(U), then a mine of G leave the original resume wedged. Each receipt predecessor and byte-version distinction is read back before the failing resume.",
+        "restoredPass": "python -u tests/fixtures/mine_refresh_grok_sequence.py (fixed production source); exit 0; 1 passed, 2 warnings in 20.60s; final receipt, suffix completion, original preparation, immutable events and idempotence read back"
+      }
+    },
+    {
+      "id": "mine-prefix-prepared-rewrite-saved-recovery",
+      "path": "mempalace/mine_refresh_recovery.py",
+      "description": "Pending follow-up rewrites can recover through verified original preparation and saved receipt pins.",
+      "negativeFixture": "tests/test_mine_refresh_recovery_interleavings.py",
+      "observedFailure": {
+        "date": "2026-10-12",
+        "command": "python -u -m pytest tests/test_mine_refresh_recovery_interleavings.py -k prepared -q -o faulthandler_timeout=90",
+        "exitCode": 1,
+        "output": "MineProgressError: pending refresh has no matching committed refresh ancestor; 6 failed, 2 passed, 6 deselected, 16 warnings in 95.30s",
+        "reason": "At reviewed head 72d07e326338d4749c7ff2c9932cf4128f63d15e, the child exits 31 after a follow-up rewrite's durable prepared event, before COMPLETE. A later writer changes bytes or configuration, and all six combinations wedge on the new pending snapshot despite valid saved/original evidence.",
+        "restoredPass": "python -u -m pytest tests/test_mine_refresh.py tests/test_mine_refresh_saved_lineage.py tests/test_mine_refresh_recovery_interleavings.py tests/test_mine_refresh_saved_pin.py tests/test_mine_progress.py -q -o faulthandler_timeout=90; exit 0; 71 passed, 114 warnings in 443.29s; all twelve later-writer crash-point cases pass, including all six prepared-crash cases, with immutable earlier events and repeated-resume readback"
+      }
+    },
+    {
+      "id": "mine-prefix-prepared-rewrite-original-anchor",
+      "path": "mempalace/mine_refresh.py",
+      "description": "A recovery advance after an uncommitted rewrite retains the original committed preparation.",
+      "negativeFixture": "tests/fixtures/mine_refresh_prepared_anchor_negative.py",
+      "observedFailure": {
+        "date": "2026-10-12",
+        "command": "python -u tests/fixtures/mine_refresh_prepared_anchor_negative.py --broken",
+        "exitCode": 1,
+        "output": "MineProgressError: pending refresh has no matching committed refresh ancestor; 2 failed, 12 deselected, 4 warnings in 27.15s",
+        "reason": "The fixture restores only the old journal behavior that replaces original recovery preparation with the uncommitted follow-up. It asserts that the mutation applied. Both real prepared-crash/further-edit cases then fail on missing original ancestry after the recovery advance.",
+        "restoredPass": "python -u tests/fixtures/mine_refresh_prepared_anchor_negative.py; exit 0; 2 passed, 12 deselected, 4 warnings in 30.67s; immutable events, current receipts, original preparation retention and repeated-resume readback all pass"
+      }
+    },
+    {
+      "id": "mine-prefix-saved-recovery-head-advance",
+      "path": "mempalace/mine_refresh.py",
+      "description": "Saved recovery can advance only through verified descendants while retaining original preparation.",
+      "negativeFixture": "tests/test_mine_refresh_recovery_interleavings.py",
+      "observedFailure": {
+        "date": "2026-10-12",
+        "command": "python -u -m pytest tests/test_mine_refresh_recovery_interleavings.py -q -o faulthandler_timeout=90",
+        "exitCode": 1,
+        "output": "6 later-writer cases failed: completed source no longer names the recorded current receipt",
+        "reason": "At reviewed head 9516abf2f4f497823eb7235fae7fc59210450181, a real hard exit, saved recovery interruption and later mine leave pending empty and pin an obsolete head on every resume.",
+        "restoredPass": "python -u -m pytest tests/test_mine_refresh.py tests/test_mine_refresh_saved_lineage.py tests/test_mine_refresh_recovery_interleavings.py -q -o faulthandler_timeout=90; exit 0; 39 passed, 70 warnings in 221.50s; all six later-writer cases pass with immutable earlier events and repeated-resume readback"
+      }
+    },
+    {
+      "id": "mine-prefix-current-receipt-content-freshness",
+      "path": "mempalace/mine_refresh.py",
+      "description": "A historical descriptor cannot hide a source/hash mismatch with the verified current receipt.",
+      "negativeFixture": "tests/test_mine_refresh_recovery_interleavings.py",
+      "observedFailure": {
+        "date": "2026-10-12",
+        "command": "python -u -m pytest tests/test_mine_refresh_recovery_interleavings.py -q -o faulthandler_timeout=90",
+        "exitCode": 1,
+        "output": "2 exact-bytes/mtime revert cases failed authoritative receipt-ID equality: no corrective successor was written",
+        "reason": "At reviewed head 9516abf2f4f497823eb7235fae7fc59210450181, the restored file descriptor equals the prepared item while the later head still represents different content; both direct and saved recovery wrongly skip rewrite.",
+        "restoredPass": "python -u -m pytest tests/test_mine_refresh.py tests/test_mine_refresh_saved_lineage.py tests/test_mine_refresh_recovery_interleavings.py -q -o faulthandler_timeout=90; exit 0; 39 passed in 221.50s; both reverts publish the restored content hash and verify repeated-resume idempotence"
+      }
+    },
+    {
+      "id": "mine-prefix-saved-recovery-pin-ancestor",
+      "path": "mempalace/mine_refresh_recovery.py",
+      "description": "Advancing saved recovery preserves the exact recorded receipt/hash/config pin on the current chain.",
+      "negativeFixture": "tests/fixtures/mine_refresh_saved_pin_negative.py",
+      "observedFailure": {
+        "date": "2026-10-12",
+        "command": "python -u tests/fixtures/mine_refresh_saved_pin_negative.py --broken",
+        "exitCode": 1,
+        "output": "Failed: DID NOT RAISE MineProgressError; 6 failed, 12 warnings in 89.00s",
+        "reason": "The committed fixture removes only saved-pin enforcement, retaining original prepared ancestry and current-output verification. Validly rehashed false receipt ID/content/config claims are then wrongly accepted by real resume, both before and after a follow-up prepared event.",
+        "restoredPass": "python -u tests/fixtures/mine_refresh_saved_pin_negative.py; exit 0; 6 passed, 12 warnings in 80.17s; exact refusals preserve progress and sidecar bytes, including all three pending-rewrite false pins"
+      }
+    },
+    {
+      "id": "mine-prefix-refresh-descendant-recovery",
+      "path": "mempalace/mine_refresh_recovery.py",
+      "description": "Recover a current head descended from the prepared refresh without accepting unrelated heads.",
+      "negativeFixture": "tests/fixtures/mine_refresh_hard_exit.py",
+      "observedFailure": {
+        "date": "2026-10-09",
+        "command": "python -u -m pytest tests/test_mine_refresh.py -k hard_exit_then_journalless -q -o faulthandler_timeout=90",
+        "exitCode": 1,
+        "output": "3 failed, 17 deselected, 6 warnings in 34.88s; predecessor rejection for same bytes; no matching terminal managed receipt for further edit and changed configuration",
+        "reason": "At base f79d625ce53629aa59c7eb3302d70841d310fd75 the child exited 29 after COMPLETE publication, a whole-project journal-less mine advanced the receipt head, and all three resumes failed.",
+        "restoredPass": "python -u -m pytest tests/test_mine_refresh.py tests/test_mine_refresh_saved_lineage.py -q -o faulthandler_timeout=90; exit 0; 31 passed, 54 warnings in 73.85s; includes exact receipt/journal readbacks and repeated-resume idempotence"
+      }
+    },
+    {
+      "id": "mine-prefix-refresh-ancestor-enforcement",
+      "path": "mempalace/mine_refresh_recovery.py",
+      "description": "Initial and saved recovered heads require the original committed prepared-refresh ancestor.",
+      "negativeFixture": "tests/fixtures/mine_refresh_lineage_negative.py",
+      "observedFailure": {
+        "date": "2026-10-12",
+        "command": "python -u tests/fixtures/mine_refresh_lineage_negative.py --broken",
+        "exitCode": 1,
+        "output": "Failed: DID NOT RAISE MineProgressError; 6 failed, 12 warnings in 35.32s; both other-bytes and other-config initial/saved/pending-rewrite claims were incorrectly accepted",
+        "reason": "The committed fixture removes only the ancestor requirement while retaining exact current-head output verification. Six semantic refusal tests detect the fail-open, including saved recovery followed by another durable prepared event. Pending events with no actual committed original ancestor still refuse before any journal or progress mutation.",
+        "restoredPass": "python -u tests/fixtures/mine_refresh_lineage_negative.py; exit 0; 6 passed, 12 warnings in 24.31s; progress and sidecar bytes unchanged for all unrelated claims"
+      }
+    },
+    {
+      "id": "mine-prefix-refresh-canonical-source-lock",
+      "path": "mempalace/mine_refresh.py",
+      "description": "Snapshot and managed writer share a normcased canonical local source locator lock key.",
+      "negativeFixture": "tests/test_mine_refresh.py",
+      "observedFailure": {
+        "date": "2026-10-09",
+        "command": "python -m pytest tests/test_mine_refresh.py::test_snapshot_and_writer_use_same_normcased_canonical_lock -q",
+        "exitCode": 1,
+        "output": "AssertionError: snapshot and writer lock keys differ; 1 failed in 1.83s",
+        "reason": "Original snapshot used raw case-preserving spelling; writer used the normcased canonical locator. The fixture captures both actual lock entry points with Windows normalization on every platform.",
+        "restoredPass": "python -u -m pytest tests/test_mine_refresh.py tests/test_mine_refresh_saved_lineage.py -q -o faulthandler_timeout=90; exit 0; 31 passed in 73.85s; canonical lock assertion included"
+      }
+    },
+    {
       "id": "mine-snapshot-reader-lifecycle",
       "path": "tests/test_mine_progress.py",
       "description": "Snapshot readers release their owned clients so a broken native view can genuinely reopen.",

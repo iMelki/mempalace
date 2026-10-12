@@ -3,17 +3,19 @@
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from pathlib import Path
 
 from .mine_progress import (
     MineProgressError,
     _digest,
+    _is_tagged_hash,
     _validate_item,
     source_descriptor,
     utc_now,
 )
-from .write_receipts import _atomic_write_json
+from .write_receipts import _atomic_write_json, canonical_source_locator
 
 
 class PrefixRefreshJournal:
@@ -41,6 +43,8 @@ class PrefixRefreshJournal:
                 "receipt_id": self.progress.records()[index]["receipt_id"],
                 "represented_count": self.progress.records()[index]["represented_count"],
                 "pending": None,
+                "recovered_head": None,
+                "recovery_pending": None,
             },
         )
 
@@ -83,6 +87,8 @@ class PrefixRefreshJournal:
     @staticmethod
     def _accept_represented(event, state):
         pending = state["pending"]
+        if pending is None and event.get("recovered_head") is not None:
+            pending = state["recovery_pending"]
         if pending is None or event.get("prepared_digest") != pending["event_digest"]:
             raise MineProgressError("refresh completion has no matching prepared source")
         receipt_id = event.get("receipt_id")
@@ -90,8 +96,27 @@ class PrefixRefreshJournal:
         count = event.get("represented_count")
         if receipt_id == state["receipt_id"] or type(count) is not int or count < 0:
             raise MineProgressError("refresh completion requires a new represented receipt")
+        item = event.get("item", pending["item"])
+        _validate_item(item, expected_index=pending["source_index"])
+        if any(item[k] != pending["item"][k] for k in ("relative_path", "normalized_path")):
+            raise MineProgressError("refresh completion cannot change source path identity")
+        recovered = event.get("recovered_head")
+        if recovered is not None and (
+            not isinstance(recovered, dict)
+            or set(recovered) != {"content_hash", "config_digest"}
+            or not all(_is_tagged_hash(value) for value in recovered.values())
+        ):
+            raise MineProgressError("refresh recovered head identity is invalid")
         state.update(
-            item=pending["item"], receipt_id=receipt_id, represented_count=count, pending=None
+            item=item,
+            receipt_id=receipt_id,
+            represented_count=count,
+            pending=None,
+            recovered_head=recovered,
+            # An uncommitted follow-up preparation cannot replace the original anchor.
+            recovery_pending=(state["recovery_pending"] or pending)
+            if recovered is not None
+            else None,
         )
 
     def append(self, index, event, **payload):
@@ -135,30 +160,56 @@ def _complete_refresh(journal, index, receipt, verification):
 
 
 def _recover_pending(journal, index, verification_args):
-    from .miner import _verify_manifest_source_receipt
+    from .mine_refresh_recovery import recover_pending_head, verify_recorded_head
 
     state = journal.state(index)
     pending = state["pending"]
     if pending is None:
-        return
-    store = verification_args["receipt_store"]
-    current = store.find_current_read_only(
-        store.source_identity(str(verification_args["filepath"]), local_path=True)
-    )
+        if state["recovered_head"] is None:
+            return
+        current, proof = verify_recorded_head(state, verification_args)
+        pending = state["recovery_pending"]
+    else:
+        store = verification_args["receipt_store"]
+        current = store.find_current_read_only(
+            store.source_identity(str(verification_args["filepath"]), local_path=True)
+        )
+        if current is not None and current["receipt_id"] != state["receipt_id"]:
+            proof = recover_pending_head(current, state, verification_args)
     if current is not None and current["receipt_id"] != state["receipt_id"]:
-        receipt, proof = _verify_manifest_source_receipt(item=pending["item"], **verification_args)
-        _complete_refresh(journal, index, receipt, proof)
+        item = _snapshot_item(verification_args["filepath"], pending["item"], index)
+        # Only attach an observed descriptor when it describes the verified head.
+        if item["content_hash"] != current["source"]["content_hash"]:
+            item = pending["item"]
+        journal.append(
+            index,
+            "represented",
+            receipt_id=current["receipt_id"],
+            represented_count=len(proof.represented),
+            prepared_digest=pending["event_digest"],
+            item=item,
+            recovered_head={
+                "content_hash": current["source"]["content_hash"],
+                "config_digest": current["producer"]["config"]["digest"],
+            },
+        )
 
 
 def _snapshot(filepath, item):
     from .palace import mine_lock
 
-    with mine_lock(str(filepath)):
+    with mine_lock(os.path.normcase(canonical_source_locator(filepath, local_path=True))):
         return source_descriptor(
             path=filepath,
             relative_path=item["relative_path"],
             normalized_path=item["normalized_path"],
         )
+
+
+def _snapshot_item(filepath, item, index):
+    snapshot = {"index": index, **_snapshot(filepath, item)}
+    snapshot["item_digest"] = _digest(snapshot)
+    return snapshot
 
 
 def _rewrite_refresh(journal, index, item, verification_args, *, project_path, wing, rooms, agent):
@@ -193,7 +244,7 @@ def refresh_completed_source(
     agent,
 ):
     """Recover a committed refresh before re-mining further source changes."""
-    from .miner import _verify_manifest_source_receipt
+    from .mine_refresh_recovery import verify_recorded_head
 
     state = journal.state(index)
     verification_args = dict(
@@ -204,15 +255,15 @@ def refresh_completed_source(
         closets_col=closets_col,
     )
     _recover_pending(journal, index, verification_args)
-    receipt, proof = _verify_manifest_source_receipt(item=state["item"], **verification_args)
+    receipt, proof = verify_recorded_head(state, verification_args)
     if receipt["receipt_id"] != state["receipt_id"]:
         raise MineProgressError("completed source no longer names the recorded current receipt")
     if len(proof.represented) != state["represented_count"]:
         raise MineProgressError("completed source represented count changed")
-    descriptor = _snapshot(filepath, state["item"])
-    item = {"index": index, **descriptor}
-    item["item_digest"] = _digest(item)
-    if item != state["item"] or state["pending"] is not None:
+    item = _snapshot_item(filepath, state["item"], index)
+    config_changed = receipt["producer"]["config"]["digest"] != receipt_run.config_digest
+    content_changed = item["content_hash"] != receipt["source"]["content_hash"]
+    if item != state["item"] or state["pending"] is not None or config_changed or content_changed:
         _rewrite_refresh(
             journal,
             index,

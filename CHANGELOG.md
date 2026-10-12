@@ -27,6 +27,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Recover later mines after a follow-up rewrite crashes at preparation (#75, PR #78).**
+  Recheck the saved receipt pin and original committed preparation even while a
+  new rewrite is pending. Retain that original evidence across recovery advances;
+  unrelated heads without a committed ancestor still fail closed.
+
+- **Keep saved refresh recovery resumable across later mines (#75, PR #78).**
+  Revalidate the saved receipt and original prepared ancestor on the current
+  head's chain, append recovery advances without changing earlier events, and
+  refresh restored source bytes even when their timestamp matches the old plan.
+
+- **Recover completed-prefix refreshes after an intervening journal-less mine (#75).**
+  Verify the pending refresh's committed ancestor and the current descendant's
+  exact outputs before advancing the sidecar. Restore the resume configuration
+  when needed, retain unrelated-head refusals, and use the writer's normcased
+  canonical source lock for snapshots.
+
 - **Resume fixture snapshot readers release their native client ownership (#71).**
   Close readers after successful and failed reads so existing Chroma view recovery
   can replace the shared system; a deliberate retained-reader probe proves this can fail.

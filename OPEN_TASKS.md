@@ -1,10 +1,20 @@
 # MemPalace Open Tasks
 
-Last updated: 2026-10-09
+Last updated: 2026-10-12
 
 This file is the durable local index for active `mempalace` issues.
 
 ## Active Issues
+
+- [#75 - Recover completed-prefix refresh after a journal-less successor mine](https://github.com/iMelki/mempalace/issues/75)
+  - [PR #78](https://github.com/iMelki/mempalace/pull/78) follow-up corrects the
+    saved-recovery/later-mine wedge and metadata-preserving revert found in review.
+    The local correction also covers a hard exit after a follow-up rewrite's
+    durable preparation, followed by another mine. Publication remains pending;
+    the lane prepares a finding-map draft for the existing PR instead of posting.
+    Both reproduced before correction in disposable fixtures. Acting CTO owns
+    exact-head review and merge; runtime adoption remains separately gated.
+    See [refresh operations](docs/operations/mine-prefix-refresh.md).
 
 - [#71 - Close resume fixture snapshot readers](https://github.com/iMelki/mempalace/issues/71)
   - Lifecycle fix and deterministic native-view proof prepared in PR #70;
