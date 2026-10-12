@@ -877,11 +877,17 @@ def verify_staged_snapshot(staging_dir: str | os.PathLike[str]) -> dict[str, Any
     attempted, which is a different fact than "attempted and failed".
     """
 
-    staging = Path(staging_dir).expanduser().resolve(strict=True)
+    from .snapshot_verification import isolated_tree, no_links, outside_live, write_snapshot_json
+
+    staging = Path(staging_dir).expanduser().absolute()
+    no_links(staging, staging.parent)
+    staging = staging.resolve(strict=True)
     staged_root = staging / "palace"
     manifest_path = staging / STAGING_MANIFEST_FILENAME
     receipt_path = staging / SNAPSHOT_RECEIPT_FILENAME
 
+    no_links(manifest_path, staging.parent)
+    no_links(receipt_path, staging.parent)
     if not manifest_path.is_file():
         raise PalaceSnapshotError(
             f"staging manifest is missing; cannot verify (was verify=False ever run here?): {manifest_path}"
@@ -894,6 +900,9 @@ def verify_staged_snapshot(staging_dir: str | os.PathLike[str]) -> dict[str, Any
         ) from exc
     if manifest.get("schema") != STAGING_MANIFEST_SCHEMA:
         raise PalaceSnapshotError(f"unexpected staging manifest schema: {manifest.get('schema')}")
+
+    outside_live(staging, Path(manifest["palaceRoot"]).expanduser().resolve())
+    isolated_tree(staging, staging.parent)
 
     staged_sqlite = staged_root / "chroma.sqlite3"
     if not staged_sqlite.is_file():
@@ -933,9 +942,7 @@ def verify_staged_snapshot(staging_dir: str | os.PathLike[str]) -> dict[str, Any
             },
             "durationSeconds": round(time.monotonic() - started, 3),
         }
-        with receipt_path.open("w", encoding="utf-8", newline="\n") as stream:
-            json.dump(failure, stream, ensure_ascii=True, indent=2, sort_keys=True)
-            stream.write("\n")
+        write_snapshot_json(receipt_path, failure)
         failure["receiptPath"] = str(receipt_path)
         return failure
 
@@ -1000,9 +1007,7 @@ def verify_staged_snapshot(staging_dir: str | os.PathLike[str]) -> dict[str, Any
         },
         "durationSeconds": round(time.monotonic() - started, 3),
     }
-    with receipt_path.open("w", encoding="utf-8", newline="\n") as stream:
-        json.dump(receipt, stream, ensure_ascii=True, indent=2, sort_keys=True)
-        stream.write("\n")
+    write_snapshot_json(receipt_path, receipt)
     receipt["receiptPath"] = str(receipt_path)
     return receipt
 
@@ -1021,7 +1026,7 @@ def verify_snapshot_receipt(
     unpacking every file.
     """
 
-    from .snapshot_verification import no_links
+    from .snapshot_verification import isolated_tree, no_links, outside_live
 
     path = Path(receipt_path).expanduser().absolute()
     no_links(path, path.parent.parent)
@@ -1050,12 +1055,19 @@ def verify_snapshot_receipt(
         problems.append("content-identity-digest-mismatch")
 
     root = (
-        Path(staged_root).expanduser().resolve()
+        Path(staged_root).expanduser().absolute()
         if staged_root
         else Path(receipt.get("stagedRoot", ""))
     )
     checked = 0
-    if root and root.is_dir():
+    isolated = False
+    try:
+        isolated_tree(root, root.parent)
+        outside_live(root.resolve(), Path(receipt["palaceRoot"]).expanduser().resolve())
+        isolated = True
+    except (PalaceSnapshotError, OSError) as exc:
+        problems.append(f"staged-tree-isolation:{exc}")
+    if isolated and root.is_dir():
         present = {p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file()}
         expected = {f["relativePath"] for f in files}
         for missing in sorted(expected - present):

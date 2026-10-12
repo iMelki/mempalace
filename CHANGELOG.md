@@ -10,6 +10,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **PR 79 third-review snapshot findings.** Share isolation checks across weekly,
+  deferred nightly and receipt readback before SQLite or hash reads. Publish
+  deferred receipts by exclusive temporary file and replacement. Reject backup
+  roots inside live storage before any failure write, retain identity-bound
+  invalidation when a weekly sidecar cannot be replaced, and isolate all sibling
+  parser exceptions so a malformed sibling cannot hide a good copy.
+
 - **PR 79 second-review snapshot findings.** Isolate malformed or redirected
   siblings during newest-copy selection and save scan/precondition failures,
   using the safe backup root if no generation can receive an error sidecar.

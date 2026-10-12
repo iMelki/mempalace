@@ -7,6 +7,7 @@ import json
 import math
 import os
 import sqlite3
+import stat
 import time
 import uuid
 from contextlib import closing
@@ -17,6 +18,7 @@ from .snapshot_errors import PalaceSnapshotError
 
 WEEKLY_FILENAME = "weekly-integrity-receipt.json"
 WEEKLY_SCHEMA = "mempalace-weekly-integrity-receipt/v1"
+WEEKLY_INVALIDATION_FILENAME = "weekly-integrity-invalidation.json"
 
 
 def utc_now():
@@ -100,6 +102,31 @@ def no_links(path, boundary):
             break
         if _is_link_or_reparse(ancestor):
             raise PalaceSnapshotError("weekly verification refuses links or reparse points")
+        try:
+            metadata = ancestor.lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISREG(metadata.st_mode) and metadata.st_nlink > 1:
+            relative = ancestor.relative_to(boundary).as_posix()
+            raise PalaceSnapshotError(f"snapshot verification refuses file hard link: {relative}")
+
+
+def isolated_tree(tree, boundary):
+    """Guard every entry before inventory, hashing or SQLite reads in any verifier."""
+    no_links(tree, boundary)
+
+    def walk_error(exc):
+        raise exc
+
+    for directory, folders, files in os.walk(tree, followlinks=False, onerror=walk_error):
+        for name in folders + files:
+            no_links(Path(directory) / name, boundary)
+
+
+def outside_live(root, live):
+    """A resolved backup boundary may never be equal to or below live storage."""
+    if root == live or live in root.parents:
+        raise PalaceSnapshotError("backup root is inside live palace storage")
 
 
 def read_generation(path, root):
@@ -134,7 +161,9 @@ def latest_snapshot(root, *, scan_errors=None, deadline=None):
         check_deadline(deadline)
         try:
             candidate = read_generation(generation / SNAPSHOT_RECEIPT_FILENAME, root)
-        except (PalaceSnapshotError, OSError, ValueError) as exc:
+        except Exception as exc:
+            # A sibling is untrusted input. JSON recursion and unexpected parser
+            # failures must not hide a valid copy or suppress a scan receipt.
             if scan_errors is not None:
                 scan_errors.append({"generation": generation.name, "message": str(exc)})
             continue
@@ -151,21 +180,7 @@ def checked_copy(receipt_path, receipt, live):
     boundary = receipt_path.parent.parent
     no_links(database, boundary)
 
-    # Check every segment/metadata entry too; do not follow a redirect before
-    # examining it. os.walk yields child directories before descending into them.
-    def walk_error(exc):
-        raise exc
-
-    for directory, folders, files in os.walk(
-        receipt_path.parent, followlinks=False, onerror=walk_error
-    ):
-        for name in folders + files:
-            no_links(Path(directory) / name, boundary)
-        for name in files:
-            entry = Path(directory) / name
-            if entry.stat().st_nlink > 1:
-                relative = entry.relative_to(receipt_path.parent).as_posix()
-                raise PalaceSnapshotError(f"weekly verification refuses file hard link: {relative}")
+    isolated_tree(receipt_path.parent, boundary)
     if Path(receipt.get("stagedRoot", "")).resolve() != database.parent.resolve():
         raise PalaceSnapshotError("weekly staged root does not match snapshot generation")
     database = database.resolve(strict=True)
@@ -203,13 +218,18 @@ def full_copy_proof(database, path, snapshot, result, deadline):
     check_deadline(deadline)
 
 
-def write_weekly_receipt(target, result):
+def write_snapshot_json(target, result):
+    """Publish JSON by exclusive temporary file and replace; never truncate a link."""
     no_links(target, target.parent.parent)
     temporary = target.with_name(target.name + "." + uuid.uuid4().hex + ".tmp")
     with temporary.open("x", encoding="utf-8", newline="\n") as stream:
-        json.dump(result, stream, indent=2, sort_keys=True)
+        json.dump(result, stream, ensure_ascii=True, indent=2, sort_keys=True)
         stream.write("\n")
     temporary.replace(target)
+
+
+def write_weekly_receipt(target, result):
+    write_snapshot_json(target, result)
 
 
 def save_weekly_result(target, root, result):
@@ -227,6 +247,13 @@ def save_weekly_result(target, root, result):
         result["processedCount"] = 0
         result["errorCount"] = 1
         result["receiptLocation"] = "backup-root"
+        # Keep negative authority beside its generation so a later root fallback
+        # for another copy cannot resurrect this copy's old success.
+        invalidation = target.with_name(WEEKLY_INVALIDATION_FILENAME)
+        try:
+            write_snapshot_json(invalidation, result)
+        except (PalaceSnapshotError, OSError) as invalidation_error:
+            result["invalidationWriteError"] = str(invalidation_error)
         write_weekly_receipt(fallback, result)
 
 
@@ -262,15 +289,20 @@ def verify_weekly_snapshot(backup_root, *, palace_path, budget_seconds=7200):
     # The configured root is a writer-accepted boundary. Never use a rejected
     # generation as the fallback destination for a scan failure.
     root = Path(backup_root).expanduser().resolve(strict=True)
+    live = Path(palace_path).expanduser().resolve()
+    outside_live(root, live)
     target = root / WEEKLY_FILENAME
     result = weekly_result(budget_seconds)
+    recorded_live = None
     try:
         path, snapshot = latest_snapshot(root, scan_errors=result["scanErrors"], deadline=deadline)
+        recorded_live = Path(snapshot["palaceRoot"]).expanduser().resolve()
+        outside_live(root, recorded_live)
         target = path.parent / WEEKLY_FILENAME
         no_links(target, root)
         result["snapshotGeneratedAt"] = snapshot["generatedAt"]
         result["snapshotReceiptSha256"] = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
-        database = checked_copy(path, snapshot, Path(palace_path).expanduser().resolve())
+        database = checked_copy(path, snapshot, live)
         result["inputBytes"] = database.stat().st_size
         full_copy_proof(database, path, snapshot, result, deadline)
         result["status"] = "complete"
@@ -281,8 +313,30 @@ def verify_weekly_snapshot(backup_root, *, palace_path, budget_seconds=7200):
     result["errorCount"] = int(result["status"] != "complete")
     result["scanErrorCount"] = len(result["scanErrors"])
     result["finishedAt"] = utc_now()
+    if recorded_live is not None:
+        outside_live(root, recorded_live)
     save_weekly_result(target, root, result)
     return result
+
+
+def newer_weekly_failure(receipt_path, expected, weekly):
+    """A saved failure for this receipt supersedes older complete proof."""
+    root = receipt_path.parent.parent
+    targets = (receipt_path.parent / WEEKLY_INVALIDATION_FILENAME, root / WEEKLY_FILENAME)
+    for target in targets:
+        no_links(target, root)
+        if not target.exists():
+            continue
+        failure = json.loads(target.read_text(encoding="utf-8"))
+        if not isinstance(failure, dict) or failure.get("schema") != WEEKLY_SCHEMA:
+            raise ValueError("unexpected weekly failure schema")
+        if failure.get("snapshotReceiptSha256") != expected or failure.get("status") != "error":
+            continue
+        failed_at = datetime.fromisoformat(failure["generatedAt"].replace("Z", "+00:00"))
+        checked_at = datetime.fromisoformat(weekly["generatedAt"].replace("Z", "+00:00"))
+        if failed_at >= checked_at:
+            return {"status": "failed", "problem": failure.get("message", "receipt write failed")}
+    return None
 
 
 def weekly_status(receipt_path, snapshot):
@@ -297,6 +351,9 @@ def weekly_status(receipt_path, snapshot):
         if weekly.get("schema") != WEEKLY_SCHEMA:
             raise ValueError("unexpected weekly schema")
         expected = "sha256:" + hashlib.sha256(receipt_path.read_bytes()).hexdigest()
+        failure = newer_weekly_failure(receipt_path, expected, weekly)
+        if failure is not None:
+            return failure
         if weekly.get("snapshotReceiptSha256") != expected:
             raise ValueError("weekly snapshot receipt identity mismatch")
         entries = snapshot.get("contentIdentity", {}).get("files", [])
@@ -311,7 +368,15 @@ def weekly_status(receipt_path, snapshot):
         if age.total_seconds() < 0 or age.total_seconds() > 7 * 86400:
             return {"status": "stale", "problem": "weekly-integrity-receipt-outside-seven-days"}
         return {"status": "complete", "finishedAt": weekly["finishedAt"]}
-    except (OSError, ValueError, KeyError, TypeError, StopIteration, PalaceSnapshotError) as exc:
+    except (
+        OSError,
+        ValueError,
+        KeyError,
+        TypeError,
+        StopIteration,
+        RecursionError,
+        PalaceSnapshotError,
+    ) as exc:
         return {"status": "invalid", "problem": str(exc)}
 
 

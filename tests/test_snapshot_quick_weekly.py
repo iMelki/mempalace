@@ -76,12 +76,10 @@ def test_weekly_selects_latest_copy_and_preserves_nightly_receipt(tmp_path):
 def test_weekly_refuses_live_database_even_when_receipt_points_to_it(tmp_path):
     _, staging, receipt = stage(tmp_path)
     assert receipt["stagedRoot"] == str(staging / "palace")
-    result = backup.verify_weekly_snapshot(
-        staging.parent, palace_path=staging.parent, budget_seconds=30
-    )
-    assert result["status"] == "error"
-    assert result["message"].endswith("refuses live database")
-    assert json.loads((staging / "weekly-integrity-receipt.json").read_text()) == result
+    with pytest.raises(backup.PalaceSnapshotError, match="backup root.*live"):
+        backup.verify_weekly_snapshot(staging.parent, palace_path=staging.parent, budget_seconds=30)
+    assert not (staging / "weekly-integrity-receipt.json").exists()
+    assert not (staging.parent / "weekly-integrity-receipt.json").exists()
 
 
 def test_weekly_reports_timeout_without_nightly_success_rewrite(tmp_path):

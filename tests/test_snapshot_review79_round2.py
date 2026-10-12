@@ -107,6 +107,12 @@ def test_selected_copy_precondition_overwrites_old_success(tmp_path, damage):
         expected = "staged root does not match"
     else:
         live = generation.parent
+        before = (generation / verification.WEEKLY_FILENAME).read_bytes()
+        with pytest.raises(backup.PalaceSnapshotError, match="backup root.*live"):
+            backup.verify_weekly_snapshot(generation.parent, palace_path=live, budget_seconds=30)
+        assert (generation / verification.WEEKLY_FILENAME).read_bytes() == before
+        assert not (generation.parent / verification.WEEKLY_FILENAME).exists()
+        return
     result = backup.verify_weekly_snapshot(generation.parent, palace_path=live, budget_seconds=30)
     assert result["status"] == "error"
     assert expected in result["message"]
