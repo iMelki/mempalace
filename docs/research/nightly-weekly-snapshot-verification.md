@@ -30,8 +30,16 @@ complete generation by receipt timestamp (pending copies are not candidates).
 It resolves the configured backup root exactly as the nightly writer does, so
 root junctions, volume mounts and cloud-backed ancestors are accepted. Within
 each snapshot generation it refuses links and reparse points, including segment
-files, and rejects hard links to either the supplied live root or receipt source,
+files, and rejects every file with a hard-link count greater than one,
 and never opens a live SQLite connection or acquires a maintenance lease.
+
+The scan isolates malformed JSON, invalid required fields, unreadable receipts
+and redirected generations. A bad sibling cannot hide a usable complete copy;
+the newest remaining candidate is still selected by timestamp and generation
+name. Pending copies are ignored. `scanErrors` names each rejected generation
+and its reason, with `scanErrorCount` separate from the selected copy's
+`errorCount`. A successful check remains `complete` when a sibling is rejected:
+it certifies only the selected copy, not the health of every generation.
 
 The weekly check validates the nightly receipt, verifies the copy's recorded hash,
 runs full `PRAGMA integrity_check`, re-hashes the database and checks the original
@@ -40,6 +48,30 @@ failure is atomically saved to `weekly-integrity-receipt.json` beside the snapsh
 receipt. The nightly receipt is preserved byte-for-byte. The weekly sidecar
 records snapshot/database identities, SQLite version, UTC start/end, duration,
 budget, input bytes, processed/error counts, caller and mutation intent.
+
+Copy preconditions run inside the receipt-producing error boundary. A missing
+database, wrong staged root, live-copy refusal or hard-linked segment replaces
+any old successful sidecar with the current error. If no usable generation
+exists, an error receipt is saved at the configured backup root instead. An
+unsafe or unwritable generation sidecar also falls back there, reports
+`receiptLocation=backup-root`, and cannot return success. Otherwise the location
+is `generation`. Unobserved identities and input size remain null. Invalid
+budgets, inaccessible backup roots or an unsafe/unwritable fallback destination
+remain command failures: no safety guard is bypassed to promise a saved receipt.
+The runtime owner must include root-level failure receipts in the separately
+gated cross-generation health consumer; per-generation readback does not consume
+a root-level job error. No health consumer or scheduler was changed here.
+
+Hard-link refusal uses each file's `st_nlink`, not only comparison with a current
+live SQLite filename. This covers HNSW and metadata files even if the source was
+moved or is unavailable. Receipt readback checks the unresolved path for redirects
+before resolving or reading it, with the same writer-accepted backup-root
+boundary as weekly scanning. A configured root junction remains accepted; a
+generation junction cannot inherit a target tree's valid weekly result.
+Weekly JSON explicitly uses `ensure_ascii=True`. Python's existing default was
+already true: the narrow-console regression passed before this change. The new
+explicit-policy test failed first on the absent argument; no pre-fix console
+encoding failure is claimed.
 
 Receipt readback reports weekly `missing`, `failed`, `invalid`, `stale` or
 `complete` separately from nightly `valid`. Missing weekly evidence is observable;
@@ -69,6 +101,21 @@ reject failed/invalid weekly proof. No consumer policy was changed in this revie
 
 ## Research before implementation
 
+- Second-review research on 2026-10-12: [Python path resolution](https://docs.python.org/3/library/pathlib.html#pathlib.Path.resolve)
+  resolves symbolic links, so the redirect guard must precede resolution.
+  [Python file status](https://docs.python.org/3/library/os.html#os.stat_result)
+  exposes `st_nlink`, the number of hard links, and
+  [Python JSON encoding](https://docs.python.org/3/library/json.html#json.dump)
+  documents the ASCII default. These mechanisms serve both weekly proof and
+  receipt readback; a bounded caller scan found no other production snapshot
+  selection implementation to migrate in this repository.
+- Rechecked original upstream snapshot/integrity and hard-link searches, latest
+  published [v3.10.0 release](https://github.com/MemPalace/mempalace/releases/tag/v3.10.0),
+  and [develop changelog](https://github.com/MemPalace/mempalace/blob/1f0803a31958b30320418356b2db88c4ed9c27f9/CHANGELOG.md)
+  (which already lists 3.11.0). The merged
+  [absent integrity verdict fix](https://github.com/MemPalace/mempalace/pull/2291)
+  concerns the live MCP verdict, rather than this fork's snapshot selection and
+  receipt workflow. No equivalent second-review fix was found to port.
 - [SQLite quick_check](https://sqlite.org/pragma.html#pragma_quick_check): O(N),
   omits UNIQUE and table/index consistency checks.
 - [SQLite integrity_check](https://sqlite.org/pragma.html#pragma_integrity_check):

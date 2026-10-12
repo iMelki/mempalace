@@ -344,6 +344,95 @@
         "reason": "In an isolated archive candidate, asserted an exact one-site replacement forcing _capacity_is_proven_healthy to return True. The real handler test failed with: confirmed divergence did not disable vector search -- the #1222 segfault guard is inert. Negative raw output: .tmp/fleet-git-hygiene-20260908/mempalace-gate-negative.log in the workspace.",
         "restoredPass": "Restored exact original SHA256 961f75713e26a338007abd1bcf4c7f2fa689818ceb5692ac34a85ca3b2561917; reran same pytest node: exit 0. Scope isolated HOME, deterministic embeddings, no live palace."
       }
+    },
+    {
+      "id": "snapshot-generation-scan-isolation",
+      "path": "mempalace/snapshot_verification.py",
+      "description": "Malformed or redirected siblings are isolated; selected-copy proof and scan errors are saved.",
+      "negativeFixture": "tests/test_snapshot_review79_round2.py",
+      "observedFailure": {
+        "date": "2026-10-12",
+        "command": "python -B -m pytest -q tests/test_snapshot_review79_round2.py",
+        "exitCode": 1,
+        "sourceHead": "1c4ccae18241526d7fc8264a23ba647138ae95a7",
+        "output": "json.decoder.JSONDecodeError: Expecting property name enclosed in double quotes: line 1 column 2 (char 1); KeyError: 'generatedAt'; AttributeError: 'int' object has no attribute 'replace'; combined run: 20 failed, 1 passed in 19.93s",
+        "reason": "The original scan escaped on invalid sibling JSON/timestamps or redirected generations; the known good copy was not checked. Nine sibling cases failed before the fix.",
+        "restoredPass": "python -B -m pytest -q tests/test_snapshot_review79_round2.py tests/test_snapshot_review79.py tests/test_snapshot_quick_weekly.py tests/test_snapshot_integrity_contract.py tests/test_backup_snapshot.py; exit 0; 126 passed, 1 skipped"
+      }
+    },
+    {
+      "id": "snapshot-weekly-precondition-receipt",
+      "path": "mempalace/snapshot_verification.py",
+      "description": "Selected-copy preconditions and all-invalid scans must produce current error receipts.",
+      "negativeFixture": "tests/test_snapshot_review79_round2.py",
+      "observedFailure": {
+        "date": "2026-10-12",
+        "command": "python -B -m pytest -q tests/test_snapshot_review79_round2.py",
+        "exitCode": 1,
+        "sourceHead": "1c4ccae18241526d7fc8264a23ba647138ae95a7",
+        "output": "PalaceSnapshotError: weekly staged root does not match snapshot generation; PalaceSnapshotError: weekly verification refuses live database; combined run: 20 failed, 1 passed in 19.93s",
+        "reason": "Preconditions escaped before saving a weekly result, leaving earlier success untouched. Missing-database, wrong-stage, live-root and all-bad cases failed before the fix.",
+        "restoredPass": "python -B -m pytest -q tests/test_snapshot_review79_round2.py tests/test_snapshot_review79.py tests/test_snapshot_quick_weekly.py tests/test_snapshot_integrity_contract.py tests/test_backup_snapshot.py; exit 0; 126 passed, 1 skipped"
+      }
+    },
+    {
+      "id": "snapshot-file-hardlink-independence",
+      "path": "mempalace/snapshot_verification.py",
+      "description": "Every snapshot file must have a single hard link, including HNSW files with absent sources.",
+      "negativeFixture": "tests/test_snapshot_review79_round2.py",
+      "observedFailure": {
+        "date": "2026-10-12",
+        "command": "python -B -m pytest -q tests/test_snapshot_review79_round2.py",
+        "exitCode": 1,
+        "sourceHead": "1c4ccae18241526d7fc8264a23ba647138ae95a7",
+        "output": "AssertionError: assert 'complete' == 'error'; combined run: 20 failed, 1 passed in 19.93s",
+        "reason": "Both real segment hard-link fixtures were certified complete before the fix, including when the recorded source directory was moved.",
+        "restoredPass": "python -B -m pytest -q tests/test_snapshot_review79_round2.py tests/test_snapshot_review79.py tests/test_snapshot_quick_weekly.py tests/test_snapshot_integrity_contract.py tests/test_backup_snapshot.py; exit 0; 126 passed, 1 skipped"
+      }
+    },
+    {
+      "id": "snapshot-receipt-unresolved-redirect-guard",
+      "path": "mempalace/backup_snapshot.py",
+      "description": "Readback guards the unresolved receipt before reading or resolving generation redirects.",
+      "negativeFixture": "tests/test_snapshot_review79_round2.py",
+      "observedFailure": {
+        "date": "2026-10-12",
+        "command": "python -B -m pytest -q tests/test_snapshot_review79_round2.py",
+        "exitCode": 1,
+        "sourceHead": "1c4ccae18241526d7fc8264a23ba647138ae95a7",
+        "output": "AssertionError: redirected receipt was read before the link guard; assert 0 != 0; combined run: 20 failed, 1 passed in 19.93s",
+        "reason": "Both guard-order fixtures read the forbidden receipt; both native CLI junction fixtures returned 0, nightly valid=true and weekly complete before the fix. Writer-accepted root junction readback remains a positive control.",
+        "restoredPass": "python -B -m pytest -q tests/test_snapshot_review79_round2.py tests/test_snapshot_review79.py tests/test_snapshot_quick_weekly.py tests/test_snapshot_integrity_contract.py tests/test_backup_snapshot.py; exit 0; 126 passed, 1 skipped"
+      }
+    },
+    {
+      "id": "snapshot-weekly-explicit-ascii-json",
+      "path": "mempalace/backup_snapshot.py",
+      "description": "Weekly result JSON explicitly requests ASCII and preserves non-ASCII errors on cp1252.",
+      "negativeFixture": "tests/test_snapshot_review79_round2.py",
+      "observedFailure": {
+        "date": "2026-10-12",
+        "command": "python -B -m pytest -q tests/test_snapshot_review79_round2.py",
+        "exitCode": 1,
+        "sourceHead": "1c4ccae18241526d7fc8264a23ba647138ae95a7",
+        "output": "AssertionError: assert ([{'sort_keys': True}] and False); combined run: 20 failed, 1 passed in 19.93s",
+        "reason": "The explicit-argument contract failed before the change. The real cp1252 console fixture already passed because Python defaults ensure_ascii to true; no encoding failure is claimed.",
+        "restoredPass": "python -B -m pytest -q tests/test_snapshot_review79_round2.py tests/test_snapshot_review79.py tests/test_snapshot_quick_weekly.py tests/test_snapshot_integrity_contract.py tests/test_backup_snapshot.py; exit 0; 126 passed, 1 skipped"
+      }
+    },
+    {
+      "id": "snapshot-weekly-safe-sidecar-fallback",
+      "path": "mempalace/snapshot_verification.py",
+      "description": "A rejected generation sidecar must still save failure at a safe backup root.",
+      "negativeFixture": "tests/test_snapshot_review79_round2.py",
+      "observedFailure": {
+        "date": "2026-10-12",
+        "command": "python -B -m pytest -q tests/test_snapshot_review79_round2.py -k unsafe_sidecar",
+        "exitCode": 1,
+        "output": "PalaceSnapshotError: weekly verification refuses links or reparse points; 1 failed, 21 deselected in 1.80s",
+        "reason": "The production sidecar link guard refused correctly, but the exception escaped without saving any safe weekly error. The fallback preserves refusal and saves root error.",
+        "restoredPass": "python -B -m pytest -q tests/test_snapshot_review79_round2.py tests/test_snapshot_review79.py tests/test_snapshot_quick_weekly.py tests/test_snapshot_integrity_contract.py tests/test_backup_snapshot.py; exit 0; 126 passed, 1 skipped"
+      }
     }
   ]
 }

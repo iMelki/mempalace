@@ -10,6 +10,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **PR 79 second-review snapshot findings.** Isolate malformed or redirected
+  siblings during newest-copy selection and save scan/precondition failures,
+  using the safe backup root if no generation can receive an error sidecar.
+  Reject every multiply linked snapshot file, check unresolved receipt paths
+  before reading, and explicitly request ASCII weekly JSON for console output.
+
 - **PR 79 snapshot review findings.** Both receipt CLI entrypoints report failed
   weekly proof as exit 2 and missing/stale proof as warning exit 3. Accept writer
   backup roots while refusing links inside generations; use the production full

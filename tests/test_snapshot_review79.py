@@ -96,8 +96,15 @@ def test_weekly_refuses_reparse_points_inside_generation(tmp_path, monkeypatch, 
     monkeypatch.setattr(
         backup, "_is_link_or_reparse", lambda path: path == rejected or original(path)
     )
-    with pytest.raises(backup.PalaceSnapshotError, match="links or reparse points"):
-        backup.verify_weekly_snapshot(staging.parent, palace_path=live, budget_seconds=30)
+    result = backup.verify_weekly_snapshot(staging.parent, palace_path=live, budget_seconds=30)
+    assert result["status"] == "error"
+    if location in ("generation", "receipt"):
+        assert "links or reparse points" in result["scanErrors"][0]["message"]
+        destination = staging.parent / verification.WEEKLY_FILENAME
+    else:
+        assert "links or reparse points" in result["message"]
+        destination = staging / verification.WEEKLY_FILENAME
+    assert json.loads(destination.read_text()) == result
 
 
 def test_corruption_near_deadline_keeps_sqlite_error(tmp_path, monkeypatch):
@@ -160,3 +167,6 @@ def test_weekly_accepts_real_junction_backup_root(tmp_path):
     assert receipt["status"] == "complete"
     result = backup.verify_weekly_snapshot(alias, palace_path=live, budget_seconds=30)
     assert result["status"] == "complete"
+    readback = backup.verify_snapshot_receipt(alias / "one" / backup.SNAPSHOT_RECEIPT_FILENAME)
+    assert readback["valid"]
+    assert readback["weeklyVerification"]["status"] == "complete"

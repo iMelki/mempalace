@@ -1021,7 +1021,11 @@ def verify_snapshot_receipt(
     unpacking every file.
     """
 
-    path = Path(receipt_path).expanduser().resolve(strict=True)
+    from .snapshot_verification import no_links
+
+    path = Path(receipt_path).expanduser().absolute()
+    no_links(path, path.parent.parent)
+    path = path.resolve(strict=True)
     receipt = json.loads(path.read_text(encoding="utf-8"))
     problems: list[str] = []
 
@@ -1149,7 +1153,7 @@ def _run_weekly_cli(args) -> int:
         budget_seconds=args.weekly_budget_seconds,
     )
     if args.json:
-        print(json.dumps(result, sort_keys=True))
+        print(json.dumps(result, ensure_ascii=True, sort_keys=True))
     else:
         print(f"MemPalace weekly integrity: {result['status']}")
         if result.get("message"):

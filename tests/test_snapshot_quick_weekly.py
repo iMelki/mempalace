@@ -76,8 +76,12 @@ def test_weekly_selects_latest_copy_and_preserves_nightly_receipt(tmp_path):
 def test_weekly_refuses_live_database_even_when_receipt_points_to_it(tmp_path):
     _, staging, receipt = stage(tmp_path)
     assert receipt["stagedRoot"] == str(staging / "palace")
-    with pytest.raises(backup.PalaceSnapshotError, match="refuses live database$"):
-        backup.verify_weekly_snapshot(staging.parent, palace_path=staging.parent, budget_seconds=30)
+    result = backup.verify_weekly_snapshot(
+        staging.parent, palace_path=staging.parent, budget_seconds=30
+    )
+    assert result["status"] == "error"
+    assert result["message"].endswith("refuses live database")
+    assert json.loads((staging / "weekly-integrity-receipt.json").read_text()) == result
 
 
 def test_weekly_reports_timeout_without_nightly_success_rewrite(tmp_path):
@@ -177,8 +181,10 @@ def test_weekly_refuses_a_hard_link_to_live_sqlite(tmp_path):
         "stagedRoot": str(staging / "palace"),
     }
     (staging / backup.SNAPSHOT_RECEIPT_FILENAME).write_text(json.dumps(receipt))
-    with pytest.raises(backup.PalaceSnapshotError, match="hard link"):
-        backup.verify_weekly_snapshot(staging.parent, palace_path=live, budget_seconds=30)
+    result = backup.verify_weekly_snapshot(staging.parent, palace_path=live, budget_seconds=30)
+    assert result["status"] == "error"
+    assert "hard link" in result["message"]
+    assert json.loads((staging / "weekly-integrity-receipt.json").read_text()) == result
 
 
 def test_weekly_cli_reports_result_and_nonzero_timeout(tmp_path, capsys):
@@ -262,8 +268,10 @@ def test_weekly_never_connects_to_live_or_acquires_a_lease(tmp_path, monkeypatch
 def test_weekly_no_complete_copy_is_a_clear_refusal(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
-    with pytest.raises(backup.PalaceSnapshotError, match="no complete snapshot copy"):
-        backup.verify_weekly_snapshot(root, palace_path=tmp_path / "live", budget_seconds=30)
+    result = backup.verify_weekly_snapshot(root, palace_path=tmp_path / "live", budget_seconds=30)
+    assert result["status"] == "error"
+    assert "no complete snapshot copy" in result["message"]
+    assert json.loads((root / "weekly-integrity-receipt.json").read_text()) == result
 
 
 @pytest.mark.parametrize("budget", [0, -1, float("inf"), float("nan")])
