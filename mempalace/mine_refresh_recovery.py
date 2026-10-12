@@ -28,8 +28,12 @@ def _verify_head(receipt, verification_args):
 
 
 def recover_pending_head(current, state, verification_args):
-    """Require the prepared refresh to be a committed link in the head's chain."""
+    """Require committed preparation, retaining saved evidence across rewrites."""
     store = verification_args["receipt_store"]
+    if state.get("recovered_head") is not None:
+        _verify_saved_recovery_ancestor(current, state, store)
+        pending = state["recovery_pending"]
+        state = {"receipt_id": pending["previous_receipt_id"], "pending": pending}
     # The current reader has already rejected forks, missing links and corruption.
     candidates = store._complete_events_for_source(current["source"]["identity"])
     receipt = current
@@ -89,7 +93,4 @@ def verify_recorded_head(state, verification_args):
     current = store.find_current_read_only(source_identity)
     if current is None:
         raise MineProgressError("completed source no longer names the recorded current receipt")
-    _verify_saved_recovery_ancestor(current, state, store)
-    pending = state["recovery_pending"]
-    original = {"receipt_id": pending["previous_receipt_id"], "pending": pending}
-    return current, recover_pending_head(current, original, verification_args)
+    return current, recover_pending_head(current, state, verification_args)

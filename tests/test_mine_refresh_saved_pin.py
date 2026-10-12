@@ -7,7 +7,7 @@ import pytest
 
 from mempalace.mine_progress import MineProgressError, MineProgressJournal, _digest
 from mempalace.mine_progress import load_source_manifest
-from mempalace.mine_refresh import PrefixRefreshJournal
+from mempalace.mine_refresh import PrefixRefreshJournal, _snapshot_item
 from mempalace.miner import mine
 from mempalace.receipt_verifier import verify_receipt
 from test_mine_refresh import (
@@ -36,7 +36,8 @@ def _saved_recovery_with_later_head(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("corrupt", ["receipt_id", "content_hash", "config_digest"])
-def test_saved_recovery_rejects_corrupted_pin(tmp_path, monkeypatch, corrupt):
+@pytest.mark.parametrize("pending_rewrite", [False, True])
+def test_saved_recovery_rejects_corrupted_pin(tmp_path, monkeypatch, corrupt, pending_rewrite):
     fixture, journal = _saved_recovery_with_later_head(tmp_path, monkeypatch)
     path = sorted(journal.root.glob("*.json"))[-1]
     event = json.loads(path.read_text(encoding="utf-8"))
@@ -50,6 +51,10 @@ def test_saved_recovery_rejects_corrupted_pin(tmp_path, monkeypatch, corrupt):
     # The digest and journal structure are valid; only the saved receipt claim is false.
     loaded = PrefixRefreshJournal(journal.progress).state(0)
     assert loaded["receipt_id"] == event["receipt_id"]
+    if pending_rewrite:
+        journal = PrefixRefreshJournal(journal.progress)
+        journal.append(0, "prepared", item=_snapshot_item(fixture[0] / "a.md", loaded["item"], 0))
+        assert PrefixRefreshJournal(journal.progress).state(0)["pending"] is not None
     before = [p.read_bytes() for p in sorted(journal.root.glob("*.json"))]
     prefix = fixture[3].read_bytes()
     with pytest.raises(MineProgressError, match="saved recovery.*matching committed ancestor"):
@@ -58,8 +63,16 @@ def test_saved_recovery_rejects_corrupted_pin(tmp_path, monkeypatch, corrupt):
     assert [p.read_bytes() for p in sorted(journal.root.glob("*.json"))] == before
 
 
-def test_saved_recovery_rejects_later_head_with_missing_outputs(tmp_path, monkeypatch):
+@pytest.mark.parametrize("pending_rewrite", [False, True])
+def test_saved_recovery_rejects_later_head_with_missing_outputs(
+    tmp_path, monkeypatch, pending_rewrite
+):
     fixture, journal = _saved_recovery_with_later_head(tmp_path, monkeypatch)
+    if pending_rewrite:
+        journal.append(
+            0, "prepared", item=_snapshot_item(fixture[0] / "a.md", journal.state(0)["item"], 0)
+        )
+        assert PrefixRefreshJournal(journal.progress).state(0)["pending"] is not None
     before = [p.read_bytes() for p in sorted(journal.root.glob("*.json"))]
     prefix = fixture[3].read_bytes()
 

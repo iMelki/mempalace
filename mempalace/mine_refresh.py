@@ -113,7 +113,10 @@ class PrefixRefreshJournal:
             represented_count=count,
             pending=None,
             recovered_head=recovered,
-            recovery_pending=pending if recovered is not None else None,
+            # An uncommitted follow-up preparation cannot replace the original anchor.
+            recovery_pending=(state["recovery_pending"] or pending)
+            if recovered is not None
+            else None,
         )
 
     def append(self, index, event, **payload):

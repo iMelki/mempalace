@@ -26,7 +26,10 @@ MemPalace is a local-first memory repository with upstream project history and a
   and checkpointing, followed by another writer advancing the authoritative head.
   Recheck the saved checkpoint on a fresh resume: structurally valid checkpoint
   metadata must not replace original receipt lineage and current-output proof.
-  Repeat the writer/crash interleaving after recovery is saved. Compare the fresh
-  source hash with the verified current receipt even when an older descriptor
-  matches the file's bytes and timestamp after a metadata-preserving revert.
+  Repeat the writer/crash interleaving after recovery is saved. Recheck the fresh
+  head after crashes at both recovery publication and the follow-up rewrite's
+  durable preparation, before COMPLETE. Retain the original committed preparation
+  across recovery advances; an uncommitted follow-up is not an ancestry anchor.
+  Compare the fresh source hash with the verified current receipt even when an
+  older descriptor matches the file's bytes and timestamp after a metadata-preserving revert.
   See [completed-prefix recovery](docs/operations/mine-prefix-refresh.md).

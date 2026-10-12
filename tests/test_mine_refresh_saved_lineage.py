@@ -5,14 +5,17 @@ from pathlib import Path
 import pytest
 
 from mempalace.mine_progress import MineProgressError, MineProgressJournal, load_source_manifest
-from mempalace.mine_refresh import PrefixRefreshJournal
+from mempalace.mine_refresh import PrefixRefreshJournal, _snapshot_item
 from mempalace.miner import mine
 from mempalace.write_receipts import ReceiptStore
 from test_mine_refresh import _interrupted, _resume
 
 
 @pytest.mark.parametrize("unrelated", ["other-bytes", "other-config"])
-def test_recovered_head_rechecks_original_prepared_lineage(tmp_path, monkeypatch, unrelated):
+@pytest.mark.parametrize("pending_rewrite", [False, True])
+def test_recovered_head_rechecks_original_prepared_lineage(
+    tmp_path, monkeypatch, unrelated, pending_rewrite
+):
     fixture = _interrupted(tmp_path, monkeypatch, stop_index=0)
     project, palace, plan, progress = fixture
     source = project / "a.md"
@@ -56,6 +59,9 @@ def test_recovered_head_rechecks_original_prepared_lineage(tmp_path, monkeypatch
     loaded = PrefixRefreshJournal(journal.progress).state(0)
     assert loaded["pending"] is None
     assert loaded["recovered_head"]["content_hash"] == head["source"]["content_hash"]
+    if pending_rewrite:
+        journal.append(0, "prepared", item=_snapshot_item(source, loaded["item"], 0))
+        assert PrefixRefreshJournal(journal.progress).state(0)["pending"] is not None
     before = [p.read_bytes() for p in sorted(journal.root.glob("*.json"))]
     prefix = progress.read_bytes()
     with pytest.raises(MineProgressError, match="no matching committed refresh ancestor"):

@@ -10,6 +10,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Recover later mines after a follow-up rewrite crashes at preparation (#75, PR #78).**
+  Recheck the saved receipt pin and original committed preparation even while a
+  new rewrite is pending. Retain that original evidence across recovery advances;
+  unrelated heads without a committed ancestor still fail closed.
+
 - **Keep saved refresh recovery resumable across later mines (#75, PR #78).**
   Revalidate the saved receipt and original prepared ancestor on the current
   head's chain, append recovery advances without changing earlier events, and

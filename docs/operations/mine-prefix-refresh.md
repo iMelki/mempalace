@@ -55,6 +55,14 @@ event bound to the original `prepared_digest`. Earlier events remain immutable.
 A false but structurally valid saved recovery claim cannot skip either ancestry
 check. Repeated resume without a new head or source change remains a no-op.
 Existing events without these optional fields retain their original semantics.
+The same checks apply when the interrupted follow-up rewrite has already
+published its new `prepared` event but has not committed a receipt. In this case
+the saved receipt pin and original committed preparation anchor the recovery;
+the uncommitted follow-up snapshot does not replace that evidence. A recovery
+advance closes the current pending event while retaining the original preparation
+for future ancestry checks. A successful managed rewrite clears saved recovery
+through its ordinary `represented` event. Without saved recovery, a pending event
+still requires its own matching committed ancestor before adopting a later head.
 Older readers can refuse the extended recovery state; do not mix miner versions
 within a retained generation without its existing adoption review.
 
@@ -139,6 +147,24 @@ configuration digest while retaining valid journal digests, and withhold current
 output rows. The refusal leaves progress and sidecar bytes unchanged. The
 `mine_refresh_saved_pin_negative.py` fixture removes only saved-pin enforcement;
 all three false-pin cases must then fail with `DID NOT RAISE`.
+
+The next #78 correction repeats all six later-writer combinations with a real
+child hard exit immediately after the follow-up rewrite's durable `prepared`
+event and before processing. Fresh readback confirms the original preparation,
+saved pin, pending follow-up and unchanged authoritative receipt. Later resumes
+must reach the manifest suffix, preserve earlier sidecar bytes and remain
+idempotent. Pending rewrites also retain false-pin, original-ancestor and
+missing-output refusal coverage. The new before/fixed results are recorded in
+the gate ledger.
+`mine_refresh_prepared_anchor_negative.py` removes only original-preparation
+retention, asserts that this break applied, and requires the further-edit cases
+to fail with the missing committed-ancestor error. Restoring retention passes
+the same crash and repeated-resume readbacks.
+`mine_refresh_grok_sequence.py` separately spells out the exact five-step
+interleaving with four distinct byte versions: prepared P, journal-less mined F,
+unmined prepared U, then journal-less mined G. It reads each predecessor and
+version distinction before resume. The test fails on exported original source
+and passes on the correction; its standalone command is recorded in the ledger.
 
 Upstream-first follow-up research on 2026-10-12 reread refresh #645, the
 [writer handoff discussion](https://github.com/MemPalace/mempalace/pull/2131),

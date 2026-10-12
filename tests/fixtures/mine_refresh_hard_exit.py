@@ -1,4 +1,4 @@
-"""Hard-exit only this fixture child after refresh COMPLETE, before represented."""
+"""Hard-exit this fixture child after refresh COMPLETE or durable preparation."""
 
 import os
 import sys
@@ -17,12 +17,24 @@ def hard_exit(*_args):
     os._exit(29)
 
 
+def prepare_then_exit(path, payload, **kwargs):
+    result = original_publish(path, payload, **kwargs)
+    if payload["event"] == "prepared":
+        os._exit(31)
+    return result
+
+
 if __name__ == "__main__":
-    project, palace, plan, progress = sys.argv[1:]
+    project, palace, plan, progress = sys.argv[1:5]
     ChromaBackend._resolve_embedding_function = staticmethod(
         lambda: conftest._TEST_EMBEDDING_FUNCTION
     )
     miner._compute_topic_tunnels_for_wing = lambda _wing: 0
-    mine_refresh._complete_refresh = hard_exit
+    if sys.argv[5:] == ["--after-prepared"]:
+        original_publish = mine_refresh._atomic_write_json
+        mine_refresh._atomic_write_json = prepare_then_exit
+    else:
+        assert not sys.argv[5:], "unknown fixture crash point"
+        mine_refresh._complete_refresh = hard_exit
     miner.mine(project, palace, manifest_path=plan, progress_jsonl=progress)
     raise AssertionError("fixture did not reach the refresh crash window")
