@@ -33,3 +33,8 @@ MemPalace is a local-first memory repository with upstream project history and a
   Compare the fresh source hash with the verified current receipt even when an
   older descriptor matches the file's bytes and timestamp after a metadata-preserving revert.
   See [completed-prefix recovery](docs/operations/mine-prefix-refresh.md).
+- Tests that borrow `sys.settrace()` must capture `sys.gettrace()` first and
+  restore that exact observer in `finally`, including after an injected exception.
+  Clearing the observer can silently disable coverage for later tests. Verify
+  that a subsequent real source call reaches the restored observer; keep the
+  normal coverage source scope and thresholds unchanged.
