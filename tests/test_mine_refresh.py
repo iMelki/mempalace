@@ -1,7 +1,12 @@
 """Resume failures from MemSys #857, using only disposable fixture stores."""
 
 import json
+import ntpath
 import os
+import subprocess
+import sys
+from pathlib import Path
+from contextlib import nullcontext
 
 import pytest
 
@@ -11,7 +16,228 @@ from mempalace.miner import mine
 from mempalace.write_receipts import ReceiptConflictError, ReceiptStore, sha256_bytes
 
 
-def _interrupted(tmp_path, monkeypatch):
+def _hard_crash_refresh(fixture):
+    from mempalace.native_lifecycle import release_native_sessions
+
+    release_native_sessions()
+    child = Path(__file__).parent / "fixtures" / "mine_refresh_hard_exit.py"
+    result = subprocess.run(
+        [sys.executable, str(child), *(str(path) for path in fixture)],
+        capture_output=True,
+        text=True,
+        timeout=90,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    assert result.returncode == 29, result.stdout + result.stderr
+    _, palace, plan, progress = fixture
+    journal = MineProgressJournal(progress, manifest=load_source_manifest(plan))
+    refresh = PrefixRefreshJournal(journal)
+    assert len(refresh.records) == 1
+    assert refresh.state(0)["pending"] is not None
+    current = ReceiptStore(palace).find_current_read_only(journal.records()[0]["source_identity"])
+    assert current["relations"]["predecessor_receipt_id"] == refresh.state(0)["receipt_id"]
+    return current
+
+
+def test_snapshot_and_writer_use_same_normcased_canonical_lock(tmp_path, monkeypatch):
+    from mempalace import mine_refresh, miner, palace
+    from mempalace.write_receipts import canonical_source_locator
+
+    source = tmp_path / "UpperCase.md"
+    source.write_text("Fixture source", encoding="utf-8")
+    alias = tmp_path / "missing" / ".." / source.name
+    keys = []
+
+    def capture(key):
+        keys.append(key)
+        return nullcontext()
+
+    monkeypatch.setattr(palace, "mine_lock", capture)
+    monkeypatch.setattr(miner, "mine_lock", capture)
+    # Exercise Windows case normalization on every test platform.
+    monkeypatch.setattr(os.path, "normcase", ntpath.normcase)
+    monkeypatch.setattr(miner, "_process_file_locked", lambda **_kwargs: (0, "general"))
+    mine_refresh._snapshot(source, {"relative_path": source.name, "normalized_path": source.name})
+    miner.process_file(alias, tmp_path, None, "fixture", [], "fixture", True)
+    assert keys == [ntpath.normcase(canonical_source_locator(source, local_path=True))] * 2
+
+
+@pytest.mark.parametrize("unrelated", ["other-bytes", "other-config"])
+def test_pending_refresh_rejects_head_without_matching_refresh_ancestor(
+    tmp_path, monkeypatch, unrelated
+):
+    fixture = _interrupted(tmp_path, monkeypatch)
+    project, palace, _, progress = fixture
+    source = project / "a.md"
+    source.write_text("Prepared but never published. " * 15, encoding="utf-8")
+    with monkeypatch.context() as context:
+        context.setattr(
+            "mempalace.miner.process_file",
+            lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("before-refresh-write")),
+        )
+        with pytest.raises(RuntimeError, match="before-refresh-write"):
+            _resume(fixture)
+    if unrelated == "other-bytes":
+        source.write_text("Unrelated successor source. " * 15, encoding="utf-8")
+    mine(
+        str(project),
+        str(palace),
+        files=[source],
+        wing_override="other_fixture" if unrelated == "other-config" else None,
+    )
+    events_before = [
+        p.read_bytes() for p in sorted(Path(str(progress) + ".refresh").glob("*.json"))
+    ]
+    prefix_before = progress.read_bytes()
+    with pytest.raises(
+        MineProgressError, match="no matching terminal managed receipt|pending refresh"
+    ):
+        _resume(fixture)
+    assert progress.read_bytes() == prefix_before
+    assert [
+        p.read_bytes() for p in sorted(Path(str(progress) + ".refresh").glob("*.json"))
+    ] == events_before
+
+
+@pytest.mark.parametrize(
+    "second_mine",
+    ["same-bytes", "further-edit", "different-config", "two-successors", "unmined-edit"],
+)
+@pytest.mark.parametrize("crash_after_recovery", [False, True])
+def test_hard_exit_then_journalless_mine_recovers_verified_descendant(
+    tmp_path, monkeypatch, second_mine, crash_after_recovery
+):
+    fixture = _interrupted(tmp_path, monkeypatch, stop_index=0)
+    project, palace, plan, progress = fixture
+    source = project / "a.md"
+    source.write_text("Pending refresh source. " * 15, encoding="utf-8")
+    pending_receipt = _hard_crash_refresh(fixture)
+    manifest_bytes, prefix_bytes = plan.read_bytes(), progress.read_bytes()
+    if second_mine == "further-edit":
+        source.write_text("Further edited source. " * 20, encoding="utf-8")
+    # A whole-project journal-less mine runs after the refresh process dies.
+    mine(
+        str(project),
+        str(palace),
+        wing_override="other_fixture" if second_mine == "different-config" else None,
+    )
+    store = ReceiptStore(palace)
+    head = store.find_current_read_only(pending_receipt["source"]["identity"])
+    assert head["relations"]["predecessor_receipt_id"] == pending_receipt["receipt_id"]
+    assert head["disposition"] == (
+        "WRITE" if second_mine in {"further-edit", "different-config"} else "UNCHANGED"
+    )
+    if second_mine == "two-successors":
+        mine(str(project), str(palace))
+        next_head = store.find_current_read_only(head["source"]["identity"])
+        assert next_head["relations"]["predecessor_receipt_id"] == head["receipt_id"]
+        head = next_head
+    if second_mine == "unmined-edit":
+        source.write_text("Changed after the second mine. " * 20, encoding="utf-8")
+    if crash_after_recovery:
+        _interrupt_recovery_publication(fixture, monkeypatch)
+    _resume(fixture, start_index=1)
+    _assert_recovered_fixture(
+        fixture,
+        head,
+        manifest_bytes,
+        prefix_bytes,
+        expect_rewrite=second_mine in {"different-config", "unmined-edit"},
+    )
+
+
+def _interrupt_recovery_publication(fixture, monkeypatch):
+    from mempalace import mine_refresh
+
+    original_publish = mine_refresh._atomic_write_json
+
+    def publish_then_raise(path, payload, **kwargs):
+        result = original_publish(path, payload, **kwargs)
+        if payload.get("recovered_head") is not None:
+            raise OSError("fixture-recovery-visible-before-crash")
+        return result
+
+    with monkeypatch.context() as context:
+        context.setattr(mine_refresh, "_atomic_write_json", publish_then_raise)
+        with pytest.raises(OSError, match="fixture-recovery-visible-before-crash"):
+            _resume(fixture, start_index=1)
+
+
+def _assert_recovered_fixture(fixture, head, manifest_bytes, prefix_bytes, *, expect_rewrite):
+    project, palace, plan, progress = fixture
+    store = ReceiptStore(palace)
+    journal = MineProgressJournal(progress, manifest=load_source_manifest(plan))
+    state = PrefixRefreshJournal(journal).state(0)
+    assert journal.verified_prefix() == 3
+    assert state["pending"] is None
+    assert state["item"]["content_hash"] == sha256_bytes((project / "a.md").read_bytes())
+    assert plan.read_bytes() == manifest_bytes
+    assert progress.read_bytes().startswith(prefix_bytes)
+    final = store.find_current_read_only(head["source"]["identity"])
+    assert final["receipt_id"] == state["receipt_id"]
+    if not expect_rewrite:
+        assert final["receipt_id"] == head["receipt_id"]
+    else:
+        assert final["relations"]["predecessor_receipt_id"] == head["receipt_id"]
+    event_bytes = [
+        path.read_bytes() for path in sorted(PrefixRefreshJournal(journal).root.glob("*.json"))
+    ]
+    mine(str(project), str(palace), manifest_path=str(plan), progress_jsonl=str(progress))
+    assert [
+        path.read_bytes() for path in sorted(PrefixRefreshJournal(journal).root.glob("*.json"))
+    ] == event_bytes
+    assert (
+        store.find_current_read_only(head["source"]["identity"])["receipt_id"]
+        == final["receipt_id"]
+    )
+
+
+def test_pending_refresh_rejects_verified_lineage_with_missing_head_outputs(tmp_path, monkeypatch):
+    fixture = _interrupted(tmp_path, monkeypatch, stop_index=0)
+    project, palace, _, progress = fixture
+    (project / "a.md").write_text("Pending refresh source. " * 15, encoding="utf-8")
+    pending = _hard_crash_refresh(fixture)
+    mine(str(project), str(palace))
+    head = ReceiptStore(palace).find_current_read_only(pending["source"]["identity"])
+    from mempalace.mine_refresh_recovery import recover_pending_head
+    from mempalace.receipt_verifier import verify_receipt
+    from types import SimpleNamespace
+
+    journal = PrefixRefreshJournal(
+        MineProgressJournal(progress, manifest=load_source_manifest(fixture[2]))
+    )
+    before = [p.read_bytes() for p in sorted(journal.root.glob("*.json"))]
+
+    class MissingRows:
+        def get(self, **_kwargs):
+            return {"ids": [], "documents": [], "metadatas": []}
+
+    def missing_readback(receipt, **kwargs):
+        kwargs["collections"] = {"drawers": MissingRows(), "closets": MissingRows()}
+        return verify_receipt(receipt, **kwargs)
+
+    # Exercise the real verifier on absent output rows without deleting fixture data.
+    monkeypatch.setattr(
+        "mempalace.mine_refresh_recovery.verify_receipt",
+        missing_readback,
+    )
+    with pytest.raises(MineProgressError, match="head is not represented"):
+        recover_pending_head(
+            head,
+            journal.state(0),
+            {
+                "receipt_store": ReceiptStore(palace),
+                "receipt_run": SimpleNamespace(
+                    config_digest=pending["producer"]["config"]["digest"]
+                ),
+                "collection": None,
+                "closets_col": None,
+            },
+        )
+    assert [p.read_bytes() for p in sorted(journal.root.glob("*.json"))] == before
+
+
+def _interrupted(tmp_path, monkeypatch, stop_index=1):
     project = tmp_path / "project"
     project.mkdir()
     (project / "mempalace.yaml").write_text(
@@ -25,7 +251,7 @@ def _interrupted(tmp_path, monkeypatch):
 
     def interrupt(self, **kwargs):
         result = original(self, **kwargs)
-        if kwargs["source_index"] == 1:
+        if kwargs["source_index"] == stop_index:
             raise SystemExit(23)
         return result
 
@@ -36,14 +262,14 @@ def _interrupted(tmp_path, monkeypatch):
     return project, palace, plan, progress
 
 
-def _resume(fixture):
+def _resume(fixture, start_index=2):
     project, palace, plan, progress = fixture
     mine(
         str(project),
         str(palace),
         manifest_path=str(plan),
         progress_jsonl=str(progress),
-        start_index=2,
+        start_index=start_index,
     )
 
 
