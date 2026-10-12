@@ -22,3 +22,8 @@ MemPalace is a local-first memory repository with upstream project history and a
 - Python changes must preserve the existing test suite and avoid network/API requirements by default.
 - Documentation changes should preserve upstream guidance and clearly mark fork-specific operations.
 - Run the smallest relevant verification command and record it in the PR.
+- Tests that borrow `sys.settrace()` must capture `sys.gettrace()` first and
+  restore that exact observer in `finally`, including after an injected exception.
+  Clearing the observer can silently disable coverage for later tests. Verify
+  that a subsequent real source call reaches the restored observer; keep the
+  normal coverage source scope and thresholds unchanged.

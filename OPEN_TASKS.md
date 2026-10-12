@@ -20,13 +20,13 @@ This file is the durable local index for active `mempalace` issues.
     See [resume operations](docs/operations/mine-prefix-refresh.md).
 
 - [#67 - Fail closed on snapshot maintenance-marker ownership and exact release](https://github.com/iMelki/mempalace/issues/67)
-  - Source mitigation rejects pre-existing and late-arriving markers at exclusive
-    child lease acquisition, and preserves a replacement detected at release.
-    Focused snapshot tests passed 29/29. A path-based release race and natural
-    scheduled-run proof remain open; the current MemSys marker still needs its
-    separately approved exact-object quarantine. See
-    `docs/research/snapshot-maintenance-marker-ownership-2026-09-27.md` and
-    [MemSys #466](https://github.com/iMelki/memsys/issues/466).
+  - Exact Windows handle release and canonical owner identity prepared in the
+    #466 Codex lane. Catchable acquisition interrupts and forced owner exit
+    have fail-before/pass-after proofs; release/foreign-object tests use retained
+    disposable scratch. See `docs/research/snapshot-lease-release-2026-10-09.md`.
+    CTO owns integration with PR72, two independent final-head reviews and merge.
+    Runtime custodian owns writer/stale-reader/generic-recovery adoption and
+    natural scheduled-run proof. No live lease, snapshot, service or task changed.
 
 - [[memsys#680](https://github.com/iMelki/memsys/issues/680) / [memsys#692](https://github.com/iMelki/memsys/issues/692) - Record the SQLite WAL mode decision for the 26.5 GB chroma.sqlite3]
   - Architecture Decision Record completed: `docs/rfcs/003-chroma-sqlite-wal-decision-record.md`.
