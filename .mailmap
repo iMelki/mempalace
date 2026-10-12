@@ -1,0 +1,7 @@
+# Map author identities for git log, shortlog and blame.
+#
+# Between 2026-08-09 and 2026-10-12 a test fixture wrote a placeholder
+# identity into this repository's shared git config, so commits made in
+# that window were recorded under it. Those commits belong to the
+# repository owner's account.
+iMelki <iMelki@users.noreply.github.com> Jane Doe <jane@example.com>
