@@ -103,9 +103,18 @@ def test_weekly_full_check_rejects_missing_index_rows_that_nightly_accepts(tmp_p
         page = writer.execute(
             "SELECT rootpage FROM sqlite_schema WHERE name='by_embedding_id'"
         ).fetchone()[0]
+    # Overwrite the last index key in place. drawers-2 stays last as drawers-3,
+    # so the entry count and key order are unchanged and quick_check stays ok.
     with database.open("r+b") as stream:
-        stream.seek((page - 1) * page_size + 3)
-        stream.write(b"\x00\x00" + page_size.to_bytes(2, "big"))
+        stream.seek((page - 1) * page_size)
+        leaf = bytearray(stream.read(page_size))
+        old = b"mempalace_drawers-2"
+        offset = leaf.find(old)
+        assert offset >= 0
+        assert leaf.find(old, offset + 1) < 0
+        leaf[offset : offset + len(old)] = b"mempalace_drawers-3"
+        stream.seek((page - 1) * page_size)
+        stream.write(leaf)
     staging = tmp_path / "generations" / "one"
     receipt = backup.stage_palace_snapshot(live, staging, use_maintenance_marker=False)
     assert receipt["sqliteSnapshot"]["quickCheck"] == "ok"

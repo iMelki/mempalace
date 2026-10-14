@@ -59,10 +59,18 @@ def test_full_integrity_rejects_index_damage_that_quick_check_accepts(tmp_path):
         root_page = writer.execute(
             "SELECT rootpage FROM sqlite_schema WHERE name='by_value'"
         ).fetchone()[0]
-    # Turn the otherwise valid index leaf into an empty leaf. Table rows still exist.
+    # Overwrite one index key in place. The entry count stays the same, so
+    # quick_check accepts the leaf on SQLite builds that count index entries.
+    # integrity_check still reports the mismatched table row.
     with database.open("r+b") as stream:
-        stream.seek((root_page - 1) * page_size + 3)
-        stream.write(b"\x00\x00" + page_size.to_bytes(2, "big"))
+        stream.seek((root_page - 1) * page_size)
+        page = bytearray(stream.read(page_size))
+        offset = page.find(b"one")
+        assert offset >= 0
+        assert page.find(b"one", offset + 1) < 0
+        page[offset : offset + 3] = b"onf"
+        stream.seek((root_page - 1) * page_size)
+        stream.write(page)
     with closing(sqlite3.connect(database)) as reader:
         assert reader.execute("PRAGMA quick_check").fetchone()[0] == "ok"
     with pytest.raises(
