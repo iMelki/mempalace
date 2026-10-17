@@ -839,7 +839,21 @@ def test_low_level_sdk_repeats_30_sequential_sessions_without_deadlock():
                     run_one(index),
                     timeout=MCP_OPERATION_TIMEOUT_SECONDS,
                 )
-                assert not app.state.mcp_session_manager._server_instances
+                # The server drops the transport from _server_instances in its own
+                # task after the client's DELETE returns, so an immediate check races
+                # that cleanup. On the self-hosted box-mempalace runner (Python 3.11,
+                # shared CPU) the cleanup lands a few ms after the client exits, which
+                # failed this assert intermittently. Poll with a bounded wait instead:
+                # a real leak or deadlock still fails after MCP_OPERATION_TIMEOUT_SECONDS.
+                loop = asyncio.get_running_loop()
+                drain_deadline = loop.time() + MCP_OPERATION_TIMEOUT_SECONDS
+                while app.state.mcp_session_manager._server_instances:
+                    assert loop.time() < drain_deadline, (
+                        "session transport not released after "
+                        f"{MCP_OPERATION_TIMEOUT_SECONDS}s: "
+                        f"{app.state.mcp_session_manager._server_instances!r}"
+                    )
+                    await asyncio.sleep(0.01)
 
     try:
         _run_async_bounded(run_sessions)
