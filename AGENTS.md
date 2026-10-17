@@ -22,3 +22,19 @@ MemPalace is a local-first memory repository with upstream project history and a
 - Python changes must preserve the existing test suite and avoid network/API requirements by default.
 - Documentation changes should preserve upstream guidance and clearly mark fork-specific operations.
 - Run the smallest relevant verification command and record it in the PR.
+- For receipt-backed recovery changes, test a hard exit between durable publication
+  and checkpointing, followed by another writer advancing the authoritative head.
+  Recheck the saved checkpoint on a fresh resume: structurally valid checkpoint
+  metadata must not replace original receipt lineage and current-output proof.
+  Repeat the writer/crash interleaving after recovery is saved. Recheck the fresh
+  head after crashes at both recovery publication and the follow-up rewrite's
+  durable preparation, before COMPLETE. Retain the original committed preparation
+  across recovery advances; an uncommitted follow-up is not an ancestry anchor.
+  Compare the fresh source hash with the verified current receipt even when an
+  older descriptor matches the file's bytes and timestamp after a metadata-preserving revert.
+  See [completed-prefix recovery](docs/operations/mine-prefix-refresh.md).
+- Tests that borrow `sys.settrace()` must capture `sys.gettrace()` first and
+  restore that exact observer in `finally`, including after an injected exception.
+  Clearing the observer can silently disable coverage for later tests. Verify
+  that a subsequent real source call reaches the restored observer; keep the
+  normal coverage source scope and thresholds unchanged.

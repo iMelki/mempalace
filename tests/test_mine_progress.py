@@ -26,6 +26,7 @@ from mempalace.miner import (
     MineProgressJournalError,
     mine,
 )
+from mempalace.native_lifecycle import close_chroma_client
 from mempalace.palace import MineAlreadyRunning
 
 
@@ -224,12 +225,63 @@ def test_plan_journal_rejects_semantically_divergent_complete_record(tmp_path):
 
 def _snapshot_outputs(palace_path: Path) -> dict:
     client = chromadb.PersistentClient(path=str(palace_path))
-    drawers = client.get_collection("mempalace_drawers").get(include=["documents"])
-    closets = client.get_collection("mempalace_closets").get(include=["documents"])
-    return {
-        "drawers": sorted(zip(drawers["ids"], drawers["documents"])),
-        "closets": sorted(zip(closets["ids"], closets["documents"])),
-    }
+    try:
+        drawers = client.get_collection("mempalace_drawers").get(include=["documents"])
+        closets = client.get_collection("mempalace_closets").get(include=["documents"])
+        return {
+            "drawers": sorted(zip(drawers["ids"], drawers["documents"])),
+            "closets": sorted(zip(closets["ids"], closets["documents"])),
+        }
+    finally:
+        close_chroma_client(client, strict=True)
+
+
+def test_snapshot_readers_do_not_pin_a_broken_native_view(tmp_path, monkeypatch):
+    from mempalace.backends.base import EmbeddingVisibilityError
+    from mempalace.backends.chroma import ChromaBackend
+
+    palace = str(tmp_path / "palace")
+    backend = ChromaBackend()
+    try:
+        drawers = backend.get_collection(palace, "mempalace_drawers", create=True)
+        backend.get_collection(palace, "mempalace_closets", create=True)
+        drawers.add(documents=["snapshot row"], ids=["row"], embeddings=[[1.0, 0.0]])
+        original_system = backend._client(palace)._system
+        _snapshot_outputs(Path(palace))
+        _snapshot_outputs(Path(palace))
+        read_exact = drawers._exact_embeddings_once
+
+        def stale_view_until_reopened(ids):
+            if backend._client(palace)._system is original_system:
+                raise EmbeddingVisibilityError("fixture stale native view")
+            return read_exact(ids)
+
+        monkeypatch.setattr(drawers, "_exact_embeddings_once", stale_view_until_reopened)
+        assert drawers.get_exact_embeddings(["row"]) == {"row": (1.0, 0.0)}
+        assert backend._client(palace)._system is not original_system
+    finally:
+        backend.close()
+
+
+def test_snapshot_reader_closes_on_read_failure(tmp_path, monkeypatch):
+    create_client = chromadb.PersistentClient
+    readers = []
+
+    def failing_reader(*args, **kwargs):
+        client = create_client(*args, **kwargs)
+        readers.append(client)
+
+        def fail_read(*args, **kwargs):
+            raise RuntimeError("fixture snapshot read interrupted")
+
+        monkeypatch.setattr(client, "get_collection", fail_read)
+        return client
+
+    monkeypatch.setattr(chromadb, "PersistentClient", failing_reader)
+    with pytest.raises(RuntimeError, match="fixture snapshot read interrupted"):
+        _snapshot_outputs(tmp_path / "palace")
+    assert len(readers) == 1
+    assert readers[0]._closed is True
 
 
 def test_manifest_order_and_identity_are_deterministic(tmp_path):
@@ -601,10 +653,10 @@ def test_interrupted_mine_resumes_exact_prefix_and_matches_baseline(tmp_path, mo
     original = completed_source.read_text(encoding="utf-8")
     completed_source.write_text(original.replace("source", "SOURCE"), encoding="utf-8")
     os.utime(completed_source, ns=(old_stat.st_atime_ns, old_stat.st_mtime_ns))
-    with pytest.raises(MineManifestDrift, match="source index 0"):
-        mine(
-            str(project),
-            str(resumed_palace),
-            manifest_path=str(plan),
-            progress_jsonl=str(interrupted_progress),
-        )
+    mine(
+        str(project),
+        str(resumed_palace),
+        manifest_path=str(plan),
+        progress_jsonl=str(interrupted_progress),
+    )
+    assert _snapshot_outputs(resumed_palace) != before
