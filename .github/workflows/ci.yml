@@ -27,7 +27,7 @@ concurrency:
 jobs:
   test-linux:
     if: github.event_name != 'pull_request' || github.head_ref != 'dev'
-    runs-on: ubuntu-latest
+    runs-on: [box-mempalace]
     strategy:
       matrix:
         python-version: ["3.9", "3.11", "3.13"]
@@ -40,32 +40,10 @@ jobs:
       - run: pip install -e ".[dev]"
       - run: python -m pytest tests/ -v --ignore=tests/benchmarks --cov=mempalace --cov-report=term-missing --cov-fail-under=80 --durations=10
 
-  test-windows:
-    if: github.event_name != 'pull_request' || github.head_ref != 'dev'
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.13"
-          cache: 'pip'
-      - run: pip install -e ".[dev]"
-      - run: python -m pytest tests/ -v --ignore=tests/benchmarks --cov=mempalace --cov-report=term-missing --cov-fail-under=80 --durations=10
-
-  test-macos:
-    if: github.event_name != 'pull_request' || github.head_ref != 'dev'
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.13"
-          cache: 'pip'
-      - run: pip install -e ".[dev]"
-      - run: python -m pytest tests/ -v --ignore=tests/benchmarks --cov=mempalace --cov-report=term-missing --cov-fail-under=80 --durations=10
+  # test-windows / test-macos removed: hosted-only OS, zero-spend (box runners are Linux).
   lint:
     if: github.event_name != 'pull_request' || github.head_ref != 'dev'
-    runs-on: ubuntu-latest
+    runs-on: [box-mempalace]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6

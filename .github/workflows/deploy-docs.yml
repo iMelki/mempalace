@@ -21,7 +21,7 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: [box-mempalace]
     permissions:
       contents: read
     steps:
@@ -60,7 +60,7 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: [box-mempalace]
     permissions:
       pages: write
       id-token: write
