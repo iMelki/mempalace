@@ -33,11 +33,12 @@ jobs:
         python-version: ["3.9", "3.11", "3.13"]
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
+      # Box runner is Debian 13; setup-python has no prebuilt CPython for it.
+      - uses: astral-sh/setup-uv@v6
         with:
           python-version: ${{ matrix.python-version }}
-          cache: 'pip'
-      - run: pip install -e ".[dev]"
+          activate-environment: true
+      - run: uv pip install -e ".[dev]"
       - run: python -m pytest tests/ -v --ignore=tests/benchmarks --cov=mempalace --cov-report=term-missing --cov-fail-under=80 --durations=10
 
   # test-windows / test-macos removed: hosted-only OS, zero-spend (box runners are Linux).
@@ -46,10 +47,11 @@ jobs:
     runs-on: [box-mempalace]
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
+      # Box runner is Debian 13; setup-python has no prebuilt CPython for it.
+      - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.11"
-          cache: 'pip'
-      - run: pip install "ruff>=0.15.9,<0.16"
+          activate-environment: true
+      - run: uv pip install "ruff>=0.15.9,<0.16"
       - run: ruff check .
       - run: ruff format --check .
