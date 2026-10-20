@@ -9,6 +9,7 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import threading
 from pathlib import Path
 
 import pytest
@@ -748,3 +749,125 @@ def test_snapshot_never_mutates_the_source_palace(palace, tmp_path):
         if path.is_file()
     }
     assert before == after
+
+
+# --------------------------------------------------------------------------
+# Overlapped file copies
+# --------------------------------------------------------------------------
+
+
+def _add_many_files(root: Path, count: int) -> None:
+    segment = root / SEGMENT_ID
+    nested = segment / "nested"
+    nested.mkdir()
+    for index in range(count):
+        (segment / f"file-{index:03}.bin").write_bytes(bytes([index % 251]) * (index + 1))
+        (nested / f"n-{index:03}.bin").write_bytes(b"n" * (index + 2))
+
+
+def _staged_files(receipt: dict) -> dict[str, str]:
+    return {entry["relativePath"]: entry["sha256"] for entry in receipt["contentIdentity"]["files"]}
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (None, backup_snapshot.DEFAULT_COPY_WORKERS),
+        ("", backup_snapshot.DEFAULT_COPY_WORKERS),
+        ("not-a-number", backup_snapshot.DEFAULT_COPY_WORKERS),
+        ("1", 1),
+        ("0", 1),
+        ("-3", 1),
+        ("4", 4),
+        ("999", backup_snapshot.MAX_COPY_WORKERS),
+    ],
+)
+def test_copy_workers_setting_is_clamped_and_defaults_safely(monkeypatch, raw, expected):
+    if raw is None:
+        monkeypatch.delenv(backup_snapshot.COPY_WORKERS_ENV, raising=False)
+    else:
+        monkeypatch.setenv(backup_snapshot.COPY_WORKERS_ENV, raw)
+    assert backup_snapshot._copy_workers() == expected
+
+
+def test_overlapped_and_serial_copies_stage_identical_trees(palace, tmp_path, monkeypatch):
+    _add_many_files(palace, 60)
+
+    monkeypatch.setenv(backup_snapshot.COPY_WORKERS_ENV, "1")
+    serial = stage_palace_snapshot(palace, tmp_path / "serial", use_maintenance_marker=False)
+    monkeypatch.setenv(backup_snapshot.COPY_WORKERS_ENV, "8")
+    pooled = stage_palace_snapshot(palace, tmp_path / "pooled", use_maintenance_marker=False)
+
+    assert pooled["stagedEntries"] == serial["stagedEntries"]
+    assert _staged_files(pooled) == _staged_files(serial)
+    segment_entry = next(e for e in pooled["stagedEntries"] if e["relativePath"] == SEGMENT_ID)
+    assert segment_entry["fileCount"] == 3 + 2 * 60
+    assert segment_entry["bytes"] == sum(
+        p.stat().st_size for p in (palace / SEGMENT_ID).rglob("*") if p.is_file()
+    )
+
+
+def test_file_copies_really_overlap_when_workers_are_configured(palace, tmp_path, monkeypatch):
+    _add_many_files(palace, 10)
+    monkeypatch.setenv(backup_snapshot.COPY_WORKERS_ENV, "4")
+    barrier = threading.Barrier(4, timeout=10)
+    lock = threading.Lock()
+    waiting = [0]
+    real_copy2 = shutil.copy2
+
+    def copy2_after_meeting(source, destination, **kwargs):
+        with lock:
+            waiting[0] += 1
+            joins = waiting[0] <= 4
+        if joins:
+            # Only passes when four copies are in flight at the same time.
+            barrier.wait()
+        return real_copy2(source, destination, **kwargs)
+
+    monkeypatch.setattr(backup_snapshot.shutil, "copy2", copy2_after_meeting)
+    receipt = stage_palace_snapshot(palace, tmp_path / "staging", use_maintenance_marker=False)
+    assert receipt["status"] == "complete"
+
+
+def test_a_failing_file_copy_aborts_the_snapshot_and_releases_the_lock(
+    palace, tmp_path, monkeypatch
+):
+    _add_many_files(palace, 20)
+    monkeypatch.setenv(backup_snapshot.COPY_WORKERS_ENV, "4")
+    real_copy2 = shutil.copy2
+
+    def copy2_failing_once(source, destination, **kwargs):
+        if Path(source).name == "n-007.bin":
+            raise OSError("simulated read failure")
+        return real_copy2(source, destination, **kwargs)
+
+    monkeypatch.setattr(backup_snapshot.shutil, "copy2", copy2_failing_once)
+    with pytest.raises(OSError, match="simulated read failure"):
+        stage_palace_snapshot(palace, tmp_path / "staging", use_maintenance_marker=False)
+
+    # The lease was released: a writer can take the palace lock again.
+    with mine_palace_lock(str(palace.resolve())):
+        pass
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="symlinks unavailable")
+def test_a_link_inside_a_segment_is_refused_before_any_file_is_copied(
+    palace, tmp_path, monkeypatch
+):
+    target = tmp_path / "outside.bin"
+    target.write_bytes(b"outside")
+    try:
+        (palace / SEGMENT_ID / "linked.bin").symlink_to(target)
+    except OSError:
+        pytest.skip("cannot create symlinks here")
+    copied: list[Path] = []
+    real_copy2 = shutil.copy2
+
+    def counting_copy2(source, destination, **kwargs):
+        copied.append(Path(source))
+        return real_copy2(source, destination, **kwargs)
+
+    monkeypatch.setattr(backup_snapshot.shutil, "copy2", counting_copy2)
+    with pytest.raises(PalaceSnapshotError, match="refusing to copy a reparse point"):
+        stage_palace_snapshot(palace, tmp_path / "staging", use_maintenance_marker=False)
+    assert copied == []
