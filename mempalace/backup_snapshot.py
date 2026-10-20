@@ -58,7 +58,7 @@ import sqlite3
 import sys
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 
 # datetime.UTC is a 3.11+ alias; CI runs 3.9, where only timezone.utc exists.
@@ -535,7 +535,8 @@ def _plan_tree_copy(source: Path, destination: Path) -> list[tuple[Path, Path]]:
 def _copy_planned_files(pairs: list[tuple[Path, Path]], *, workers: int) -> list[int]:
     """Copy every pair and return the destination sizes in input order.
 
-    The first failure is raised and the copies not yet started are cancelled.
+    The first failure is raised as soon as it happens, not after the files copied
+    before it, and the copies not yet started are cancelled.
     """
 
     def copy_one(pair: tuple[Path, Path]) -> int:
@@ -550,19 +551,16 @@ def _copy_planned_files(pairs: list[tuple[Path, Path]], *, workers: int) -> list
     ) as pool:
         futures = [pool.submit(copy_one, pair) for pair in pairs]
         try:
+            done, _ = wait(futures, return_when=FIRST_EXCEPTION)
+            for future in done:
+                failure = future.exception()
+                if failure is not None:
+                    raise failure
             return [future.result() for future in futures]
         except BaseException:
             for future in futures:
                 future.cancel()
             raise
-
-
-def _copy_tree_no_links(source: Path, destination: Path) -> tuple[int, int]:
-    """Copy a directory, refusing reparse points, returning (bytes, files)."""
-
-    pairs = _plan_tree_copy(source, destination)
-    sizes = _copy_planned_files(pairs, workers=_copy_workers())
-    return sum(sizes), len(pairs)
 
 
 # --------------------------------------------------------------------------

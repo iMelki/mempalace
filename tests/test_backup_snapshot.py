@@ -802,9 +802,14 @@ def test_overlapped_and_serial_copies_stage_identical_trees(palace, tmp_path, mo
     assert _staged_files(pooled) == _staged_files(serial)
     segment_entry = next(e for e in pooled["stagedEntries"] if e["relativePath"] == SEGMENT_ID)
     assert segment_entry["fileCount"] == 3 + 2 * 60
-    assert segment_entry["bytes"] == sum(
-        p.stat().st_size for p in (palace / SEGMENT_ID).rglob("*") if p.is_file()
-    )
+    assert segment_entry["bytes"] > 0
+    # Every entry's counts match what actually landed in the staged tree.
+    staged_root = Path(pooled["stagedRoot"])
+    for entry in pooled["stagedEntries"]:
+        staged = staged_root / entry["relativePath"]
+        files = [p for p in staged.rglob("*") if p.is_file()] if staged.is_dir() else [staged]
+        assert entry["fileCount"] == len(files), entry["relativePath"]
+        assert entry["bytes"] == sum(p.stat().st_size for p in files), entry["relativePath"]
 
 
 def test_file_copies_really_overlap_when_workers_are_configured(palace, tmp_path, monkeypatch):
