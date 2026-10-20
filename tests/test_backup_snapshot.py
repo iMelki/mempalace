@@ -10,6 +10,7 @@ import shutil
 import sqlite3
 import subprocess
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -853,6 +854,31 @@ def test_a_failing_file_copy_aborts_the_snapshot_and_releases_the_lock(
     # The lease was released: a writer can take the palace lock again.
     with mine_palace_lock(str(palace.resolve())):
         pass
+
+
+def test_the_first_copy_failure_cancels_the_copies_not_yet_started(tmp_path, monkeypatch):
+    pairs = []
+    for index in range(40):
+        source = tmp_path / f"src-{index:02d}.bin"
+        source.write_bytes(b"x")
+        pairs.append((source, tmp_path / f"dst-{index:02d}.bin"))
+    started: list[str] = []
+    lock = threading.Lock()
+
+    def copy2_failing_first(source, destination, **kwargs):
+        with lock:
+            started.append(Path(source).name)
+        if Path(source).name == "src-00.bin":
+            raise OSError("simulated read failure")
+        time.sleep(0.05)
+        return shutil.copyfile(source, destination)
+
+    monkeypatch.setattr(backup_snapshot.shutil, "copy2", copy2_failing_first)
+    with pytest.raises(OSError, match="simulated read failure"):
+        backup_snapshot._copy_planned_files(pairs, workers=2)
+
+    # Without cancelling, two workers would go on to copy all 40 files.
+    assert len(started) < len(pairs) // 2
 
 
 @pytest.mark.skipif(not hasattr(os, "symlink"), reason="symlinks unavailable")
