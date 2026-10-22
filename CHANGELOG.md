@@ -25,6 +25,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [3.3.5] — unreleased
 
+### Fixed
+
+- **PR 79 third-review snapshot findings.** Share isolation checks across weekly,
+  deferred nightly and receipt readback before SQLite or hash reads. Publish
+  deferred receipts by exclusive temporary file and replacement. Reject backup
+  roots inside live storage before any failure write, retain identity-bound
+  invalidation when a weekly sidecar cannot be replaced, and isolate all sibling
+  parser exceptions so a malformed sibling cannot hide a good copy.
+
+- **PR 79 second-review snapshot findings.** Isolate malformed or redirected
+  siblings during newest-copy selection and save scan/precondition failures,
+  using the safe backup root if no generation can receive an error sidecar.
+  Reject every multiply linked snapshot file, check unresolved receipt paths
+  before reading, and explicitly request ASCII weekly JSON for console output.
+
+- **PR 79 snapshot review findings.** Both receipt CLI entrypoints report failed
+  weekly proof as exit 2 and missing/stale proof as warning exit 3. Accept writer
+  backup roots while refusing links inside generations; use the production full
+  checker for integrity tests and evidence. Retire the unused helper, preserve
+  corruption diagnostics near deadlines, and make generation fixtures independent
+  of the producer clock.
+
+### Added
+
+- **Split snapshot verification into nightly structural and weekly full checks.**
+  Nightly copy verification uses `quick_check` plus page/freelist/schema comparison.
+  A separately bounded, copy-only full check writes an identity-bound weekly
+  receipt; readback reports missing or stale weekly proof explicitly.
+
+- **Record snapshot timeout diagnosis and real SQLite corruption checks
+  (maintainer's private tracker).** Document the last
+  15 retained runs and production-size copied-database measurements. Reject the
+  larger-cache proposal after the original helper completed slightly faster.
+  Add read-only, missing-index and FTS5 characterization checks; no runtime
+  behavior, verification policy or budget changes are proposed.
+
 ### Changed
 
 - **Recover later mines after a follow-up rewrite crashes at preparation (#75, PR #78).**
