@@ -1,0 +1,205 @@
+{
+  "schema": "fleet.audit.plan-ledger.v1",
+  "repository": "iMelki/mempalace",
+  "documentDate": "2026-10-23",
+  "documentState": "complete-actionable-plan-and-ledger; underlying-assessment-partial",
+  "taskAuthority": "Existing GitHub issues and owning repository conventions; this dated evidence snapshot is not a competing maintained tracker.",
+  "plan": "fleet-assessment-2026-10-22.md",
+  "canonicalPlanHierarchy": [
+    "ROADMAP.md"
+  ],
+  "historicalInventory": {
+    "reportedRecords": 75,
+    "asOf": "Retained22October2026 observations; non-atomic, not refreshed census.",
+    "coverage": "50issues25PRs previously assessed;253948body characters.128issue-comment metadata is not total discussion coverage. ROADMAP3269chars/blob76f8833fc88f19aee70e90c1f886b3392dbc8a14 and snapshot lease design6382chars/blob099d45afce6280ccc086a1b652ee8a4c433c22a2 assessed at f672b37f31e9ce3812f25b5363570eee4f352790. PR81 one discussion delta assessed.",
+    "exactRowsInThisLedger": 6,
+    "unrepresentedRecords": "Exact original ID membership/dispositions not fully recovered; no inferred IDs and no completeness percentage."
+  },
+  "assessmentState": "partial or inherited-reported outside explicitly recovered rows",
+  "runtimeState": "Not assessed or executed by this plan.",
+  "releasePlanningState": "First usable outcome and two sequenced next releases fully specified; execution and adoption remain separate.",
+  "releasePlan": [
+    {
+      "key": "U0",
+      "name": "Qualify the existing fork as a recoverable recall backend",
+      "consumer": "memory coordinator and the operator using an already selected project memory corpus.",
+      "outcome": "Retrieve a known project fact through the existing backend and recover that same useful query from a verified snapshot.",
+      "minimumScope": [
+        "Keep the existing storage/API contract and upstream compatibility.",
+        "Bind selected writer/reader identity, snapshot content and an independent restore.",
+        "Preserve owned-object release and foreign-replacement safety from existing snapshot lanes."
+      ],
+      "dependencies": [
+        "mempalace#67",
+        "mempalace#77",
+        "mempalace#79",
+        "mempalace#82",
+        "restricted memory-coordinator dependency"
+      ],
+      "acceptance": [
+        "Known-result query succeeds on the selected candidate and disposable restored corpus.",
+        "No-hit/unavailable cases remain truthful; counts/integrity/content identities are checked.",
+        "Catchable and forced exits preserve the declared owned/stale identity contract; foreign replacement survives."
+      ],
+      "delivery": "Existing fork maintainer produces an exact reviewed artifact; runtime custodian selects it only after backup/rollback plan and separate approval.",
+      "owner": "Existing MemPalace/memory coordinator integration and backup custodians; acceptance gaps remain.",
+      "baseline": "Existing fork at historical dev f672b37f31e9ce3812f25b5363570eee4f352790. Merged #77/#78 source is retained evidence; installed qualification is unknown."
+    },
+    {
+      "key": "U1",
+      "name": "Resume interrupted ingestion without wrong lineage",
+      "consumer": "An explicitly authorized memory-ingestion owner.",
+      "outcome": "Resume a bounded interrupted mine without accepting unrelated heads or repeating already completed source work.",
+      "minimumScope": [
+        "Reuse merged #78 and existing source-progress/receipt contracts.",
+        "Cover hard exits before checkpoint and intervening writers.",
+        "Use existing guarded reader-close/admission boundaries."
+      ],
+      "dependencies": [
+        "U0",
+        "mempalace#69",
+        "mempalace#70",
+        "mempalace#71",
+        "mempalace#75",
+        "mempalace#78",
+        "restricted memory-coordinator dependency"
+      ],
+      "acceptance": [
+        "Failure-first crash/interleaving fixtures reject unrelated receipt lineage.",
+        "Recovery remains correct after a second crash and metadata-preserving source revert.",
+        "No duplicate-ingestion claim is inferred from structurally valid metadata alone."
+      ],
+      "delivery": "Existing source lane and ordinary targeted tests; actual mining remains a separate explicit operation.",
+      "owner": "Existing mining source/runtime custodians."
+    },
+    {
+      "key": "U2",
+      "name": "Provide dependable unattended backup and lifecycle evidence",
+      "consumer": "Existing backup operators and memory coordinator health consumers.",
+      "outcome": "A natural scheduled backup finishes with truthful lifecycle evidence and a useful, generation-bound recovery path.",
+      "minimumScope": [
+        "Existing #73/#74/#76 lifecycle and #40/#79/#82 snapshot lanes.",
+        "Bind local restore before any offsite acceptance.",
+        "Qualify portable runner instructions without duplicating upstream roadmap."
+      ],
+      "dependencies": [
+        "U1",
+        "mempalace#73",
+        "mempalace#74",
+        "mempalace#76",
+        "mempalace#40",
+        "restricted memory-coordinator dependency",
+        "restricted memory-coordinator dependency",
+        "restricted memory-coordinator dependency"
+      ],
+      "acceptance": [
+        "Mandatory receipt failure remains red while owned cleanup and subsequent setup proceed.",
+        "Natural-run snapshot, restored application query and any offsite copy share exact generation/content identity.",
+        "Declared cadence and failure telemetry are observed; no source test is called live adoption."
+      ],
+      "delivery": "Existing publication/runtime owners, exact task definition and rollback readback under separate approval.",
+      "owner": "Existing lifecycle publisher and backup/recovery custodians."
+    }
+  ],
+  "itemRows": [
+    {
+      "number": 57,
+      "kind": "issue",
+      "url": "https://github.com/iMelki/mempalace/issues/57",
+      "disposition": "Inaccessible or deleted; requirements and disposition unknown.",
+      "nextAction": "Recover an existing retained record or preserve the explicit inaccessible exception.",
+      "evidenceState": "retained-historical-assessment; not refreshed live",
+      "assessmentCompleteness": "semantic summary recovered; original source/read boundaries apply",
+      "ownerOrGap": "Existing issue/source owner; accepted pickup not established by this ledger.",
+      "currentSourceRuntimeRepair": "Not executed by this planning work."
+    },
+    {
+      "number": 62,
+      "kind": "issue",
+      "url": "https://github.com/iMelki/mempalace/issues/62",
+      "disposition": "Inaccessible or deleted; requirements and disposition unknown.",
+      "nextAction": "Recover an existing retained record or preserve the explicit inaccessible exception.",
+      "evidenceState": "retained-historical-assessment; not refreshed live",
+      "assessmentCompleteness": "semantic summary recovered; original source/read boundaries apply",
+      "ownerOrGap": "Existing issue/source owner; accepted pickup not established by this ledger.",
+      "currentSourceRuntimeRepair": "Not executed by this planning work."
+    },
+    {
+      "number": 72,
+      "kind": "pull_request",
+      "url": "https://github.com/iMelki/mempalace/pull/72",
+      "disposition": "Historically superseded by merged PR77.",
+      "nextAction": "Preserve supersession lineage; do not duplicate this candidate.",
+      "evidenceState": "retained-historical-assessment; not refreshed live",
+      "assessmentCompleteness": "semantic summary recovered; original source/read boundaries apply",
+      "ownerOrGap": "Existing issue/source owner; accepted pickup not established by this ledger.",
+      "currentSourceRuntimeRepair": "Not executed by this planning work."
+    },
+    {
+      "number": 77,
+      "kind": "pull_request",
+      "url": "https://github.com/iMelki/mempalace/pull/77",
+      "disposition": "Snapshot ownership source historically merged.",
+      "nextAction": "Use its source contract in the existing snapshot qualification plan; installed behavior is unverified.",
+      "evidenceState": "retained-historical-assessment; not refreshed live",
+      "assessmentCompleteness": "semantic summary recovered; original source/read boundaries apply",
+      "ownerOrGap": "Existing issue/source owner; accepted pickup not established by this ledger.",
+      "currentSourceRuntimeRepair": "Not executed by this planning work."
+    },
+    {
+      "number": 78,
+      "kind": "pull_request",
+      "url": "https://github.com/iMelki/mempalace/pull/78",
+      "disposition": "Intervening-mine recovery correction historically merged.",
+      "nextAction": "Reuse receipt lineage and reject unrelated output heads; actual mining remains separately authorized.",
+      "evidenceState": "retained-historical-assessment; not refreshed live",
+      "assessmentCompleteness": "semantic summary recovered; original source/read boundaries apply",
+      "ownerOrGap": "Existing issue/source owner; accepted pickup not established by this ledger.",
+      "currentSourceRuntimeRepair": "Not executed by this planning work."
+    },
+    {
+      "number": 81,
+      "kind": "pull_request",
+      "url": "https://github.com/iMelki/mempalace/pull/81",
+      "disposition": "Historical CI routing candidate required exact-head reviews.",
+      "nextAction": "Reconcile current state through the existing owner before any source or publication action.",
+      "evidenceState": "retained-historical-assessment; not refreshed live",
+      "assessmentCompleteness": "semantic summary recovered; original source/read boundaries apply",
+      "ownerOrGap": "Existing issue/source owner; accepted pickup not established by this ledger.",
+      "currentSourceRuntimeRepair": "Not executed by this planning work."
+    }
+  ],
+  "missingEvidenceRequests": [
+    {
+      "id": "mempalace-evidence-1",
+      "requestedArtifact": "Original75 semantic rows and exact discussion counts",
+      "owner": "Existing original audit custodian and fleet coordinator",
+      "action": "Recover the existing exact packet, source membership or explicit scope exception; do not repeat completed issue/source reads.",
+      "completeWhen": "A retained artifact is joined by identity and provenance, or a named unrecoverable/inaccessible exception is accepted.",
+      "status": "open evidence request; not a product defect or release execution block"
+    },
+    {
+      "id": "mempalace-evidence-2",
+      "requestedArtifact": "Complete source manifest",
+      "owner": "Existing original audit custodian and fleet coordinator",
+      "action": "Recover the existing exact packet, source membership or explicit scope exception; do not repeat completed issue/source reads.",
+      "completeWhen": "A retained artifact is joined by identity and provenance, or a named unrecoverable/inaccessible exception is accepted.",
+      "status": "open evidence request; not a product defect or release execution block"
+    },
+    {
+      "id": "mempalace-evidence-3",
+      "requestedArtifact": "57/62 inaccessible unknowns",
+      "owner": "Existing original audit custodian and fleet coordinator",
+      "action": "Recover the existing exact packet, source membership or explicit scope exception; do not repeat completed issue/source reads.",
+      "completeWhen": "A retained artifact is joined by identity and provenance, or a named unrecoverable/inaccessible exception is accepted.",
+      "status": "open evidence request; not a product defect or release execution block"
+    }
+  ],
+  "publicationState": "Prepared documentation; existing publisher owns branch mapping, current preimage reconciliation, publication and saved-state readback.",
+  "evidenceLimits": [
+    "Historical item states and candidate refs require owning-lane refresh before action.",
+    "Recovered source or successful tests do not prove installed selection or useful operation.",
+    "Underlying missing assessment records are actionable ledger gaps, not a reason to leave the plan unspecified."
+  ],
+  "privacy": "Restricted original exports and machine-local evidence are not included in this payload."
+}
