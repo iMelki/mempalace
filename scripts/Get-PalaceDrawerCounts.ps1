@@ -49,10 +49,13 @@ function Get-PalaceDrawerMetrics {
 
     if (Test-Path -LiteralPath $sqlitePath) {
         $pythonScript = @'
-import sys, json, os, sqlite3
+import sys, json, os, sqlite3, pathlib
 
 sqlite_path = sys.argv[1]
-conn = sqlite3.connect(f"file:{sqlite_path}?mode=ro", uri=True)
+# as_uri() percent-encodes '#' and '?', which would otherwise end the filename
+# and drop mode=ro.
+uri = pathlib.Path(sqlite_path).resolve().as_uri() + "?mode=ro"
+conn = sqlite3.connect(uri, uri=True)
 try:
     rows = conn.execute("""
         SELECT COALESCE(w.string_value, '?'), COUNT(*)
@@ -70,9 +73,13 @@ finally:
         try {
             $pyOutput = $pythonScript | python - $sqlitePath 2>$null
             if ($LASTEXITCODE -eq 0 -and $pyOutput) {
-                $rawHashtable = $pyOutput | ConvertFrom-Json -AsHashtable
-                if ($rawHashtable) {
-                    $wingCounts = $rawHashtable
+                # ConvertFrom-Json -AsHashtable needs PowerShell 6+, so build the
+                # table from the object's properties to keep Windows PowerShell 5.1 working.
+                $parsed = ($pyOutput -join "`n") | ConvertFrom-Json
+                foreach ($prop in $parsed.PSObject.Properties) {
+                    $wingCounts[$prop.Name] = [int]$prop.Value
+                }
+                if ($wingCounts.Count -gt 0) {
                     $sqliteAvailable = $true
                 }
             }
