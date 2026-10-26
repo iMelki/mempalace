@@ -46,6 +46,8 @@ function Get-PalaceDrawerMetrics {
     $wingCounts = @{}
     $totalDrawers = 0
     $sqliteAvailable = $false
+    $sqliteError = ''
+    $sqliteQueried = $false
 
     if (Test-Path -LiteralPath $sqlitePath) {
         $pythonScript = @'
@@ -73,9 +75,10 @@ finally:
         try {
             $pyOutput = $pythonScript | python - $sqlitePath 2>$null
             if ($LASTEXITCODE -eq 0 -and $pyOutput) {
-                # ConvertFrom-Json -AsHashtable needs PowerShell 6+, so build the
-                # table from the object's properties to keep Windows PowerShell 5.1 working.
+                # The hashtable switch of ConvertFrom-Json needs PowerShell 6+, so build
+                # the table from the object's properties to keep Windows PowerShell 5.1 working.
                 $parsed = ($pyOutput -join "`n") | ConvertFrom-Json
+                $sqliteQueried = $true
                 foreach ($prop in $parsed.PSObject.Properties) {
                     $wingCounts[$prop.Name] = [int]$prop.Value
                 }
@@ -83,7 +86,13 @@ finally:
                     $sqliteAvailable = $true
                 }
             }
-        } catch { }
+        } catch {
+            $sqliteError = $_.Exception.Message
+        }
+        if (-not $sqliteQueried) {
+            # Warning stream, so -Json output on stdout stays parseable.
+            Write-Warning "chroma.sqlite3 exists at '$sqlitePath' but could not be queried; counts below come from the filesystem fallback and may read 0. $sqliteError"
+        }
     }
 
     foreach ($wing in $TargetWings) {
