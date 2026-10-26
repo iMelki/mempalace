@@ -27,6 +27,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Make the palace drawer-count audit read the right database (PR #83).**
+  `scripts/Get-PalaceDrawerCounts.ps1` opens `chroma.sqlite3` through an escaped
+  file URI, so `#`, `%` or `?` in the palace path no longer truncate the filename
+  or create a sibling database. It parses the query result without
+  `ConvertFrom-Json -AsHashtable`, so Windows PowerShell 5.1 works (no PowerShell 7
+  requirement), and it warns when the database exists but cannot be queried instead
+  of silently reporting every wing as 0.
+
 - **Recover later mines after a follow-up rewrite crashes at preparation (#75, PR #78).**
   Recheck the saved receipt pin and original committed preparation even while a
   new rewrite is pending. Retain that original evidence across recovery advances;
