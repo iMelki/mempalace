@@ -17,7 +17,9 @@ reviews:
     # Fleet PRs open as drafts, so include them.
     drafts: true
     # The default branch (main) is always reviewed. Also review PRs that
-    # target the dev integration branch.
+    # target this fork's dev integration branch, and develop, which
+    # CONTRIBUTING.md names as the upstream PR target.
     base_branches:
       - "^dev$"
+      - "^develop$"
       - "^main$"
