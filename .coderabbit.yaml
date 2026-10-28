@@ -1,0 +1,23 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+#
+# Repository-level CodeRabbit settings.
+#
+# A committed .coderabbit.yaml takes priority over the CodeRabbit organization
+# UI settings, which currently skip every PR without the coderabbit-ready label.
+# Configuration inheritance is off by default, so any setting not listed here
+# uses CodeRabbit's schema default.
+#
+# Docs: https://docs.coderabbit.ai/configuration/auto-review
+#       https://docs.coderabbit.ai/guides/configuration-overview
+reviews:
+  auto_review:
+    # Review PRs automatically, with no label gate.
+    enabled: true
+    labels: []
+    # Fleet PRs open as drafts, so include them.
+    drafts: true
+    # The default branch (main) is always reviewed. Also review PRs that
+    # target the dev integration branch.
+    base_branches:
+      - "^dev$"
+      - "^main$"
