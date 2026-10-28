@@ -2,10 +2,12 @@
 #
 # Repository-level CodeRabbit settings.
 #
-# A committed .coderabbit.yaml takes priority over the CodeRabbit organization
-# UI settings, which currently skip every PR without the coderabbit-ready label.
-# Configuration inheritance is off by default, so any setting not listed here
-# uses CodeRabbit's schema default.
+# A committed .coderabbit.yaml (priority 2) overrides the CodeRabbit
+# organization UI settings (priority 5), which skip every PR without the
+# coderabbit-ready label. Organization global overrides (priority 1) still
+# win over this file. Configuration inheritance is off by default, so a
+# setting not listed here and not set by a global override uses CodeRabbit's
+# schema default.
 #
 # Docs: https://docs.coderabbit.ai/configuration/auto-review
 #       https://docs.coderabbit.ai/guides/configuration-overview
