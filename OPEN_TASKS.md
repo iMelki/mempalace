@@ -1,10 +1,36 @@
 # MemPalace Open Tasks
 
-Last updated: 2026-10-12
+Last updated: 2026-10-17
 
 This file is the durable local index for active `mempalace` issues.
 
 ## Active Issues
+
+- [#73 - Expose generation-bound backend worker and permit telemetry](https://github.com/iMelki/mempalace/issues/73)
+  - Isolated source candidate extracts the existing gate without changing its
+    cancellation/concurrency behavior and adds authenticated memory-only work
+    state. The narrow admission-checkpoint accounting repair and nonce-outside-lock
+    regressions now pass actual red/restored controls and the entire three-module
+    source cohort: 83 passed, zero failed/skipped/deselected (27 backend-call,
+    51 HTTP, five dispatch), plus Ruff check/format-check. Exact d4 source review
+    and ordinary publication passed (2,154 tests / nine skips / 106 deselections).
+    [Draft PR #74](https://github.com/iMelki/mempalace/pull/74) remains held:
+    hosted run 37884938886 fails the same six fixture cases on Linux, macOS and
+    Windows with AnyIO 4.15.1. Five mutate a now-slotted limiter instance; the
+    notified-waiter fixture assumes the older zero-borrower wake-up order.
+    A test-only portability remedy delegates real acquire/release, preserves
+    fail-closed negatives and adds both pending-admission statistics cases.
+    Corrected local candidate qualification now passes all 85 cases (29 backend,
+    51 HTTP, five dispatch), zero failures/skips/deselections, plus Ruff check and
+    format-check. This is the existing AnyIO 4.13 profile, not refreshed hosted
+    4.15.1 proof. Normal corrective publication and fresh hosted proof remain
+    pending. No production code, dependency pin, coverage floor or hook deadline
+    is changed. Human review, CTO landing and installed/live adoption remain
+    separate; no mining handback is claimed.
+  - Source-only follow-up: research the single inherited Starlette TestClient
+    `httpx` deprecation warning at `tests/test_mcp_http.py:24` and an evidence-backed
+    compatibility plan; no dependency change/install is authorized by this note.
+    Contract and boundaries: `docs/mcp-backend-work-state.md`.
 
 - [#75 - Recover completed-prefix refresh after a journal-less successor mine](https://github.com/iMelki/mempalace/issues/75)
   - [PR #78](https://github.com/iMelki/mempalace/pull/78) follow-up corrects the
