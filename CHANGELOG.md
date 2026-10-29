@@ -118,6 +118,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Native backend worker/permit observations (#73), source candidate.** The
+  authenticated memory-only `/__memsys/work-state` route observes the exact
+  native gate, with opaque app/attempt generations, bounded lifecycle records
+  and conservative unknown/null accounting. An abandoned caller is not reported
+  as a finished worker. Existing cancellation and permit ownership are retained;
+  this is not semantic readiness, installed adoption or runtime recovery proof.
+  Final source qualification passed all 83 tests across the complete backend-call,
+  HTTP and dispatch modules, plus Ruff check/format-check and the actual
+  admission-checkpoint red/restored proof. One inherited Starlette TestClient
+  deprecation warning remains. Exact d4 source passed independent review and
+  ordinary publication (2,154 passed / nine skipped / 106 deselected), but draft
+  PR #74 is not merge-ready: all three hosted platforms expose six AnyIO 4.15.1
+  fixture-portability failures. The test-only remedy replaces instance mutation
+  with a delegating fixture and observes both legitimate wake-up borrower counts,
+  retaining impossible-accounting negatives. Corrected local focused qualification
+  passed all 85 tests with zero failures/skips/deselections and Ruff check/format.
+  That AnyIO 4.13 profile is not hosted 4.15.1 acceptance. Corrective publication,
+  hosted acceptance, human review and CTO landing remain pending. Production
+  gate behavior, dependencies, coverage and deadlines are unchanged; no live
+  adoption is claimed.
+
 - **Bounded conversation chunks retain their parent question and stable identity
   (#49).** ChatGPT exports now have an additive per-conversation/per-turn path
   that preserves current-node and multimodal behavior while hashing provider

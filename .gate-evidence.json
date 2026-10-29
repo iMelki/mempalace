@@ -2,18 +2,6 @@
   "version": 1,
   "_doc": "Negative-proof ledger. A control is trusted only after an attributed failure on a deliberate break and a verified restored pass.",
   "exclude": [],
-  "snapshotLeaseQualification": {
-    "identitySourceRevision": "37f6b4826e1a01ed9ac6987099fba63451ce0d08",
-    "productionMutation": false,
-    "date": "2026-10-09",
-    "releaseSourceSha256": "2ce98c9d606374668940d07de8d806aa3769f4b536c6bcf758e0500aeec2ac5c",
-    "legacySourceRevision": "f79d625ce53629aa59c7eb3302d70841d310fd75",
-    "baseline": "Original source graceful retention assertion failed; separately reproduced actual abrupt-exit active pause and acquisition-boundary leak.",
-    "snapshotSourceSha256": "d87347a85c99cdbaf1d120b45b10ca1c79d8309dd54cfb30e83f799fa46cf9d9",
-    "sharedReaderSha256": "16a2ef9439e711337370778347a77a53627c3ed3e28150fa66d1633e56bc2c1c",
-    "focusedEvidence": "Expanded suite:67 passed and one changed-error-message assertion failed in92.22s. Corrected denial assertion then6 related cases passed,51 deselected in11.85s. All68 unique focused cases qualified; no all-green full-suite rerun claimed.",
-    "prePushGateAtSourceCheckpoint": "pending-host-pressure"
-  },
   "gates": [
     {
       "id": "snapshot-receipt-cli-weekly-outcome",
@@ -759,6 +747,53 @@
         "reason": "The fixture verifies exactly two restoration sites, then replaces them with sys.settrace(None) in an in-memory test copy. The actual interruption assertion passes, but observer custody fails. No production source, live marker or file is mutated by the break.",
         "restoredPass": "& $c77Python tests/fixtures/snapshot_trace_custody_probe.py (Join-Path $c77Temp 'restored'); exit 0; PASS: 6 interruption cases restore the observer and trace a later source call"
       }
+    },
+    {
+      "id": "backend-work-state-admission-accounting",
+      "path": "mempalace/mcp_backend_calls.py",
+      "description": "Keeps legitimate native permit-acquisition handoffs complete/busy while refusing unexplained or contradictory accounting; quiescence requires real permit return.",
+      "negativeFixture": "tests/test_mcp_backend_calls.py",
+      "fixtureScope": "Repository regression coverage. The original attributed native failure and final restored pass below were observed with the separate private Palace73AdmissionWindowProof.py control, not by claiming this pytest file produced that red.",
+      "observedFailure": {
+        "date": "2026-10-09",
+        "command": "python -B Palace73AdmissionWindowProof.py --candidate <isolated-candidate> --scratch-root <fresh-isolated-home> --expected-gate-sha256 9E54A13D5A3446DD519FC4F8D1E0EB76ECC84760597034072DB4A4C7927DA95F",
+        "commandScope": "Actual private probe argv semantics through the pinned windowless canonical launcher; only private absolute script, candidate and scratch paths are redacted. The private script is not distributed in this repository.",
+        "exitCode": 1,
+        "reason": "Actual installed AnyIO 4.13.0 acquired one native borrower before its fast-path shielded checkpoint resumed. With one pending admission and zero ledger-held permits, the first-draft gate incorrectly became sticky unknown; the actual probe failed specifically with legitimate-admission-window-rejected. The worker still completed and returned its real permit, so this was a discriminator defect, not a load/launch failure.",
+        "sourceSha256": "9E54A13D5A3446DD519FC4F8D1E0EB76ECC84760597034072DB4A4C7927DA95F",
+        "receiptSha256": "C359E00241892676B295CCB93BCE1D5A707002CFD390844AE8E10AD1EB43638A",
+        "stdoutSha256": "6A875709B1E7DDF3F6A7F4E217D5131D6D1D97942BA394FB4AF35B4173B891C7",
+        "probeSha256": "169C998C3573E5F8A9B320922C223DC6321BB86AB08C027A66C9367C1B96B796",
+        "anyioSourceSha256": "92EAA5836B0152C15D818F34C520C0C3AD06C7FE1634297D8922F95E563A9425",
+        "restoredPass": "Same private probe and real AnyIO checkpoint invocation, with --expected-gate-sha256 E247D869D10F2ECA2DB0D3B8A3606F6753D82C52DA14F9F15502B53A027D421F: native exit 0; complete/busy at borrowed=1, pending=1, held=0, then complete/quiescent with seven known zero counts after actual permit return. No live palace query or service recovery was performed. The full three-module source cohort subsequently passed 83/83 with no skipped/deselected cases.",
+        "restoredEvidence": {
+          "date": "2026-10-09",
+          "exitCode": 0,
+          "sourceSha256": "E247D869D10F2ECA2DB0D3B8A3606F6753D82C52DA14F9F15502B53A027D421F",
+          "testSha256": "9AE778C34F31F85F34B4DC0C58A0A159159EB21ED11ACBA9317CC0BE99B3C68E",
+          "receiptSha256": "0E4DBE59F22F6D9DFF43A786D1F201350106E2D2D362D4CA97C651CA61CD97DA",
+          "stdoutSha256": "C3A796320D8BDD992FBF9625DBB320C94867848C61F784ABB5CF7DDF15EDE3CD",
+          "sourceCohortReceiptSha256": "D96B24B1B370599AB3BBB949202FE317A8453FCC48890EDD85E39346996993F1",
+          "passed": 83,
+          "failed": 0,
+          "skipped": 0,
+          "deselected": 0,
+          "warnings": 1,
+          "scope": "Complete three-module isolated fixture cohort only; not full-repository, publication, installation or live recall acceptance."
+        }
+      }
     }
-  ]
+  ],
+  "snapshotLeaseQualification": {
+    "identitySourceRevision": "37f6b4826e1a01ed9ac6987099fba63451ce0d08",
+    "productionMutation": false,
+    "date": "2026-10-09",
+    "releaseSourceSha256": "2ce98c9d606374668940d07de8d806aa3769f4b536c6bcf758e0500aeec2ac5c",
+    "legacySourceRevision": "f79d625ce53629aa59c7eb3302d70841d310fd75",
+    "baseline": "Original source graceful retention assertion failed; separately reproduced actual abrupt-exit active pause and acquisition-boundary leak.",
+    "snapshotSourceSha256": "d87347a85c99cdbaf1d120b45b10ca1c79d8309dd54cfb30e83f799fa46cf9d9",
+    "sharedReaderSha256": "16a2ef9439e711337370778347a77a53627c3ed3e28150fa66d1633e56bc2c1c",
+    "focusedEvidence": "Expanded suite:67 passed and one changed-error-message assertion failed in92.22s. Corrected denial assertion then6 related cases passed,51 deselected in11.85s. All68 unique focused cases qualified; no all-green full-suite rerun claimed.",
+    "prePushGateAtSourceCheckpoint": "pending-host-pressure"
+  }
 }
