@@ -218,9 +218,14 @@ def full_copy_proof(database, path, snapshot, result, deadline):
     check_deadline(deadline)
 
 
-def write_snapshot_json(target, result):
-    """Publish JSON by exclusive temporary file and replace; never truncate a link."""
-    no_links(target, target.parent.parent)
+def write_snapshot_json(target, result, boundary=None):
+    """Publish JSON by exclusive temporary file and replace; never truncate a link.
+
+    ``boundary`` is the writer-accepted directory. It defaults to the parent of
+    the generation directory; a root-level sidecar passes the backup root so a
+    junction or cloud reparse root is still accepted as its own boundary.
+    """
+    no_links(target, target.parent.parent if boundary is None else boundary)
     temporary = target.with_name(target.name + "." + uuid.uuid4().hex + ".tmp")
     with temporary.open("x", encoding="utf-8", newline="\n") as stream:
         json.dump(result, stream, ensure_ascii=True, indent=2, sort_keys=True)
@@ -228,8 +233,8 @@ def write_snapshot_json(target, result):
     temporary.replace(target)
 
 
-def write_weekly_receipt(target, result):
-    write_snapshot_json(target, result)
+def write_weekly_receipt(target, result, boundary=None):
+    write_snapshot_json(target, result, boundary)
 
 
 def save_weekly_result(target, root, result):
@@ -237,7 +242,7 @@ def save_weekly_result(target, root, result):
     fallback = root / WEEKLY_FILENAME
     result["receiptLocation"] = "backup-root" if target == fallback else "generation"
     try:
-        write_weekly_receipt(target, result)
+        write_weekly_receipt(target, result, root if target == fallback else None)
     except (PalaceSnapshotError, OSError) as exc:
         if target == fallback:
             raise
@@ -254,7 +259,7 @@ def save_weekly_result(target, root, result):
             write_snapshot_json(invalidation, result)
         except (PalaceSnapshotError, OSError) as invalidation_error:
             result["invalidationWriteError"] = str(invalidation_error)
-        write_weekly_receipt(fallback, result)
+        write_weekly_receipt(fallback, result, root)
 
 
 def weekly_result(budget_seconds):

@@ -170,3 +170,16 @@ def test_weekly_accepts_real_junction_backup_root(tmp_path):
     readback = backup.verify_snapshot_receipt(alias / "one" / backup.SNAPSHOT_RECEIPT_FILENAME)
     assert readback["valid"]
     assert readback["weeklyVerification"]["status"] == "complete"
+
+
+def test_weekly_root_fallback_accepts_reparse_backup_root(tmp_path, monkeypatch):
+    """Bugbot: a root-level sidecar must use the backup root as its boundary."""
+    live, staging, _ = stage(tmp_path)
+    root = staging.parent
+    original = backup._is_link_or_reparse
+    monkeypatch.setattr(backup, "_is_link_or_reparse", lambda path: path == root or original(path))
+    result = {"status": "error", "message": "no generation"}
+    verification.save_weekly_result(root / verification.WEEKLY_FILENAME, root, result)
+    written = json.loads((root / verification.WEEKLY_FILENAME).read_text())
+    assert written["receiptLocation"] == "backup-root"
+    assert written["status"] == "error"
