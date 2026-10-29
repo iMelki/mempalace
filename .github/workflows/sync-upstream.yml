@@ -9,7 +9,7 @@ on:
 jobs:
   sync:
     name: Sync fork main with MemPalace/mempalace
-    runs-on: ubuntu-latest
+    runs-on: [box-mempalace]
     permissions:
       contents: write
 
