@@ -1087,12 +1087,18 @@ def verify_snapshot_receipt(
     )
     checked = 0
     isolated = False
-    try:
-        isolated_tree(root, root.parent)
-        outside_live(root.resolve(), Path(receipt["palaceRoot"]).expanduser().resolve())
-        isolated = True
-    except (PalaceSnapshotError, OSError) as exc:
-        problems.append(f"staged-tree-isolation:{exc}")
+    palace_root = receipt.get("palaceRoot")
+    if not isinstance(palace_root, str) or not palace_root:
+        # A missing or non-string live root is a structured problem, not a
+        # KeyError/TypeError traceback; isolation stays unproven (Bugbot r4419966501).
+        problems.append(f"staged-tree-isolation:invalid-palaceRoot:{type(palace_root).__name__}")
+    else:
+        try:
+            isolated_tree(root, root.parent)
+            outside_live(root.resolve(), Path(palace_root).expanduser().resolve())
+            isolated = True
+        except (PalaceSnapshotError, OSError) as exc:
+            problems.append(f"staged-tree-isolation:{exc}")
     if isolated and root.is_dir():
         present = {p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file()}
         expected = {f["relativePath"] for f in files}

@@ -305,3 +305,23 @@ def test_recorded_live_root_blocks_fallback_even_with_wrong_caller_root(tmp_path
     with pytest.raises(backup.PalaceSnapshotError, match="backup root.*live"):
         backup.verify_weekly_snapshot(live, palace_path=tmp_path / "wrong-live")
     assert before == {p.relative_to(live): p.read_bytes() for p in live.rglob("*") if p.is_file()}
+
+
+@pytest.mark.parametrize("palace_root", ["missing", None, 123, "", ["x"]])
+def test_receipt_without_valid_palace_root_is_invalid_not_a_crash(tmp_path, palace_root):
+    live, generation, _ = stage(tmp_path)
+    receipt_path = generation / backup.SNAPSHOT_RECEIPT_FILENAME
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    if palace_root == "missing":
+        del receipt["palaceRoot"]
+    else:
+        receipt["palaceRoot"] = palace_root
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+    for verify_hashes in (False, True):
+        result = backup.verify_snapshot_receipt(receipt_path, verify_hashes=verify_hashes)
+        assert not result["valid"]
+        assert result["hashesVerified"] == 0
+        assert any(
+            p.startswith("staged-tree-isolation:invalid-palaceRoot:") for p in result["problems"]
+        )
+        assert verification.receipt_verification_exit_code(result) != 0
