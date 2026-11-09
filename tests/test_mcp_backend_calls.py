@@ -13,6 +13,9 @@ import pytest
 import mempalace.mcp_backend_calls as backend_calls
 from mempalace.mcp_backend_calls import BackendCallGate, UnobservedBackendCalls, _WorkerHandoff
 
+# A worker thread that never reaches its handler is a real hang; fail within this bound.
+WORKER_ENTRY_TIMEOUT_SECONDS = 5
+
 
 def _registry(handler):
     return {
@@ -41,6 +44,33 @@ async def _wait(gate, predicate):
             await anyio.sleep(0)
 
 
+async def _entered(handler):
+    """Block, without spinning, until a worker thread has entered ``handler``.
+
+    Polling for worker-thread progress with ``anyio.sleep(0)`` never idles the
+    event-loop thread: every iteration drops and immediately retakes the GIL,
+    and the gate snapshot retakes the ledger lock, so the worker being waited
+    for must keep winning races against the poller. Under coverage that spin
+    took p99 ~300 ms (max ~650 ms) to see a started worker, against ~1 ms
+    (max ~3.5 ms) for this blocking wait; on Linux CI one spin exceeded
+    ``_wait``'s 3 s deadline. Waiting on the handler's own entry event leaves
+    the loop idle while the worker runs. The waiter has its own limiter so a
+    saturated default thread limiter cannot hold it back.
+    """
+    entered = await anyio.to_thread.run_sync(
+        handler.entered.wait,
+        WORKER_ENTRY_TIMEOUT_SECONDS,
+        limiter=anyio.CapacityLimiter(1),
+    )
+    assert entered, f"worker did not enter the handler within {WORKER_ENTRY_TIMEOUT_SECONDS}s"
+
+
+async def _dispatched(gate, handler):
+    await _entered(handler)
+    # dispatch-started is recorded before the handler is called, so this holds at once.
+    return await _wait(gate, lambda s: s["counts"]["activeDispatches"] == 1)
+
+
 async def _cancellable(gate, done, *, task_status=anyio.TASK_STATUS_IGNORED):
     try:
         with anyio.CancelScope() as scope:
@@ -53,10 +83,12 @@ async def _cancellable(gate, done, *, task_status=anyio.TASK_STATUS_IGNORED):
 class _HeldHandler:
     def __init__(self):
         self.release = threading.Event()
+        self.entered = threading.Event()
         self.calls = 0
 
     def __call__(self, value=None):
         self.calls += 1
+        self.entered.set()
         if not self.release.wait(5):
             raise AssertionError("Disposable worker was not released")
         return value
@@ -110,7 +142,7 @@ def test_active_worker_then_actual_release_is_observed():
         try:
             async with anyio.create_task_group() as group:
                 group.start_soon(gate.run, "fixture", {"value": "fixture"})
-                state = await _wait(gate, lambda s: s["counts"]["activeDispatches"] == 1)
+                state = await _dispatched(gate, handler)
                 assert state["workerState"] == "busy"
                 assert state["counts"]["borrowedPermits"] == 1
                 handler.release.set()
@@ -137,7 +169,7 @@ def test_queued_cancellation_never_releases_another_workers_permit():
         try:
             async with anyio.create_task_group() as group:
                 group.start_soon(gate.run, "fixture", {})
-                await _wait(gate, lambda s: s["counts"]["activeDispatches"] == 1)
+                await _dispatched(gate, handler)
                 scope = await group.start(_cancellable, gate, done)
                 queued = await _wait(gate, lambda s: s["counts"]["gateWaiters"] == 1)
                 assert queued["counts"]["admissionsPending"] == 1
@@ -165,7 +197,7 @@ def test_abandoned_worker_stays_busy_and_blocks_second_dispatch():
         try:
             async with anyio.create_task_group() as group:
                 scope = await group.start(_cancellable, gate, done)
-                await _wait(gate, lambda s: s["counts"]["activeDispatches"] == 1)
+                await _dispatched(gate, handler)
                 scope.cancel()
                 await done.wait()
                 state = gate.snapshot()
@@ -219,9 +251,7 @@ def test_actual_default_thread_limiter_wait_is_not_a_started_worker():
         try:
             async with anyio.create_task_group() as group:
                 group.start_soon(anyio.to_thread.run_sync, blocker)
-                with anyio.fail_after(3):
-                    while blocker.calls == 0:
-                        await anyio.sleep(0)
+                await _entered(blocker)
                 scope = await group.start(_cancellable, gate, done)
                 state = await _wait(gate, lambda s: s["counts"]["workerStartsPending"] == 1)
                 assert state["counts"]["activeDispatches"] == 0
@@ -356,7 +386,7 @@ def test_active_accounting_overflow_is_sticky_unknown_not_silent_eviction():
         try:
             async with anyio.create_task_group() as group:
                 group.start_soon(gate.run, "fixture", {})
-                await _wait(gate, lambda s: s["counts"]["activeDispatches"] == 1)
+                await _dispatched(gate, handler)
                 group.start_soon(gate.run, "fixture", {})
                 await _wait(gate, lambda s: s["accounting"] == "unknown")
                 assert len(gate._ledger._active) == 1
@@ -492,7 +522,7 @@ def test_actual_notified_waiter_is_still_pending_work_before_it_resumes(monkeypa
         try:
             async with anyio.create_task_group() as group:
                 group.start_soon(gate.run, "fixture", {})
-                await _wait(gate, lambda s: s["counts"]["activeDispatches"] == 1)
+                await _dispatched(gate, handler)
                 group.start_soon(gate.run, "fixture", {})
                 await _wait(gate, lambda s: s["counts"]["gateWaiters"] == 1)
                 handler.release.set()
