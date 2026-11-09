@@ -342,6 +342,14 @@ def verify_weekly_snapshot(backup_root, *, palace_path, budget_seconds=7200):
     return result
 
 
+def _receipt_time(record, field):
+    """Parse a receipt timestamp; a missing or non-string value is an invalid receipt, not a crash."""
+    value = record.get(field)
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"weekly receipt {field} must be a nonempty string")
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
 def newer_weekly_failure(receipt_path, expected, weekly):
     """A saved failure for this receipt supersedes older complete proof."""
     root = receipt_path.parent.parent
@@ -355,8 +363,8 @@ def newer_weekly_failure(receipt_path, expected, weekly):
             raise ValueError("unexpected weekly failure schema")
         if failure.get("snapshotReceiptSha256") != expected or failure.get("status") != "error":
             continue
-        failed_at = datetime.fromisoformat(failure["generatedAt"].replace("Z", "+00:00"))
-        checked_at = datetime.fromisoformat(weekly["generatedAt"].replace("Z", "+00:00"))
+        failed_at = _receipt_time(failure, "generatedAt")
+        checked_at = _receipt_time(weekly, "generatedAt")
         if failed_at >= checked_at:
             return {"status": "failed", "problem": failure.get("message", "receipt write failed")}
     return None
@@ -385,9 +393,7 @@ def weekly_status(receipt_path, snapshot):
             return {"status": "failed", "problem": weekly.get("message", "full check incomplete")}
         if weekly.get("databaseSha256") != database_hash:
             raise ValueError("weekly database identity mismatch")
-        age = datetime.now(timezone.utc) - datetime.fromisoformat(
-            weekly["finishedAt"].replace("Z", "+00:00")
-        )
+        age = datetime.now(timezone.utc) - _receipt_time(weekly, "finishedAt")
         if age.total_seconds() < 0 or age.total_seconds() > 7 * 86400:
             return {"status": "stale", "problem": "weekly-integrity-receipt-outside-seven-days"}
         return {"status": "complete", "finishedAt": weekly["finishedAt"]}

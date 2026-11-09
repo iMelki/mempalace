@@ -127,7 +127,9 @@ def test_weekly_full_check_rejects_missing_index_rows_that_nightly_accepts(tmp_p
     assert "missing from index by_embedding_id" in output
 
 
-@pytest.mark.parametrize("breakage", ["stale", "identity", "failed", "malformed"])
+@pytest.mark.parametrize(
+    "breakage", ["stale", "identity", "failed", "malformed", "finished-null", "finished-number"]
+)
 def test_weekly_status_never_accepts_bad_receipt(tmp_path, breakage):
     from datetime import datetime, timedelta, timezone
 
@@ -141,11 +143,31 @@ def test_weekly_status_never_accepts_bad_receipt(tmp_path, breakage):
         weekly["snapshotReceiptSha256"] = "sha256:" + "0" * 64
     elif breakage == "failed":
         weekly["status"] = "error"
+    elif breakage == "finished-null":
+        weekly["finishedAt"] = None
+    elif breakage == "finished-number":
+        weekly["finishedAt"] = 1731100000
     else:
         weekly = []
     path.write_text(json.dumps(weekly))
     result = backup.verify_snapshot_receipt(staging / backup.SNAPSHOT_RECEIPT_FILENAME)
     assert result["weeklyVerification"]["status"] != "complete"
+    if breakage.startswith("finished-"):
+        # A non-string timestamp is an invalid receipt, reported as data, not a traceback.
+        assert result["weeklyVerification"]["status"] == "invalid"
+        assert "finishedAt must be a nonempty string" in result["weeklyVerification"]["problem"]
+
+
+def test_weekly_failure_sidecar_with_non_string_timestamp_is_invalid_not_a_crash(tmp_path):
+    live, staging, _ = stage(tmp_path)
+    backup.verify_weekly_snapshot(staging.parent, palace_path=live, budget_seconds=30)
+    receipt_path = staging / backup.SNAPSHOT_RECEIPT_FILENAME
+    weekly = json.loads((staging / "weekly-integrity-receipt.json").read_text())
+    failure = dict(weekly, status="error", generatedAt=None, message="write failed")
+    (staging / "weekly-integrity-invalidation.json").write_text(json.dumps(failure))
+    result = backup.verify_snapshot_receipt(receipt_path)
+    assert result["weeklyVerification"]["status"] == "invalid"
+    assert "generatedAt must be a nonempty string" in result["weeklyVerification"]["problem"]
 
 
 @pytest.mark.parametrize("producer_now", ["2026-10-13T00:00:00Z", "2040-01-01T00:00:00Z"])
