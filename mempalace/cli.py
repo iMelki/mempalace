@@ -852,7 +852,13 @@ def cmd_backup_snapshot(args):
     """
     import json
 
-    from .backup_snapshot import PalaceSnapshotError, stage_palace_snapshot, verify_snapshot_receipt
+    from .backup_snapshot import (
+        PalaceSnapshotError,
+        _print,
+        stage_palace_snapshot,
+        verify_snapshot_receipt,
+    )
+    from .snapshot_verification import receipt_verification_exit_code
 
     palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
     as_json = getattr(args, "json", False)
@@ -864,15 +870,10 @@ def cmd_backup_snapshot(args):
                 staged_root=getattr(args, "staged_root", None) or None,
                 verify_hashes=not getattr(args, "skip_hash_verification", False),
             )
-            if as_json:
-                print(json.dumps(result, ensure_ascii=True, separators=(",", ":"), sort_keys=True))
-            else:
-                print(f"MemPalace snapshot verification: valid={result['valid']}")
-                print(f"  Files: {result['fileCount']}  hashed={result['hashesVerified']}")
-                for problem in result["problems"]:
-                    print(f"  PROBLEM {problem}")
-            if not result["valid"]:
-                sys.exit(2)
+            _print(result, as_json)
+            code = receipt_verification_exit_code(result)
+            if code:
+                sys.exit(code)
             return
 
         if not getattr(args, "staging_dir", None):

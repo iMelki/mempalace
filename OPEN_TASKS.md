@@ -6,6 +6,25 @@ This file is the durable local index for active `mempalace` issues.
 
 ## Active Issues
 
+- maintainer's private tracker
+  - S572b implements the CTO's nightly quick-check / weekly full-integrity split
+    locally on top of `2742ab49`. Public push/PR approval and live installation
+    are pending. Weekly health consumption and new task registration remain
+    runtime-owner work; no live changes are authorized by this candidate.
+    See the [source contract](docs/research/nightly-weekly-snapshot-verification.md).
+  - The SQLite snapshot helper belongs to this fork. Production-size copy checks
+    completed with both the original helper and a larger-cache prototype; the
+    prototype did not improve total time and was rejected. No timing fix is proven.
+    The draft investigation and real corruption fixtures preserve the evidence.
+    Next: capture actual API/commit/integrity phase boundaries and worker metrics
+    under #569 before selecting a fix. Capacity, lease ownership and full-generation
+    recovery proof remain separate gates. Owner: diagnosis lane and runtime backup
+    owner, with acting CTO review. See the
+    [investigation](docs/research/snapshot-budget-2026-10-11.md).
+    [#40](https://github.com/iMelki/mempalace/issues/40) owns the separate empty
+    logical-count proof, and maintainer's private tracker
+    owns incomplete worker observability.
+
 - [#73 - Expose generation-bound backend worker and permit telemetry](https://github.com/iMelki/mempalace/issues/73)
   - Isolated source candidate extracts the existing gate without changing its
     cancellation/concurrency behavior and adds authenticated memory-only work

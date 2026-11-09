@@ -4,164 +4,203 @@
   "exclude": [],
   "gates": [
     {
-      "id": "backend-work-state-admission-accounting",
-      "path": "mempalace/mcp_backend_calls.py",
-      "description": "Keeps legitimate native permit-acquisition handoffs complete/busy while refusing unexplained or contradictory accounting; quiescence requires real permit return.",
-      "negativeFixture": "tests/test_mcp_backend_calls.py",
-      "fixtureScope": "Repository regression coverage. The original attributed native failure and final restored pass below were observed with the separate private Palace73AdmissionWindowProof.py control, not by claiming this pytest file produced that red.",
-      "observedFailure": {
-        "date": "2026-10-09",
-        "command": "python -B Palace73AdmissionWindowProof.py --candidate <isolated-candidate> --scratch-root <fresh-isolated-home> --expected-gate-sha256 9E54A13D5A3446DD519FC4F8D1E0EB76ECC84760597034072DB4A4C7927DA95F",
-        "commandScope": "Actual private probe argv semantics through the pinned windowless canonical launcher; only private absolute script, candidate and scratch paths are redacted. The private script is not distributed in this repository.",
-        "exitCode": 1,
-        "reason": "Actual installed AnyIO 4.13.0 acquired one native borrower before its fast-path shielded checkpoint resumed. With one pending admission and zero ledger-held permits, the first-draft gate incorrectly became sticky unknown; the actual probe failed specifically with legitimate-admission-window-rejected. The worker still completed and returned its real permit, so this was a discriminator defect, not a load/launch failure.",
-        "sourceSha256": "9E54A13D5A3446DD519FC4F8D1E0EB76ECC84760597034072DB4A4C7927DA95F",
-        "receiptSha256": "C359E00241892676B295CCB93BCE1D5A707002CFD390844AE8E10AD1EB43638A",
-        "stdoutSha256": "6A875709B1E7DDF3F6A7F4E217D5131D6D1D97942BA394FB4AF35B4173B891C7",
-        "probeSha256": "169C998C3573E5F8A9B320922C223DC6321BB86AB08C027A66C9367C1B96B796",
-        "anyioSourceSha256": "92EAA5836B0152C15D818F34C520C0C3AD06C7FE1634297D8922F95E563A9425",
-        "restoredPass": "Same private probe and real AnyIO checkpoint invocation, with --expected-gate-sha256 E247D869D10F2ECA2DB0D3B8A3606F6753D82C52DA14F9F15502B53A027D421F: native exit 0; complete/busy at borrowed=1, pending=1, held=0, then complete/quiescent with seven known zero counts after actual permit return. No live palace query or service recovery was performed. The full three-module source cohort subsequently passed 83/83 with no skipped/deselected cases.",
-        "restoredEvidence": {
-          "date": "2026-10-09",
-          "exitCode": 0,
-          "sourceSha256": "E247D869D10F2ECA2DB0D3B8A3606F6753D82C52DA14F9F15502B53A027D421F",
-          "testSha256": "9AE778C34F31F85F34B4DC0C58A0A159159EB21ED11ACBA9317CC0BE99B3C68E",
-          "receiptSha256": "0E4DBE59F22F6D9DFF43A786D1F201350106E2D2D362D4CA97C651CA61CD97DA",
-          "stdoutSha256": "C3A796320D8BDD992FBF9625DBB320C94867848C61F784ABB5CF7DDF15EDE3CD",
-          "sourceCohortReceiptSha256": "D96B24B1B370599AB3BBB949202FE317A8453FCC48890EDD85E39346996993F1",
-          "passed": 83,
-          "failed": 0,
-          "skipped": 0,
-          "deselected": 0,
-          "warnings": 1,
-          "scope": "Complete three-module isolated fixture cohort only; not full-repository, publication, installation or live recall acceptance."
-        }
-      }
-    },
-    {
-      "id": "mine-prefix-grok-five-step-prepared-rewrite",
-      "path": "mempalace/mine_refresh_recovery.py",
-      "description": "The exact P/F/U/G sequence recovers a later mine after a crashed pending follow-up rewrite.",
-      "negativeFixture": "tests/fixtures/mine_refresh_grok_sequence.py",
+      "id": "snapshot-receipt-cli-weekly-outcome",
+      "path": "mempalace/backup_snapshot.py",
+      "description": "Both caller entrypoints must expose weekly status and return nonzero on failure or missing/stale warning; nightly valid remains separate.",
+      "negativeFixture": "tests/test_snapshot_review79.py",
       "observedFailure": {
         "date": "2026-10-12",
-        "command": "python -u tests/fixtures/mine_refresh_grok_sequence.py (exported original head 72d07e326338d4749c7ff2c9932cf4128f63d15e)",
+        "command": "python -B -m pytest -q tests/test_snapshot_review79.py tests/test_snapshot_integrity_contract.py tests/test_snapshot_quick_weekly.py -k \"receipt_cli_exposes or accepts_writer or accepts_real_junction or inside_generation or corruption_near or retired_integrity or newest_generation or integrity_reader_preserves or production_integrity_requires\"",
         "exitCode": 1,
-        "output": "MineProgressError: pending refresh has no matching committed refresh ancestor; 1 failed, 2 warnings in 15.89s",
-        "reason": "Original production source was exported and verified against its Git blob, with only the new fixture/helpers copied in. A hard exit after R1(P), a mine of F, a hard exit after durable prepared(U), then a mine of G leave the original resume wedged. Each receipt predecessor and byte-version distinction is read back before the failing resume.",
-        "restoredPass": "python -u tests/fixtures/mine_refresh_grok_sequence.py (fixed production source); exit 0; 1 passed, 2 warnings in 20.60s; final receipt, suffix completion, original preparation, immutable events and idempotence read back"
+        "output": "Native receipt CLIs: assert 0 == 2 for failed/invalid weekly proof; assert 0 == 3 for missing/stale proof. Command CLI also omitted Weekly full integrity. Combined pre-fix run: 25 failed, 10 passed, 31 deselected in 108.35s.",
+        "reason": "Both caller entrypoints must expose weekly status and return nonzero on failure or missing/stale warning; nightly valid remains separate.",
+        "restoredPass": "python -B -m pytest -q tests/test_snapshot_review79.py tests/test_snapshot_integrity_contract.py tests/test_snapshot_quick_weekly.py tests/test_backup_snapshot.py; exit 0; 104 passed, 1 skipped in 126.89s"
       }
     },
     {
-      "id": "mine-prefix-prepared-rewrite-saved-recovery",
-      "path": "mempalace/mine_refresh_recovery.py",
-      "description": "Pending follow-up rewrites can recover through verified original preparation and saved receipt pins.",
-      "negativeFixture": "tests/test_mine_refresh_recovery_interleavings.py",
+      "id": "snapshot-command-cli-weekly-outcome",
+      "path": "mempalace/cli.py",
+      "description": "Package command dispatch shares the native module renderer and weekly outcome classifier.",
+      "negativeFixture": "tests/test_snapshot_review79.py",
       "observedFailure": {
         "date": "2026-10-12",
-        "command": "python -u -m pytest tests/test_mine_refresh_recovery_interleavings.py -k prepared -q -o faulthandler_timeout=90",
+        "command": "python -B -m pytest -q tests/test_snapshot_review79.py tests/test_snapshot_integrity_contract.py tests/test_snapshot_quick_weekly.py -k \"receipt_cli_exposes or accepts_writer or accepts_real_junction or inside_generation or corruption_near or retired_integrity or newest_generation or integrity_reader_preserves or production_integrity_requires\"",
         "exitCode": 1,
-        "output": "MineProgressError: pending refresh has no matching committed refresh ancestor; 6 failed, 2 passed, 6 deselected, 16 warnings in 95.30s",
-        "reason": "At reviewed head 72d07e326338d4749c7ff2c9932cf4128f63d15e, the child exits 31 after a follow-up rewrite's durable prepared event, before COMPLETE. A later writer changes bytes or configuration, and all six combinations wedge on the new pending snapshot despite valid saved/original evidence.",
-        "restoredPass": "python -u -m pytest tests/test_mine_refresh.py tests/test_mine_refresh_saved_lineage.py tests/test_mine_refresh_recovery_interleavings.py tests/test_mine_refresh_saved_pin.py tests/test_mine_progress.py -q -o faulthandler_timeout=90; exit 0; 71 passed, 114 warnings in 443.29s; all twelve later-writer crash-point cases pass, including all six prepared-crash cases, with immutable earlier events and repeated-resume readback"
+        "output": "Native receipt CLIs: assert 0 == 2 for failed/invalid weekly proof; assert 0 == 3 for missing/stale proof. Command CLI also omitted Weekly full integrity. Combined pre-fix run: 25 failed, 10 passed, 31 deselected in 108.35s.",
+        "reason": "Both caller entrypoints must expose weekly status and return nonzero on failure or missing/stale warning; nightly valid remains separate.",
+        "restoredPass": "python -B -m pytest -q tests/test_snapshot_review79.py tests/test_snapshot_integrity_contract.py tests/test_snapshot_quick_weekly.py tests/test_backup_snapshot.py; exit 0; 104 passed, 1 skipped in 126.89s"
       }
     },
     {
-      "id": "mine-prefix-prepared-rewrite-original-anchor",
-      "path": "mempalace/mine_refresh.py",
-      "description": "A recovery advance after an uncommitted rewrite retains the original committed preparation.",
-      "negativeFixture": "tests/fixtures/mine_refresh_prepared_anchor_negative.py",
+      "id": "snapshot-backup-root-link-boundary",
+      "path": "mempalace/snapshot_verification.py",
+      "description": "Accept writer backup roots while rejecting redirects inside snapshot generations. Removing no_links after the fix caused 5 failures; exact bytes restored and 5 passed, 27 deselected.",
+      "negativeFixture": "tests/test_snapshot_review79.py",
       "observedFailure": {
         "date": "2026-10-12",
-        "command": "python -u tests/fixtures/mine_refresh_prepared_anchor_negative.py --broken",
+        "command": "python -B -m pytest -q tests/test_snapshot_review79.py tests/test_snapshot_integrity_contract.py tests/test_snapshot_quick_weekly.py -k \"receipt_cli_exposes or accepts_writer or accepts_real_junction or inside_generation or corruption_near or retired_integrity or newest_generation or integrity_reader_preserves or production_integrity_requires\"",
         "exitCode": 1,
-        "output": "MineProgressError: pending refresh has no matching committed refresh ancestor; 2 failed, 12 deselected, 4 warnings in 27.15s",
-        "reason": "The fixture restores only the old journal behavior that replaces original recovery preparation with the uncommitted follow-up. It asserts that the mutation applied. Both real prepared-crash/further-edit cases then fail on missing original ancestry after the recovery advance.",
-        "restoredPass": "python -u tests/fixtures/mine_refresh_prepared_anchor_negative.py; exit 0; 2 passed, 12 deselected, 4 warnings in 30.67s; immutable events, current receipts, original preparation retention and repeated-resume readback all pass"
+        "output": "Accepted root/ancestor and real writer-accepted junction: PalaceSnapshotError: weekly verification refuses links or reparse points. Internal segment reparse fixture: Failed: DID NOT RAISE.",
+        "reason": "Accept writer backup roots while rejecting redirects inside snapshot generations. Removing no_links after the fix caused 5 failures; exact bytes restored and 5 passed, 27 deselected.",
+        "restoredPass": "python -B -m pytest -q tests/test_snapshot_review79.py tests/test_snapshot_integrity_contract.py tests/test_snapshot_quick_weekly.py tests/test_backup_snapshot.py; exit 0; 104 passed, 1 skipped in 126.89s; link-guard mutant produced 5 failures and restored selection passed 5 tests",
+        "restoreVerification": "Exact original bytes compared after each mutation; restored production source SHA256 817e1dd88e732511523eab8d6ded28a6c9ad6bd8e9714344b1688de18774fdd7"
       }
     },
     {
-      "id": "mine-prefix-saved-recovery-head-advance",
-      "path": "mempalace/mine_refresh.py",
-      "description": "Saved recovery can advance only through verified descendants while retaining original preparation.",
-      "negativeFixture": "tests/test_mine_refresh_recovery_interleavings.py",
+      "id": "snapshot-production-reader-settings",
+      "path": "mempalace/snapshot_verification.py",
+      "description": "The old helper-backed test was blind to a production cache change. The corrected test targets the production reader and observes its read-only/default-settings/unchanged-bytes contract.",
+      "negativeFixture": "tests/test_snapshot_integrity_contract.py",
       "observedFailure": {
         "date": "2026-10-12",
-        "command": "python -u -m pytest tests/test_mine_refresh_recovery_interleavings.py -q -o faulthandler_timeout=90",
+        "command": "python -B -m pytest -q tests/test_snapshot_integrity_contract.py -k reader_preserves",
         "exitCode": 1,
-        "output": "6 later-writer cases failed: completed source no longer names the recorded current receipt",
-        "reason": "At reviewed head 9516abf2f4f497823eb7235fae7fc59210450181, a real hard exit, saved recovery interruption and later mine leave pending empty and pin an obsolete head on every resume.",
-        "restoredPass": "python -u -m pytest tests/test_mine_refresh.py tests/test_mine_refresh_saved_lineage.py tests/test_mine_refresh_recovery_interleavings.py -q -o faulthandler_timeout=90; exit 0; 39 passed, 70 warnings in 221.50s; all six later-writer cases pass with immutable earlier events and repeated-resume readback"
+        "output": "Injected reader.execute(\"PRAGMA cache_size=123\") into production sqlite_check at the reviewed head. OLD contract: 1 passed, 4 deselected. Corrected contract: E assert [(123, 0)] == [(-2000, 0)]; 1 failed, 4 deselected.",
+        "reason": "The old helper-backed test was blind to a production cache change. The corrected test targets the production reader and observes its read-only/default-settings/unchanged-bytes contract.",
+        "restoredPass": "Exact source bytes restored and verified. Same command: exit 0; 1 passed, 4 deselected in 0.88s.",
+        "restoreVerification": "Exact original bytes compared after each mutation; restored production source SHA256 817e1dd88e732511523eab8d6ded28a6c9ad6bd8e9714344b1688de18774fdd7"
       }
     },
     {
-      "id": "mine-prefix-current-receipt-content-freshness",
-      "path": "mempalace/mine_refresh.py",
-      "description": "A historical descriptor cannot hide a source/hash mismatch with the verified current receipt.",
-      "negativeFixture": "tests/test_mine_refresh_recovery_interleavings.py",
+      "id": "snapshot-production-integrity-exact-verdict",
+      "path": "mempalace/snapshot_verification.py",
+      "description": "Full integrity must consume all verdicts and accept exactly one ok row.",
+      "negativeFixture": "tests/test_snapshot_review79.py",
       "observedFailure": {
         "date": "2026-10-12",
-        "command": "python -u -m pytest tests/test_mine_refresh_recovery_interleavings.py -q -o faulthandler_timeout=90",
+        "command": "python -B -m pytest -q tests/test_snapshot_review79.py -k production_integrity_requires",
         "exitCode": 1,
-        "output": "2 exact-bytes/mtime revert cases failed authoritative receipt-ID equality: no corrective successor was written",
-        "reason": "At reviewed head 9516abf2f4f497823eb7235fae7fc59210450181, the restored file descriptor equals the prepared item while the later head still represents different content; both direct and saved recovery wrongly skip rewrite.",
-        "restoredPass": "python -u -m pytest tests/test_mine_refresh.py tests/test_mine_refresh_saved_lineage.py tests/test_mine_refresh_recovery_interleavings.py -q -o faulthandler_timeout=90; exit 0; 39 passed in 221.50s; both reverts publish the restored content hash and verify repeated-resume idempotence"
+        "output": "Replaced if result != [(\"ok\",)] with if False in production sqlite_check. Empty and mixed verdicts: Failed: DID NOT RAISE; 2 failed, 30 deselected.",
+        "reason": "Full integrity must consume all verdicts and accept exactly one ok row.",
+        "restoredPass": "Exact source bytes restored and verified. Same command: exit 0; 2 passed, 30 deselected.",
+        "restoreVerification": "Exact original bytes compared after each mutation; restored production source SHA256 817e1dd88e732511523eab8d6ded28a6c9ad6bd8e9714344b1688de18774fdd7"
       }
     },
     {
-      "id": "mine-prefix-saved-recovery-pin-ancestor",
-      "path": "mempalace/mine_refresh_recovery.py",
-      "description": "Advancing saved recovery preserves the exact recorded receipt/hash/config pin on the current chain.",
-      "negativeFixture": "tests/fixtures/mine_refresh_saved_pin_negative.py",
+      "id": "snapshot-weekly-live-root-refusal",
+      "path": "mempalace/snapshot_verification.py",
+      "description": "The live-root test must reach the actual live database guard rather than fail earlier on stagedRoot identity.",
+      "negativeFixture": "tests/test_snapshot_quick_weekly.py",
       "observedFailure": {
         "date": "2026-10-12",
-        "command": "python -u tests/fixtures/mine_refresh_saved_pin_negative.py --broken",
+        "command": "python -B -m pytest -q tests/test_snapshot_quick_weekly.py -k refuses_live_database_even",
         "exitCode": 1,
-        "output": "Failed: DID NOT RAISE MineProgressError; 6 failed, 12 warnings in 89.00s",
-        "reason": "The committed fixture removes only saved-pin enforcement, retaining original prepared ancestry and current-output verification. Validly rehashed false receipt ID/content/config claims are then wrongly accepted by real resume, both before and after a follow-up prepared event.",
-        "restoredPass": "python -u tests/fixtures/mine_refresh_saved_pin_negative.py; exit 0; 6 passed, 12 warnings in 80.17s; exact refusals preserve progress and sidecar bytes, including all three pending-rewrite false pins"
+        "output": "Disabled the live_root == database.parent or live_root in database.parents branch. Correct stagedRoot fixture: Failed: DID NOT RAISE; 1 failed, 28 deselected.",
+        "reason": "The live-root test must reach the actual live database guard rather than fail earlier on stagedRoot identity.",
+        "restoredPass": "Exact source bytes restored and verified. Same command: exit 0; 1 passed, 28 deselected.",
+        "restoreVerification": "Exact original bytes compared after each mutation; restored production source SHA256 817e1dd88e732511523eab8d6ded28a6c9ad6bd8e9714344b1688de18774fdd7"
       }
     },
     {
-      "id": "mine-prefix-refresh-descendant-recovery",
-      "path": "mempalace/mine_refresh_recovery.py",
-      "description": "Recover a current head descended from the prepared refresh without accepting unrelated heads.",
-      "negativeFixture": "tests/fixtures/mine_refresh_hard_exit.py",
-      "observedFailure": {
-        "date": "2026-10-09",
-        "command": "python -u -m pytest tests/test_mine_refresh.py -k hard_exit_then_journalless -q -o faulthandler_timeout=90",
-        "exitCode": 1,
-        "output": "3 failed, 17 deselected, 6 warnings in 34.88s; predecessor rejection for same bytes; no matching terminal managed receipt for further edit and changed configuration",
-        "reason": "At base f79d625ce53629aa59c7eb3302d70841d310fd75 the child exited 29 after COMPLETE publication, a whole-project journal-less mine advanced the receipt head, and all three resumes failed.",
-        "restoredPass": "python -u -m pytest tests/test_mine_refresh.py tests/test_mine_refresh_saved_lineage.py -q -o faulthandler_timeout=90; exit 0; 31 passed, 54 warnings in 73.85s; includes exact receipt/journal readbacks and repeated-resume idempotence"
-      }
-    },
-    {
-      "id": "mine-prefix-refresh-ancestor-enforcement",
-      "path": "mempalace/mine_refresh_recovery.py",
-      "description": "Initial and saved recovered heads require the original committed prepared-refresh ancestor.",
-      "negativeFixture": "tests/fixtures/mine_refresh_lineage_negative.py",
+      "id": "snapshot-generation-fixture-clock-independence",
+      "path": "tests/test_snapshot_quick_weekly.py",
+      "description": "Newest-generation fixture must remain ordered after the fixed date and retain exclusion of a newer pending copy.",
+      "negativeFixture": "tests/test_snapshot_quick_weekly.py",
       "observedFailure": {
         "date": "2026-10-12",
-        "command": "python -u tests/fixtures/mine_refresh_lineage_negative.py --broken",
+        "command": "python -B -m pytest -q tests/test_snapshot_review79.py tests/test_snapshot_integrity_contract.py tests/test_snapshot_quick_weekly.py -k \"receipt_cli_exposes or accepts_writer or accepts_real_junction or inside_generation or corruption_near or retired_integrity or newest_generation or integrity_reader_preserves or production_integrity_requires\"",
         "exitCode": 1,
-        "output": "Failed: DID NOT RAISE MineProgressError; 6 failed, 12 warnings in 35.32s; both other-bytes and other-config initial/saved/pending-rewrite claims were incorrectly accepted",
-        "reason": "The committed fixture removes only the ancestor requirement while retaining exact current-head output verification. Six semantic refusal tests detect the fail-open, including saved recovery followed by another durable prepared event. Pending events with no actual committed original ancestor still refuse before any journal or progress mutation.",
-        "restoredPass": "python -u tests/fixtures/mine_refresh_lineage_negative.py; exit 0; 6 passed, 12 warnings in 24.31s; progress and sidecar bytes unchanged for all unrelated claims"
+        "output": "Producer replay: assert '2026-10-13T00:00:00Z' == '2026-10-12T00:00:00Z'; assert '2040-01-01T00:00:00Z' == '2026-10-12T00:00:00Z'. Both cases failed before setting both completed timestamps deterministically.",
+        "reason": "Newest-generation fixture must remain ordered after the fixed date and retain exclusion of a newer pending copy.",
+        "restoredPass": "python -B -m pytest -q tests/test_snapshot_review79.py tests/test_snapshot_integrity_contract.py tests/test_snapshot_quick_weekly.py tests/test_backup_snapshot.py; exit 0; 104 passed, 1 skipped in 126.89s"
       }
     },
     {
-      "id": "mine-prefix-refresh-canonical-source-lock",
-      "path": "mempalace/mine_refresh.py",
-      "description": "Snapshot and managed writer share a normcased canonical local source locator lock key.",
-      "negativeFixture": "tests/test_mine_refresh.py",
+      "id": "snapshot-sqlite-error-deadline-attribution",
+      "path": "mempalace/snapshot_verification.py",
+      "description": "Preserve non-interruption SQLite errors near the budget boundary; a witnessed deadline interruption is still attributed as budget exhaustion.",
+      "negativeFixture": "tests/test_snapshot_review79.py",
       "observedFailure": {
-        "date": "2026-10-09",
-        "command": "python -m pytest tests/test_mine_refresh.py::test_snapshot_and_writer_use_same_normcased_canonical_lock -q",
+        "date": "2026-10-12",
+        "command": "python -B -m pytest -q tests/test_snapshot_review79.py tests/test_snapshot_integrity_contract.py tests/test_snapshot_quick_weekly.py -k \"receipt_cli_exposes or accepts_writer or accepts_real_junction or inside_generation or corruption_near or retired_integrity or newest_generation or integrity_reader_preserves or production_integrity_requires\"",
         "exitCode": 1,
-        "output": "AssertionError: snapshot and writer lock keys differ; 1 failed in 1.83s",
-        "reason": "Original snapshot used raw case-preserving spelling; writer used the normcased canonical locator. The fixture captures both actual lock entry points with Windows normalization on every platform.",
-        "restoredPass": "python -u -m pytest tests/test_mine_refresh.py tests/test_mine_refresh_saved_lineage.py -q -o faulthandler_timeout=90; exit 0; 31 passed in 73.85s; canonical lock assertion included"
+        "output": "SQLite DatabaseError: database disk image is malformed at the deadline was wrapped as PalaceSnapshotError: weekly verification budget exceeded; Regex pattern did not match.",
+        "reason": "Preserve non-interruption SQLite errors near the budget boundary; a witnessed deadline interruption is still attributed as budget exhaustion.",
+        "restoredPass": "python -B -m pytest -q tests/test_snapshot_review79.py tests/test_snapshot_integrity_contract.py tests/test_snapshot_quick_weekly.py tests/test_backup_snapshot.py; exit 0; 104 passed, 1 skipped in 126.89s"
+      }
+    },
+    {
+      "id": "snapshot-weekly-native-cli",
+      "path": "mempalace/backup_snapshot.py",
+      "description": "Native module CLI reports an attributed weekly refusal and saved-copy success.",
+      "negativeFixture": "tests/test_snapshot_quick_weekly.py",
+      "observedFailure": {
+        "date": "2026-10-11",
+        "command": "python -B -m mempalace.backup_snapshot --weekly-verify-root . --weekly-budget-seconds 0 --json",
+        "exitCode": 1,
+        "output": "{\"caller\":\"mempalace-weekly-integrity\",\"generatedAt\":\"2026-10-11T20:11:53Z\",\"message\":\"weekly budget must be finite and positive\",\"mutationIntent\":\"weekly-sidecar-only\",\"schema\":\"mempalace-weekly-integrity-receipt/v1\",\"status\":\"error\"}",
+        "reason": "Invalid zero budget is refused in the weekly schema. The native entrypoint previously escaped as a traceback; its regression test failed first with JSONDecodeError on empty stdout.",
+        "restoredPass": "python -B -m pytest tests/test_snapshot_quick_weekly.py tests/test_backup_snapshot.py tests/test_snapshot_integrity_contract.py -q; exit 0; 71 passed, 1 skipped in 41.73s. Native subprocess success returns 0 and complete weekly JSON; invalid budget returns 1 and error JSON without traceback."
+      }
+    },
+    {
+      "id": "snapshot-weekly-full-integrity",
+      "path": "mempalace/snapshot_verification.py",
+      "description": "Copy-only weekly-full verification",
+      "negativeFixture": "tests/fixtures/snapshot_split_negative.py",
+      "observedFailure": {
+        "date": "2026-10-11",
+        "command": "python -B tests/fixtures/snapshot_split_negative.py --gate weekly-full --broken",
+        "exitCode": 1,
+        "output": "PalaceSnapshotError: snapshot SQLite integrity check did not return ok: [('row 1 missing from index by_value',), ('row 2 missing from index by_value',), ('wrong # of entries in index by_value',)]",
+        "reason": "PalaceSnapshotError: snapshot SQLite integrity check did not return ok: [('row 1 missing from index by_value',), ('row 2 missing from index by_value',), ('wrong # of entries in index by_value',)]",
+        "restoredPass": "python -B tests/fixtures/snapshot_split_negative.py --gate weekly-full; exit 0; PASS: weekly-full restored input accepted"
+      }
+    },
+    {
+      "id": "snapshot-sqlite-structure",
+      "path": "mempalace/backup_snapshot.py",
+      "description": "Copy-only structure verification",
+      "negativeFixture": "tests/fixtures/snapshot_split_negative.py",
+      "observedFailure": {
+        "date": "2026-10-11",
+        "command": "python -B tests/fixtures/snapshot_split_negative.py --gate structure --broken",
+        "exitCode": 1,
+        "output": "PalaceSnapshotError: snapshot SQLite page count, freelist or schema hash mismatch",
+        "reason": "PalaceSnapshotError: snapshot SQLite page count, freelist or schema hash mismatch",
+        "restoredPass": "python -B tests/fixtures/snapshot_split_negative.py --gate structure; exit 0; PASS: structure restored input accepted"
+      }
+    },
+    {
+      "id": "snapshot-weekly-receipt-presence",
+      "path": "mempalace/snapshot_verification.py",
+      "description": "Copy-only weekly verification",
+      "negativeFixture": "tests/fixtures/snapshot_split_negative.py",
+      "observedFailure": {
+        "date": "2026-10-11",
+        "command": "python -B tests/fixtures/snapshot_split_negative.py --gate weekly --broken",
+        "exitCode": 1,
+        "output": "PalaceSnapshotError: weekly-integrity-receipt-missing",
+        "reason": "PalaceSnapshotError: weekly-integrity-receipt-missing",
+        "restoredPass": "python -B tests/fixtures/snapshot_split_negative.py --gate weekly; exit 0; PASS: weekly restored input accepted"
+      }
+    },
+    {
+      "id": "snapshot-nightly-quick-check",
+      "path": "mempalace/snapshot_verification.py",
+      "description": "Copy-only quick verification",
+      "negativeFixture": "tests/fixtures/snapshot_split_negative.py",
+      "observedFailure": {
+        "date": "2026-10-11",
+        "command": "python -B tests/fixtures/snapshot_split_negative.py --gate quick --broken",
+        "exitCode": 1,
+        "output": "PalaceSnapshotError: snapshot SQLite quick check did not return ok: [('*** in database main ***\\nTree 3 page 3: btreeInitPage() returns error code 11',)]",
+        "reason": "PalaceSnapshotError: snapshot SQLite quick check did not return ok: [('*** in database main ***\\nTree 3 page 3: btreeInitPage() returns error code 11',)]",
+        "restoredPass": "python -B tests/fixtures/snapshot_split_negative.py --gate quick; exit 0; PASS: quick restored input accepted"
+      }
+    },
+    {
+      "id": "snapshot-full-integrity-reader",
+      "path": "mempalace/snapshot_verification.py",
+      "description": "Production sqlite_check rejects missing index rows that quick_check admits.",
+      "negativeFixture": "tests/fixtures/snapshot_integrity_negative.py",
+      "observedFailure": {
+        "date": "2026-10-12",
+        "command": "python -B tests/fixtures/snapshot_integrity_negative.py --broken",
+        "exitCode": 1,
+        "output": "PalaceSnapshotError: snapshot SQLite integrity check did not return ok: [('row 1 missing from index by_value',), ('row 2 missing from index by_value',), ('wrong # of entries in index by_value',)]",
+        "reason": "A real empty index passes quick_check, while production sqlite_check reads and rejects every integrity verdict.",
+        "restoredPass": "python -B tests/fixtures/snapshot_integrity_negative.py; exit 0; PASS: full snapshot integrity check accepted the restored index"
       }
     },
     {
@@ -307,6 +346,311 @@
       }
     },
     {
+      "id": "snapshot-generation-scan-isolation",
+      "path": "mempalace/snapshot_verification.py",
+      "description": "Malformed or redirected siblings are isolated; selected-copy proof and scan errors are saved.",
+      "negativeFixture": "tests/test_snapshot_review79_round2.py",
+      "observedFailure": {
+        "date": "2026-10-12",
+        "command": "python -B -m pytest -q tests/test_snapshot_review79_round2.py",
+        "exitCode": 1,
+        "sourceHead": "1c4ccae18241526d7fc8264a23ba647138ae95a7",
+        "output": "json.decoder.JSONDecodeError: Expecting property name enclosed in double quotes: line 1 column 2 (char 1); KeyError: 'generatedAt'; AttributeError: 'int' object has no attribute 'replace'; combined run: 20 failed, 1 passed in 19.93s",
+        "reason": "The original scan escaped on invalid sibling JSON/timestamps or redirected generations; the known good copy was not checked. Nine sibling cases failed before the fix.",
+        "restoredPass": "python -B -m pytest -q tests/test_snapshot_review79_round2.py tests/test_snapshot_review79.py tests/test_snapshot_quick_weekly.py tests/test_snapshot_integrity_contract.py tests/test_backup_snapshot.py; exit 0; 126 passed, 1 skipped"
+      }
+    },
+    {
+      "id": "snapshot-weekly-precondition-receipt",
+      "path": "mempalace/snapshot_verification.py",
+      "description": "Selected-copy preconditions and all-invalid scans must produce current error receipts.",
+      "negativeFixture": "tests/test_snapshot_review79_round2.py",
+      "observedFailure": {
+        "date": "2026-10-12",
+        "command": "python -B -m pytest -q tests/test_snapshot_review79_round2.py",
+        "exitCode": 1,
+        "sourceHead": "1c4ccae18241526d7fc8264a23ba647138ae95a7",
+        "output": "PalaceSnapshotError: weekly staged root does not match snapshot generation; PalaceSnapshotError: weekly verification refuses live database; combined run: 20 failed, 1 passed in 19.93s",
+        "reason": "Preconditions escaped before saving a weekly result, leaving earlier success untouched. Missing-database, wrong-stage, live-root and all-bad cases failed before the fix.",
+        "restoredPass": "python -B -m pytest -q tests/test_snapshot_review79_round2.py tests/test_snapshot_review79.py tests/test_snapshot_quick_weekly.py tests/test_snapshot_integrity_contract.py tests/test_backup_snapshot.py; exit 0; 126 passed, 1 skipped"
+      }
+    },
+    {
+      "id": "snapshot-file-hardlink-independence",
+      "path": "mempalace/snapshot_verification.py",
+      "description": "Every snapshot file must have a single hard link, including HNSW files with absent sources.",
+      "negativeFixture": "tests/test_snapshot_review79_round2.py",
+      "observedFailure": {
+        "date": "2026-10-12",
+        "command": "python -B -m pytest -q tests/test_snapshot_review79_round2.py",
+        "exitCode": 1,
+        "sourceHead": "1c4ccae18241526d7fc8264a23ba647138ae95a7",
+        "output": "AssertionError: assert 'complete' == 'error'; combined run: 20 failed, 1 passed in 19.93s",
+        "reason": "Both real segment hard-link fixtures were certified complete before the fix, including when the recorded source directory was moved.",
+        "restoredPass": "python -B -m pytest -q tests/test_snapshot_review79_round2.py tests/test_snapshot_review79.py tests/test_snapshot_quick_weekly.py tests/test_snapshot_integrity_contract.py tests/test_backup_snapshot.py; exit 0; 126 passed, 1 skipped"
+      }
+    },
+    {
+      "id": "snapshot-receipt-unresolved-redirect-guard",
+      "path": "mempalace/backup_snapshot.py",
+      "description": "Readback guards the unresolved receipt before reading or resolving generation redirects.",
+      "negativeFixture": "tests/test_snapshot_review79_round2.py",
+      "observedFailure": {
+        "date": "2026-10-12",
+        "command": "python -B -m pytest -q tests/test_snapshot_review79_round2.py",
+        "exitCode": 1,
+        "sourceHead": "1c4ccae18241526d7fc8264a23ba647138ae95a7",
+        "output": "AssertionError: redirected receipt was read before the link guard; assert 0 != 0; combined run: 20 failed, 1 passed in 19.93s",
+        "reason": "Both guard-order fixtures read the forbidden receipt; both native CLI junction fixtures returned 0, nightly valid=true and weekly complete before the fix. Writer-accepted root junction readback remains a positive control.",
+        "restoredPass": "python -B -m pytest -q tests/test_snapshot_review79_round2.py tests/test_snapshot_review79.py tests/test_snapshot_quick_weekly.py tests/test_snapshot_integrity_contract.py tests/test_backup_snapshot.py; exit 0; 126 passed, 1 skipped"
+      }
+    },
+    {
+      "id": "snapshot-weekly-explicit-ascii-json",
+      "path": "mempalace/backup_snapshot.py",
+      "description": "Weekly result JSON explicitly requests ASCII and preserves non-ASCII errors on cp1252.",
+      "negativeFixture": "tests/test_snapshot_review79_round2.py",
+      "observedFailure": {
+        "date": "2026-10-12",
+        "command": "python -B -m pytest -q tests/test_snapshot_review79_round2.py",
+        "exitCode": 1,
+        "sourceHead": "1c4ccae18241526d7fc8264a23ba647138ae95a7",
+        "output": "AssertionError: assert ([{'sort_keys': True}] and False); combined run: 20 failed, 1 passed in 19.93s",
+        "reason": "The explicit-argument contract failed before the change. The real cp1252 console fixture already passed because Python defaults ensure_ascii to true; no encoding failure is claimed.",
+        "restoredPass": "python -B -m pytest -q tests/test_snapshot_review79_round2.py tests/test_snapshot_review79.py tests/test_snapshot_quick_weekly.py tests/test_snapshot_integrity_contract.py tests/test_backup_snapshot.py; exit 0; 126 passed, 1 skipped"
+      }
+    },
+    {
+      "id": "snapshot-weekly-safe-sidecar-fallback",
+      "path": "mempalace/snapshot_verification.py",
+      "description": "A rejected generation sidecar must still save failure at a safe backup root.",
+      "negativeFixture": "tests/test_snapshot_review79_round2.py",
+      "observedFailure": {
+        "date": "2026-10-12",
+        "command": "python -B -m pytest -q tests/test_snapshot_review79_round2.py -k unsafe_sidecar",
+        "exitCode": 1,
+        "output": "PalaceSnapshotError: weekly verification refuses links or reparse points; 1 failed, 21 deselected in 1.80s",
+        "reason": "The production sidecar link guard refused correctly, but the exception escaped without saving any safe weekly error. The fallback preserves refusal and saves root error.",
+        "restoredPass": "python -B -m pytest -q tests/test_snapshot_review79_round2.py tests/test_snapshot_review79.py tests/test_snapshot_quick_weekly.py tests/test_snapshot_integrity_contract.py tests/test_backup_snapshot.py; exit 0; 126 passed, 1 skipped"
+      }
+    },
+    {
+      "id": "snapshot-readback-tree-isolation",
+      "path": "mempalace/backup_snapshot.py",
+      "description": "All receipt readers refuse staged redirects and multiply linked files before hashing.",
+      "negativeFixture": "tests/test_snapshot_review79_round3.py",
+      "observedFailure": {
+        "date": "2026-10-12",
+        "command": "python -B -m pytest -q -rs -p no:cacheprovider tests/test_snapshot_review79_round3.py",
+        "exitCode": 1,
+        "sourceHead": "84486ff2980010334975e49151a151dd7f031e15",
+        "output": "AssertionError: assert 0 == 2; four native CLI link cases failed.",
+        "reason": "Four real link fixtures reached both native CLIs and returned 0, valid=true, weekly complete; pytest asserted expected exit 2 and failed. The restored fixture asserts exit 2 and the link-specific diagnostic.",
+        "restoredPass": "python -B -m pytest tests/ -v --ignore=tests/benchmarks --cov=mempalace --cov-report=term-missing --cov-report=json:<coverage-artifact> --cov-fail-under=80 --durations=10; exit 0; 2248 passed, 9 skipped in 1473.10s; coverage 84.01%; included 149 focused snapshot passes and one existing unavailable consumer skip."
+      }
+    },
+    {
+      "id": "snapshot-weekly-outside-live-boundary",
+      "path": "mempalace/snapshot_verification.py",
+      "description": "No failure destination may be equal to or below declared or recorded live storage.",
+      "negativeFixture": "tests/test_snapshot_review79_round3.py",
+      "observedFailure": {
+        "date": "2026-10-12",
+        "command": "python -B -m pytest -q -rs -p no:cacheprovider tests/test_snapshot_review79_round3.py",
+        "exitCode": 1,
+        "sourceHead": "84486ff2980010334975e49151a151dd7f031e15",
+        "output": "Failed: DID NOT RAISE PalaceSnapshotError; three unsafe backup-root cases failed.",
+        "reason": "The live root, metadata child and actual Windows junction fixture wrote fallback results rather than refusing. Restored fixtures assert a live-boundary refusal and byte-equal live inventory.",
+        "restoredPass": "python -B -m pytest tests/ -v --ignore=tests/benchmarks --cov=mempalace --cov-report=term-missing --cov-report=json:<coverage-artifact> --cov-fail-under=80 --durations=10; exit 0; 2248 passed, 9 skipped in 1473.10s; coverage 84.01%; included 149 focused snapshot passes and one existing unavailable consumer skip."
+      }
+    },
+    {
+      "id": "snapshot-deferred-catalog-isolation",
+      "path": "mempalace/backup_snapshot.py",
+      "description": "Deferred nightly checks guard the entire generation before quick_check, counts or hashes.",
+      "negativeFixture": "tests/test_snapshot_review79_round3.py",
+      "observedFailure": {
+        "date": "2026-10-12",
+        "command": "python -B -m pytest -q -rs -p no:cacheprovider tests/test_snapshot_review79_round3.py",
+        "exitCode": 1,
+        "sourceHead": "84486ff2980010334975e49151a151dd7f031e15",
+        "output": "AssertionError: linked live catalog was certified complete; assert complete == error.",
+        "reason": "A real SQLite hard link to the source inode was certified complete. The restored fixture asserts a hard-link refusal and no quick_check call against the inode.",
+        "restoredPass": "python -B -m pytest tests/ -v --ignore=tests/benchmarks --cov=mempalace --cov-report=term-missing --cov-report=json:<coverage-artifact> --cov-fail-under=80 --durations=10; exit 0; 2248 passed, 9 skipped in 1473.10s; coverage 84.01%; included 149 focused snapshot passes and one existing unavailable consumer skip."
+      }
+    },
+    {
+      "id": "snapshot-deferred-safe-json-publication",
+      "path": "mempalace/backup_snapshot.py",
+      "description": "Deferred success and failure JSON publication must never truncate a linked outside inode.",
+      "negativeFixture": "tests/test_snapshot_review79_round3.py",
+      "observedFailure": {
+        "date": "2026-10-12",
+        "command": "python -B -m pytest -q -rs -p no:cacheprovider tests/test_snapshot_review79_round3.py",
+        "exitCode": 1,
+        "sourceHead": "84486ff2980010334975e49151a151dd7f031e15",
+        "output": "AssertionError: receipt publisher truncated outside inode; both success and failure cases failed.",
+        "reason": "Both the healthy and corrupt catalog publishers changed outside file keep bytes via a receipt hard link. Restored fixtures assert link refusal and exact outside bytes; normal completion uses exclusive temporary-file replacement.",
+        "restoredPass": "python -B -m pytest tests/ -v --ignore=tests/benchmarks --cov=mempalace --cov-report=term-missing --cov-report=json:<coverage-artifact> --cov-fail-under=80 --durations=10; exit 0; 2248 passed, 9 skipped in 1473.10s; coverage 84.01%; included 149 focused snapshot passes and one existing unavailable consumer skip."
+      }
+    },
+    {
+      "id": "snapshot-weekly-replacement-invalidation",
+      "path": "mempalace/snapshot_verification.py",
+      "description": "Failure to replace a weekly sidecar must not leave an older complete generation accepted.",
+      "negativeFixture": "tests/test_snapshot_review79_round3.py",
+      "observedFailure": {
+        "date": "2026-10-12",
+        "command": "python -B -m pytest -q -rs -p no:cacheprovider tests/test_snapshot_review79_round3.py",
+        "exitCode": 1,
+        "sourceHead": "84486ff2980010334975e49151a151dd7f031e15",
+        "output": "AssertionError: assert 0 == 2; both read-only sidecar cases failed.",
+        "reason": "Actual Windows read-only sidecars rejected replacement and kept old complete bytes. Both a linked-file failure and a forced full-check failure saved root error but readback still exited 0. Restored tests require exit 2, saved invalidation, survival of an unrelated root fallback and later successful recovery.",
+        "restoredPass": "python -B -m pytest tests/ -v --ignore=tests/benchmarks --cov=mempalace --cov-report=term-missing --cov-report=json:<coverage-artifact> --cov-fail-under=80 --durations=10; exit 0; 2248 passed, 9 skipped in 1473.10s; coverage 84.01%; included 149 focused snapshot passes and one existing unavailable consumer skip."
+      }
+    },
+    {
+      "id": "snapshot-sibling-all-parser-exceptions",
+      "path": "mempalace/snapshot_verification.py",
+      "description": "Every ordinary sibling parsing exception becomes a scan error without aborting good-copy selection.",
+      "negativeFixture": "tests/test_snapshot_review79_round3.py",
+      "observedFailure": {
+        "date": "2026-10-12",
+        "command": "python -B -m pytest -q -p no:cacheprovider tests/test_snapshot_review79_round3.py -k deep_sibling",
+        "exitCode": 1,
+        "sourceHead": "84486ff2980010334975e49151a151dd7f031e15",
+        "output": "RecursionError: maximum recursion depth exceeded while decoding a JSON array from a unicode string; 2 failed, 12 deselected in 3.58s.",
+        "reason": "The stated depth 2000 example parsed on Python 3.13.2 and is refuted at that depth. Corrected depth 20000 produced uncaught RecursionError, with and without a good sibling. Restored fixtures save good-copy or all-bad results and name recursion in scanErrors; injected TypeError and RuntimeError remain isolated too.",
+        "restoredPass": "python -B -m pytest tests/ -v --ignore=tests/benchmarks --cov=mempalace --cov-report=term-missing --cov-report=json:<coverage-artifact> --cov-fail-under=80 --durations=10; exit 0; 2248 passed, 9 skipped in 1473.10s; coverage 84.01%; included 149 focused snapshot passes and one existing unavailable consumer skip."
+      }
+    },
+    {
+      "id": "mine-prefix-grok-five-step-prepared-rewrite",
+      "path": "mempalace/mine_refresh_recovery.py",
+      "description": "The exact P/F/U/G sequence recovers a later mine after a crashed pending follow-up rewrite.",
+      "negativeFixture": "tests/fixtures/mine_refresh_grok_sequence.py",
+      "observedFailure": {
+        "date": "2026-10-12",
+        "command": "python -u tests/fixtures/mine_refresh_grok_sequence.py (exported original head 72d07e326338d4749c7ff2c9932cf4128f63d15e)",
+        "exitCode": 1,
+        "output": "MineProgressError: pending refresh has no matching committed refresh ancestor; 1 failed, 2 warnings in 15.89s",
+        "reason": "Original production source was exported and verified against its Git blob, with only the new fixture/helpers copied in. A hard exit after R1(P), a mine of F, a hard exit after durable prepared(U), then a mine of G leave the original resume wedged. Each receipt predecessor and byte-version distinction is read back before the failing resume.",
+        "restoredPass": "python -u tests/fixtures/mine_refresh_grok_sequence.py (fixed production source); exit 0; 1 passed, 2 warnings in 20.60s; final receipt, suffix completion, original preparation, immutable events and idempotence read back"
+      }
+    },
+    {
+      "id": "mine-prefix-prepared-rewrite-saved-recovery",
+      "path": "mempalace/mine_refresh_recovery.py",
+      "description": "Pending follow-up rewrites can recover through verified original preparation and saved receipt pins.",
+      "negativeFixture": "tests/test_mine_refresh_recovery_interleavings.py",
+      "observedFailure": {
+        "date": "2026-10-12",
+        "command": "python -u -m pytest tests/test_mine_refresh_recovery_interleavings.py -k prepared -q -o faulthandler_timeout=90",
+        "exitCode": 1,
+        "output": "MineProgressError: pending refresh has no matching committed refresh ancestor; 6 failed, 2 passed, 6 deselected, 16 warnings in 95.30s",
+        "reason": "At reviewed head 72d07e326338d4749c7ff2c9932cf4128f63d15e, the child exits 31 after a follow-up rewrite's durable prepared event, before COMPLETE. A later writer changes bytes or configuration, and all six combinations wedge on the new pending snapshot despite valid saved/original evidence.",
+        "restoredPass": "python -u -m pytest tests/test_mine_refresh.py tests/test_mine_refresh_saved_lineage.py tests/test_mine_refresh_recovery_interleavings.py tests/test_mine_refresh_saved_pin.py tests/test_mine_progress.py -q -o faulthandler_timeout=90; exit 0; 71 passed, 114 warnings in 443.29s; all twelve later-writer crash-point cases pass, including all six prepared-crash cases, with immutable earlier events and repeated-resume readback"
+      }
+    },
+    {
+      "id": "mine-prefix-prepared-rewrite-original-anchor",
+      "path": "mempalace/mine_refresh.py",
+      "description": "A recovery advance after an uncommitted rewrite retains the original committed preparation.",
+      "negativeFixture": "tests/fixtures/mine_refresh_prepared_anchor_negative.py",
+      "observedFailure": {
+        "date": "2026-10-12",
+        "command": "python -u tests/fixtures/mine_refresh_prepared_anchor_negative.py --broken",
+        "exitCode": 1,
+        "output": "MineProgressError: pending refresh has no matching committed refresh ancestor; 2 failed, 12 deselected, 4 warnings in 27.15s",
+        "reason": "The fixture restores only the old journal behavior that replaces original recovery preparation with the uncommitted follow-up. It asserts that the mutation applied. Both real prepared-crash/further-edit cases then fail on missing original ancestry after the recovery advance.",
+        "restoredPass": "python -u tests/fixtures/mine_refresh_prepared_anchor_negative.py; exit 0; 2 passed, 12 deselected, 4 warnings in 30.67s; immutable events, current receipts, original preparation retention and repeated-resume readback all pass"
+      }
+    },
+    {
+      "id": "mine-prefix-saved-recovery-head-advance",
+      "path": "mempalace/mine_refresh.py",
+      "description": "Saved recovery can advance only through verified descendants while retaining original preparation.",
+      "negativeFixture": "tests/test_mine_refresh_recovery_interleavings.py",
+      "observedFailure": {
+        "date": "2026-10-12",
+        "command": "python -u -m pytest tests/test_mine_refresh_recovery_interleavings.py -q -o faulthandler_timeout=90",
+        "exitCode": 1,
+        "output": "6 later-writer cases failed: completed source no longer names the recorded current receipt",
+        "reason": "At reviewed head 9516abf2f4f497823eb7235fae7fc59210450181, a real hard exit, saved recovery interruption and later mine leave pending empty and pin an obsolete head on every resume.",
+        "restoredPass": "python -u -m pytest tests/test_mine_refresh.py tests/test_mine_refresh_saved_lineage.py tests/test_mine_refresh_recovery_interleavings.py -q -o faulthandler_timeout=90; exit 0; 39 passed, 70 warnings in 221.50s; all six later-writer cases pass with immutable earlier events and repeated-resume readback"
+      }
+    },
+    {
+      "id": "mine-prefix-current-receipt-content-freshness",
+      "path": "mempalace/mine_refresh.py",
+      "description": "A historical descriptor cannot hide a source/hash mismatch with the verified current receipt.",
+      "negativeFixture": "tests/test_mine_refresh_recovery_interleavings.py",
+      "observedFailure": {
+        "date": "2026-10-12",
+        "command": "python -u -m pytest tests/test_mine_refresh_recovery_interleavings.py -q -o faulthandler_timeout=90",
+        "exitCode": 1,
+        "output": "2 exact-bytes/mtime revert cases failed authoritative receipt-ID equality: no corrective successor was written",
+        "reason": "At reviewed head 9516abf2f4f497823eb7235fae7fc59210450181, the restored file descriptor equals the prepared item while the later head still represents different content; both direct and saved recovery wrongly skip rewrite.",
+        "restoredPass": "python -u -m pytest tests/test_mine_refresh.py tests/test_mine_refresh_saved_lineage.py tests/test_mine_refresh_recovery_interleavings.py -q -o faulthandler_timeout=90; exit 0; 39 passed in 221.50s; both reverts publish the restored content hash and verify repeated-resume idempotence"
+      }
+    },
+    {
+      "id": "mine-prefix-saved-recovery-pin-ancestor",
+      "path": "mempalace/mine_refresh_recovery.py",
+      "description": "Advancing saved recovery preserves the exact recorded receipt/hash/config pin on the current chain.",
+      "negativeFixture": "tests/fixtures/mine_refresh_saved_pin_negative.py",
+      "observedFailure": {
+        "date": "2026-10-12",
+        "command": "python -u tests/fixtures/mine_refresh_saved_pin_negative.py --broken",
+        "exitCode": 1,
+        "output": "Failed: DID NOT RAISE MineProgressError; 6 failed, 12 warnings in 89.00s",
+        "reason": "The committed fixture removes only saved-pin enforcement, retaining original prepared ancestry and current-output verification. Validly rehashed false receipt ID/content/config claims are then wrongly accepted by real resume, both before and after a follow-up prepared event.",
+        "restoredPass": "python -u tests/fixtures/mine_refresh_saved_pin_negative.py; exit 0; 6 passed, 12 warnings in 80.17s; exact refusals preserve progress and sidecar bytes, including all three pending-rewrite false pins"
+      }
+    },
+    {
+      "id": "mine-prefix-refresh-descendant-recovery",
+      "path": "mempalace/mine_refresh_recovery.py",
+      "description": "Recover a current head descended from the prepared refresh without accepting unrelated heads.",
+      "negativeFixture": "tests/fixtures/mine_refresh_hard_exit.py",
+      "observedFailure": {
+        "date": "2026-10-09",
+        "command": "python -u -m pytest tests/test_mine_refresh.py -k hard_exit_then_journalless -q -o faulthandler_timeout=90",
+        "exitCode": 1,
+        "output": "3 failed, 17 deselected, 6 warnings in 34.88s; predecessor rejection for same bytes; no matching terminal managed receipt for further edit and changed configuration",
+        "reason": "At base f79d625ce53629aa59c7eb3302d70841d310fd75 the child exited 29 after COMPLETE publication, a whole-project journal-less mine advanced the receipt head, and all three resumes failed.",
+        "restoredPass": "python -u -m pytest tests/test_mine_refresh.py tests/test_mine_refresh_saved_lineage.py -q -o faulthandler_timeout=90; exit 0; 31 passed, 54 warnings in 73.85s; includes exact receipt/journal readbacks and repeated-resume idempotence"
+      }
+    },
+    {
+      "id": "mine-prefix-refresh-ancestor-enforcement",
+      "path": "mempalace/mine_refresh_recovery.py",
+      "description": "Initial and saved recovered heads require the original committed prepared-refresh ancestor.",
+      "negativeFixture": "tests/fixtures/mine_refresh_lineage_negative.py",
+      "observedFailure": {
+        "date": "2026-10-12",
+        "command": "python -u tests/fixtures/mine_refresh_lineage_negative.py --broken",
+        "exitCode": 1,
+        "output": "Failed: DID NOT RAISE MineProgressError; 6 failed, 12 warnings in 35.32s; both other-bytes and other-config initial/saved/pending-rewrite claims were incorrectly accepted",
+        "reason": "The committed fixture removes only the ancestor requirement while retaining exact current-head output verification. Six semantic refusal tests detect the fail-open, including saved recovery followed by another durable prepared event. Pending events with no actual committed original ancestor still refuse before any journal or progress mutation.",
+        "restoredPass": "python -u tests/fixtures/mine_refresh_lineage_negative.py; exit 0; 6 passed, 12 warnings in 24.31s; progress and sidecar bytes unchanged for all unrelated claims"
+      }
+    },
+    {
+      "id": "mine-prefix-refresh-canonical-source-lock",
+      "path": "mempalace/mine_refresh.py",
+      "description": "Snapshot and managed writer share a normcased canonical local source locator lock key.",
+      "negativeFixture": "tests/test_mine_refresh.py",
+      "observedFailure": {
+        "date": "2026-10-09",
+        "command": "python -m pytest tests/test_mine_refresh.py::test_snapshot_and_writer_use_same_normcased_canonical_lock -q",
+        "exitCode": 1,
+        "output": "AssertionError: snapshot and writer lock keys differ; 1 failed in 1.83s",
+        "reason": "Original snapshot used raw case-preserving spelling; writer used the normcased canonical locator. The fixture captures both actual lock entry points with Windows normalization on every platform.",
+        "restoredPass": "python -u -m pytest tests/test_mine_refresh.py tests/test_mine_refresh_saved_lineage.py -q -o faulthandler_timeout=90; exit 0; 31 passed in 73.85s; canonical lock assertion included"
+      }
+    },
+    {
       "path": "mempalace/snapshot_lease_release.py",
       "negativeFixture": "tests/fixtures/snapshot_lease_release_probe.py",
       "description": "Exact owned Windows lease release retains object and rejects foreign objects.",
@@ -402,6 +746,41 @@
         "output": "AssertionError: lease interrupt probe discarded the existing trace observer",
         "reason": "The fixture verifies exactly two restoration sites, then replaces them with sys.settrace(None) in an in-memory test copy. The actual interruption assertion passes, but observer custody fails. No production source, live marker or file is mutated by the break.",
         "restoredPass": "& $c77Python tests/fixtures/snapshot_trace_custody_probe.py (Join-Path $c77Temp 'restored'); exit 0; PASS: 6 interruption cases restore the observer and trace a later source call"
+      }
+    },
+    {
+      "id": "backend-work-state-admission-accounting",
+      "path": "mempalace/mcp_backend_calls.py",
+      "description": "Keeps legitimate native permit-acquisition handoffs complete/busy while refusing unexplained or contradictory accounting; quiescence requires real permit return.",
+      "negativeFixture": "tests/test_mcp_backend_calls.py",
+      "fixtureScope": "Repository regression coverage. The original attributed native failure and final restored pass below were observed with the separate private Palace73AdmissionWindowProof.py control, not by claiming this pytest file produced that red.",
+      "observedFailure": {
+        "date": "2026-10-09",
+        "command": "python -B Palace73AdmissionWindowProof.py --candidate <isolated-candidate> --scratch-root <fresh-isolated-home> --expected-gate-sha256 9E54A13D5A3446DD519FC4F8D1E0EB76ECC84760597034072DB4A4C7927DA95F",
+        "commandScope": "Actual private probe argv semantics through the pinned windowless canonical launcher; only private absolute script, candidate and scratch paths are redacted. The private script is not distributed in this repository.",
+        "exitCode": 1,
+        "reason": "Actual installed AnyIO 4.13.0 acquired one native borrower before its fast-path shielded checkpoint resumed. With one pending admission and zero ledger-held permits, the first-draft gate incorrectly became sticky unknown; the actual probe failed specifically with legitimate-admission-window-rejected. The worker still completed and returned its real permit, so this was a discriminator defect, not a load/launch failure.",
+        "sourceSha256": "9E54A13D5A3446DD519FC4F8D1E0EB76ECC84760597034072DB4A4C7927DA95F",
+        "receiptSha256": "C359E00241892676B295CCB93BCE1D5A707002CFD390844AE8E10AD1EB43638A",
+        "stdoutSha256": "6A875709B1E7DDF3F6A7F4E217D5131D6D1D97942BA394FB4AF35B4173B891C7",
+        "probeSha256": "169C998C3573E5F8A9B320922C223DC6321BB86AB08C027A66C9367C1B96B796",
+        "anyioSourceSha256": "92EAA5836B0152C15D818F34C520C0C3AD06C7FE1634297D8922F95E563A9425",
+        "restoredPass": "Same private probe and real AnyIO checkpoint invocation, with --expected-gate-sha256 E247D869D10F2ECA2DB0D3B8A3606F6753D82C52DA14F9F15502B53A027D421F: native exit 0; complete/busy at borrowed=1, pending=1, held=0, then complete/quiescent with seven known zero counts after actual permit return. No live palace query or service recovery was performed. The full three-module source cohort subsequently passed 83/83 with no skipped/deselected cases.",
+        "restoredEvidence": {
+          "date": "2026-10-09",
+          "exitCode": 0,
+          "sourceSha256": "E247D869D10F2ECA2DB0D3B8A3606F6753D82C52DA14F9F15502B53A027D421F",
+          "testSha256": "9AE778C34F31F85F34B4DC0C58A0A159159EB21ED11ACBA9317CC0BE99B3C68E",
+          "receiptSha256": "0E4DBE59F22F6D9DFF43A786D1F201350106E2D2D362D4CA97C651CA61CD97DA",
+          "stdoutSha256": "C3A796320D8BDD992FBF9625DBB320C94867848C61F784ABB5CF7DDF15EDE3CD",
+          "sourceCohortReceiptSha256": "D96B24B1B370599AB3BBB949202FE317A8453FCC48890EDD85E39346996993F1",
+          "passed": 83,
+          "failed": 0,
+          "skipped": 0,
+          "deselected": 0,
+          "warnings": 1,
+          "scope": "Complete three-module isolated fixture cohort only; not full-repository, publication, installation or live recall acceptance."
+        }
       }
     }
   ],
