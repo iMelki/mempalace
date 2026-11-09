@@ -1184,6 +1184,8 @@ def _print(payload: dict[str, Any], as_json: bool) -> None:
         print(f"  Weekly full integrity: {weekly['status']}")
         if weekly.get("problem"):
             print(f"  WEEKLY    {weekly['problem']}")
+        for warning in weekly.get("warnings", []):
+            print(f"  WARNING   {warning}")
     for problem in payload.get("problems", []):
         print(f"  PROBLEM   {problem}")
 

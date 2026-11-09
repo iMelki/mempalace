@@ -390,3 +390,62 @@ def test_real_module_cli_returns_structured_weekly_success_and_refusal(tmp_path)
     assert saved["schema"] == WEEKLY_SCHEMA
     assert saved["status"] == "complete"
     assert (staging / backup.SNAPSHOT_RECEIPT_FILENAME).read_bytes() == before
+
+
+@pytest.mark.parametrize("corruption", ["not-json", "not-object", "wrong-schema"])
+def test_corrupt_root_fallback_does_not_poison_generation_with_valid_sidecar(
+    tmp_path, capsys, corruption
+):
+    live, staging, _ = stage(tmp_path)
+    backup.verify_weekly_snapshot(staging.parent, palace_path=live, budget_seconds=30)
+    shared = staging.parent / "weekly-integrity-receipt.json"
+    shared.write_text(
+        {
+            "not-json": "{truncated",
+            "not-object": "[]",
+            "wrong-schema": json.dumps({"schema": "other/v1", "status": "error"}),
+        }[corruption]
+    )
+    receipt_path = staging / backup.SNAPSHOT_RECEIPT_FILENAME
+    weekly = backup.verify_snapshot_receipt(receipt_path)["weeklyVerification"]
+    assert weekly["status"] == "complete"
+    assert any("backup-root weekly sidecar" in warning for warning in weekly["warnings"])
+    assert backup.main(["--verify-receipt", str(receipt_path)]) == 0
+    assert "WARNING   backup-root weekly sidecar" in capsys.readouterr().out
+
+
+def test_corrupt_generation_invalidation_still_fails_closed(tmp_path):
+    live, staging, _ = stage(tmp_path)
+    backup.verify_weekly_snapshot(staging.parent, palace_path=live, budget_seconds=30)
+    (staging / "weekly-integrity-invalidation.json").write_text("{truncated")
+    weekly = backup.verify_snapshot_receipt(staging / backup.SNAPSHOT_RECEIPT_FILENAME)
+    assert weekly["weeklyVerification"]["status"] == "invalid"
+
+
+@pytest.mark.parametrize("location", ["generation", "backup-root"])
+def test_saved_failure_outranks_missing_generation_sidecar(tmp_path, capsys, location):
+    live, staging, _ = stage(tmp_path)
+    backup.verify_weekly_snapshot(staging.parent, palace_path=live, budget_seconds=30)
+    sidecar = staging / "weekly-integrity-receipt.json"
+    failure = dict(json.loads(sidecar.read_text()), status="error", message="sidecar write failed")
+    sidecar.unlink()
+    saved = {
+        "generation": staging / "weekly-integrity-invalidation.json",
+        "backup-root": staging.parent / "weekly-integrity-receipt.json",
+    }[location]
+    saved.write_text(json.dumps(failure))
+    receipt_path = staging / backup.SNAPSHOT_RECEIPT_FILENAME
+    weekly = backup.verify_snapshot_receipt(receipt_path)["weeklyVerification"]
+    assert weekly == {"status": "failed", "problem": "sidecar write failed"}
+    assert backup.main(["--verify-receipt", str(receipt_path)]) == 2
+    assert "outcome=failed" in capsys.readouterr().out
+
+
+def test_missing_sidecar_with_corrupt_root_fallback_stays_a_missing_warning(tmp_path):
+    _, staging, _ = stage(tmp_path)
+    (staging.parent / "weekly-integrity-receipt.json").write_text("{truncated")
+    receipt_path = staging / backup.SNAPSHOT_RECEIPT_FILENAME
+    weekly = backup.verify_snapshot_receipt(receipt_path)["weeklyVerification"]
+    assert weekly["status"] == "missing"
+    assert weekly["warnings"]
+    assert backup.main(["--verify-receipt", str(receipt_path)]) == 3

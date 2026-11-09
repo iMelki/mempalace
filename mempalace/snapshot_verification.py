@@ -350,39 +350,72 @@ def _receipt_time(record, field):
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
-def newer_weekly_failure(receipt_path, expected, weekly):
-    """A saved failure for this receipt supersedes older complete proof."""
+def _read_weekly_failure(target):
+    failure = json.loads(target.read_text(encoding="utf-8"))
+    if not isinstance(failure, dict) or failure.get("schema") != WEEKLY_SCHEMA:
+        raise ValueError("unexpected weekly failure schema")
+    return failure
+
+
+def newer_weekly_failure(receipt_path, expected, weekly, warnings=None):
+    """A saved failure for this receipt supersedes older complete proof.
+
+    ``weekly`` is None when the generation has no weekly sidecar; then any saved
+    failure naming this receipt is authoritative. The generation's own
+    invalidation file fails closed when unreadable. The backup-root sidecar is
+    shared by every generation, so an unreadable or unexpected-schema root file
+    cannot be attributed to this receipt: it is reported in ``warnings`` and
+    skipped instead of poisoning every generation's readback.
+    """
     root = receipt_path.parent.parent
-    targets = (receipt_path.parent / WEEKLY_INVALIDATION_FILENAME, root / WEEKLY_FILENAME)
-    for target in targets:
+    generation_target = receipt_path.parent / WEEKLY_INVALIDATION_FILENAME
+    for target in (generation_target, root / WEEKLY_FILENAME):
         no_links(target, root)
         if not target.exists():
             continue
-        failure = json.loads(target.read_text(encoding="utf-8"))
-        if not isinstance(failure, dict) or failure.get("schema") != WEEKLY_SCHEMA:
-            raise ValueError("unexpected weekly failure schema")
+        if target == generation_target:
+            failure = _read_weekly_failure(target)
+        else:
+            try:
+                failure = _read_weekly_failure(target)
+            except (OSError, ValueError, RecursionError) as exc:
+                if warnings is not None:
+                    warnings.append(f"backup-root weekly sidecar unreadable, ignored: {exc}")
+                continue
         if failure.get("snapshotReceiptSha256") != expected or failure.get("status") != "error":
             continue
         failed_at = _receipt_time(failure, "generatedAt")
-        checked_at = _receipt_time(weekly, "generatedAt")
-        if failed_at >= checked_at:
+        if weekly is None or failed_at >= _receipt_time(weekly, "generatedAt"):
             return {"status": "failed", "problem": failure.get("message", "receipt write failed")}
     return None
 
 
 def weekly_status(receipt_path, snapshot):
+    warnings = []
+    status = _weekly_status(receipt_path, snapshot, warnings)
+    if warnings:
+        status["warnings"] = warnings
+    return status
+
+
+def _weekly_status(receipt_path, snapshot, warnings):
     target = receipt_path.parent / WEEKLY_FILENAME
     try:
         no_links(target, receipt_path.parent.parent)
+        expected = "sha256:" + hashlib.sha256(receipt_path.read_bytes()).hexdigest()
         if not target.exists():
+            # A saved failure for this generation outranks an absent sidecar:
+            # the failed write is exactly why the sidecar may be missing.
+            failure = newer_weekly_failure(receipt_path, expected, None, warnings)
+            if failure is not None:
+                return failure
             return {"status": "missing", "problem": "weekly-integrity-receipt-missing"}
         weekly = json.loads(target.read_text(encoding="utf-8"))
         if not isinstance(weekly, dict):
             raise ValueError("weekly receipt is not an object")
         if weekly.get("schema") != WEEKLY_SCHEMA:
             raise ValueError("unexpected weekly schema")
-        expected = "sha256:" + hashlib.sha256(receipt_path.read_bytes()).hexdigest()
-        failure = newer_weekly_failure(receipt_path, expected, weekly)
+        failure = newer_weekly_failure(receipt_path, expected, weekly, warnings)
         if failure is not None:
             return failure
         if weekly.get("snapshotReceiptSha256") != expected:
