@@ -883,6 +883,36 @@ def test_hard_session_cap_rejects_new_sessions_until_delete_releases_capacity():
         assert second_session != first_session
 
 
+def test_delete_releases_the_session_before_the_client_sees_the_200():
+    app = create_http_app(
+        auth_token=AUTH_FIXTURE,
+        tools=_registry(lambda value=0: {"value": value}),
+    )
+    live_at_response_start: list[set[str]] = []
+
+    async def spying_app(scope, receive, send):
+        async def spy_send(message):
+            if (
+                scope["type"] == "http"
+                and scope["method"] == "DELETE"
+                and message["type"] == "http.response.start"
+                and message["status"] == 200
+            ):
+                live_at_response_start.append(set(app.state.mcp_session_manager._server_instances))
+            await send(message)
+
+        await app(scope, receive, spy_send)
+
+    with TestClient(spying_app, base_url="http://127.0.0.1:8787") as client:
+        session_id = _initialize(client)
+        assert session_id in app.state.mcp_session_manager._server_instances
+        assert client.delete("/mcp", headers=_headers(session_id)).status_code == 200
+
+    # Checked while the response is still being sent, so a loaded host cannot hide a
+    # release that only happens after the client already has the 200.
+    assert live_at_response_start == [set()]
+
+
 def test_active_aware_cleanup_expires_abandoned_but_never_active_calls():
     started = threading.Event()
     release = threading.Event()

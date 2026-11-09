@@ -245,6 +245,16 @@ class ActiveAwareSessionManager(StreamableHTTPSessionManager):
             nonlocal response_status
             if message.get("type") == "http.response.start":
                 response_status = message.get("status")
+                if (
+                    scope.get("method") == "DELETE"
+                    and response_status == 200
+                    and transport.is_terminated
+                ):
+                    # Release the session before the client can see the 200, so a
+                    # client that gets it can rely on the capacity being free.
+                    async with self._session_lifecycle_lock:
+                        if self._server_instances.get(session_id) is transport:
+                            self._remove_session_locked(session_id)
             await send(message)
 
         try:
