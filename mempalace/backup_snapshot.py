@@ -58,6 +58,7 @@ import sqlite3
 import sys
 import time
 import uuid
+from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 
 # datetime.UTC is a 3.11+ alias; CI runs 3.9, where only timezone.utc exists.
@@ -111,6 +112,14 @@ KNOWN_METADATA_CHILDREN = (
 
 FILE_ATTRIBUTE_REPARSE_POINT = 0x400
 _HASH_BLOCK = 8 * 1024 * 1024
+
+#: Worker threads for the file copies made under the lease. Each small file costs
+#: a cold read and a create, so overlapping them hides most of that wait while the
+#: tree walk, the reparse-point refusal and the manifest order stay sequential.
+#: Set the variable to ``1`` to get the one-file-at-a-time loop back.
+COPY_WORKERS_ENV = "MEMPALACE_SNAPSHOT_COPY_WORKERS"
+DEFAULT_COPY_WORKERS = 8
+MAX_COPY_WORKERS = 32
 
 
 class PalaceSnapshotError(RuntimeError):
@@ -491,28 +500,67 @@ def read_catalog(sqlite_path: Path) -> list[dict[str, Any]]:
     ]
 
 
-def _copy_tree_no_links(source: Path, destination: Path) -> tuple[int, int]:
-    """Copy a directory, refusing reparse points, returning (bytes, files)."""
+def _copy_workers() -> int:
+    raw = os.environ.get(COPY_WORKERS_ENV, "").strip()
+    try:
+        requested = int(raw) if raw else DEFAULT_COPY_WORKERS
+    except ValueError:
+        requested = DEFAULT_COPY_WORKERS
+    return max(1, min(MAX_COPY_WORKERS, requested))
+
+
+def _plan_tree_copy(source: Path, destination: Path) -> list[tuple[Path, Path]]:
+    """Create the destination folders and return the (source, destination) file pairs.
+
+    Walks in the same order the copy used to, and refuses reparse points and
+    unsupported entries before any file is copied.
+    """
 
     if _is_link_or_reparse(source):
         raise PalaceSnapshotError(f"refusing to copy a reparse point: {source}")
     destination.mkdir(parents=True, exist_ok=False)
-    total_bytes = 0
-    total_files = 0
+    pairs: list[tuple[Path, Path]] = []
     for entry in sorted(source.iterdir(), key=lambda p: p.name.lower()):
         if _is_link_or_reparse(entry):
             raise PalaceSnapshotError(f"refusing to copy a reparse point: {entry}")
         if entry.is_dir():
-            child_bytes, child_files = _copy_tree_no_links(entry, destination / entry.name)
-            total_bytes += child_bytes
-            total_files += child_files
+            pairs.extend(_plan_tree_copy(entry, destination / entry.name))
         elif entry.is_file():
-            shutil.copy2(entry, destination / entry.name)
-            total_bytes += (destination / entry.name).stat().st_size
-            total_files += 1
+            pairs.append((entry, destination / entry.name))
         else:
             raise PalaceSnapshotError(f"unsupported filesystem entry: {entry}")
-    return total_bytes, total_files
+    return pairs
+
+
+def _copy_planned_files(pairs: list[tuple[Path, Path]], *, workers: int) -> list[int]:
+    """Copy every pair and return the destination sizes in input order.
+
+    The first failure is raised as soon as it happens, not after the files copied
+    before it, and the copies not yet started are cancelled.
+    """
+
+    def copy_one(pair: tuple[Path, Path]) -> int:
+        source, destination = pair
+        shutil.copy2(source, destination)
+        return destination.stat().st_size
+
+    if workers <= 1 or len(pairs) <= 1:
+        return [copy_one(pair) for pair in pairs]
+    with ThreadPoolExecutor(
+        max_workers=workers, thread_name_prefix="mempalace-snapshot-copy"
+    ) as pool:
+        futures = [pool.submit(copy_one, pair) for pair in pairs]
+        try:
+            done, _ = wait(futures, return_when=FIRST_EXCEPTION)
+            for future in done:
+                failure = future.exception()
+                if failure is not None:
+                    raise failure
+            return [future.result() for future in futures]
+        except BaseException:
+            for future in futures:
+                future.cancel()
+            raise
 
 
 # --------------------------------------------------------------------------
@@ -675,7 +723,10 @@ def stage_palace_snapshot(
                 {entry["vectorSegmentId"] for entry in collections if entry["vectorSegmentId"]}
             )
 
-            staged_entries: list[dict[str, Any]] = []
+            # Plan every copy first (folders, link refusal, file order), then copy all
+            # files in one pool. Counts are filled in from the sizes afterwards, so the
+            # entries and their order are the same as with the one-file-at-a-time loop.
+            planned: list[tuple[dict[str, Any], list[tuple[Path, Path]]]] = []
             for segment_id in referenced:
                 segment_source = palace_root / segment_id
                 if not segment_source.is_dir():
@@ -685,27 +736,31 @@ def stage_palace_snapshot(
                     raise PalaceSnapshotError(
                         f"catalog references a missing vector segment directory: {segment_id}"
                     )
-                seg_bytes, seg_files = _copy_tree_no_links(segment_source, staged_root / segment_id)
-                staged_entries.append(
-                    {
-                        "relativePath": segment_id,
-                        "kind": "vector-segment",
-                        "bytes": seg_bytes,
-                        "fileCount": seg_files,
-                    }
+                planned.append(
+                    (
+                        {
+                            "relativePath": segment_id,
+                            "kind": "vector-segment",
+                            "bytes": 0,
+                            "fileCount": 0,
+                        },
+                        _plan_tree_copy(segment_source, staged_root / segment_id),
+                    )
                 )
 
             for name in STATIC_INCLUDES:
                 candidate = palace_root / name
                 if candidate.is_file() and not _is_link_or_reparse(candidate):
-                    shutil.copy2(candidate, staged_root / name)
-                    staged_entries.append(
-                        {
-                            "relativePath": name,
-                            "kind": "chroma-marker",
-                            "bytes": (staged_root / name).stat().st_size,
-                            "fileCount": 1,
-                        }
+                    planned.append(
+                        (
+                            {
+                                "relativePath": name,
+                                "kind": "chroma-marker",
+                                "bytes": 0,
+                                "fileCount": 0,
+                            },
+                            [(candidate, staged_root / name)],
+                        )
                     )
 
             metadata_root = palace_root / ".mempalace"
@@ -724,21 +779,31 @@ def stage_palace_snapshot(
                 staged_metadata.mkdir(parents=True, exist_ok=False)
                 for child in sorted(metadata_root.iterdir(), key=lambda p: p.name.lower()):
                     if child.is_dir():
-                        child_bytes, child_files = _copy_tree_no_links(
-                            child, staged_metadata / child.name
-                        )
+                        child_pairs = _plan_tree_copy(child, staged_metadata / child.name)
                     else:
-                        shutil.copy2(child, staged_metadata / child.name)
-                        child_bytes = (staged_metadata / child.name).stat().st_size
-                        child_files = 1
-                    staged_entries.append(
-                        {
-                            "relativePath": f".mempalace/{child.name}",
-                            "kind": "palace-metadata",
-                            "bytes": child_bytes,
-                            "fileCount": child_files,
-                        }
+                        child_pairs = [(child, staged_metadata / child.name)]
+                    planned.append(
+                        (
+                            {
+                                "relativePath": f".mempalace/{child.name}",
+                                "kind": "palace-metadata",
+                                "bytes": 0,
+                                "fileCount": 0,
+                            },
+                            child_pairs,
+                        )
                     )
+
+            sizes = _copy_planned_files(
+                [pair for _, pairs in planned for pair in pairs], workers=_copy_workers()
+            )
+            staged_entries: list[dict[str, Any]] = []
+            offset = 0
+            for entry, pairs in planned:
+                entry["bytes"] = sum(sizes[offset : offset + len(pairs)])
+                entry["fileCount"] = len(pairs)
+                offset += len(pairs)
+                staged_entries.append(entry)
 
             # Quiescence proof: no other connection committed across the window.
             final_data_version = witness.observe()
