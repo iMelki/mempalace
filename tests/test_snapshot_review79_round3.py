@@ -325,3 +325,45 @@ def test_receipt_without_valid_palace_root_is_invalid_not_a_crash(tmp_path, pala
             p.startswith("staged-tree-isolation:invalid-palaceRoot:") for p in result["problems"]
         )
         assert verification.receipt_verification_exit_code(result) != 0
+
+
+@pytest.mark.parametrize("files", [[None], [123], "not-a-list"])
+def test_weekly_saves_failure_for_malformed_nested_receipt_fields(tmp_path, files):
+    """Codex P2 (PR #79, 2026-11-09): a malformed contentIdentity.files must
+    produce a saved weekly failure, not a traceback that leaves the old success."""
+    live, generation, _ = stage(tmp_path)
+    assert (
+        backup.verify_weekly_snapshot(generation.parent, palace_path=live)["status"] == "complete"
+    )
+    receipt_path = generation / backup.SNAPSHOT_RECEIPT_FILENAME
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["contentIdentity"]["files"] = files
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+    result = backup.verify_weekly_snapshot(generation.parent, palace_path=live)
+    assert result["status"] == "error"
+    assert result["errorCount"] == 1
+    saved = json.loads((generation / verification.WEEKLY_FILENAME).read_text(encoding="utf-8"))
+    assert saved["status"] == "error"
+    assert saved["generatedAt"] == result["generatedAt"]
+
+
+def test_weekly_never_writes_sidecar_into_live_selected_generation(tmp_path):
+    """Codex P2 (PR #79, 2026-11-09): when the backup root is an ancestor of the
+    live palace and the selected generation is the live palace itself, the
+    failure receipt goes to the backup root, never inside live storage."""
+    live, generation, _ = stage(tmp_path)
+    root = generation.parent
+    # Activate the generation in place: the live palace path is the generation.
+    before = {
+        p.relative_to(generation): p.read_bytes() for p in generation.rglob("*") if p.is_file()
+    }
+    result = backup.verify_weekly_snapshot(root, palace_path=generation)
+    assert result["status"] == "error"
+    assert "live" in result["message"]
+    assert result["receiptLocation"] == "backup-root"
+    after = {
+        p.relative_to(generation): p.read_bytes() for p in generation.rglob("*") if p.is_file()
+    }
+    assert before == after
+    assert not (generation / verification.WEEKLY_FILENAME).exists()
+    assert json.loads((root / verification.WEEKLY_FILENAME).read_text())["status"] == "error"

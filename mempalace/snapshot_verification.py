@@ -303,6 +303,13 @@ def verify_weekly_snapshot(backup_root, *, palace_path, budget_seconds=7200):
         path, snapshot = latest_snapshot(root, scan_errors=result["scanErrors"], deadline=deadline)
         recorded_live = Path(snapshot["palaceRoot"]).expanduser().resolve()
         outside_live(root, recorded_live)
+        # The root may be an ancestor of live storage, so the selected
+        # generation itself must be checked before it becomes the sidecar
+        # destination; otherwise a refusal would still write inside live.
+        generation = path.parent.resolve()
+        for live_root in (live, recorded_live):
+            if generation == live_root or live_root in generation.parents:
+                raise PalaceSnapshotError("selected generation is inside live palace storage")
         target = path.parent / WEEKLY_FILENAME
         no_links(target, root)
         result["snapshotGeneratedAt"] = snapshot["generatedAt"]
@@ -311,7 +318,18 @@ def verify_weekly_snapshot(backup_root, *, palace_path, budget_seconds=7200):
         result["inputBytes"] = database.stat().st_size
         full_copy_proof(database, path, snapshot, result, deadline)
         result["status"] = "complete"
-    except (PalaceSnapshotError, OSError, ValueError, KeyError, StopIteration) as exc:
+    except (
+        PalaceSnapshotError,
+        OSError,
+        ValueError,
+        KeyError,
+        StopIteration,
+        # Malformed nested receipt data (for example contentIdentity.files
+        # holding null) is input failure and must reach the saved receipt.
+        TypeError,
+        AttributeError,
+        RecursionError,
+    ) as exc:
         result["message"] = str(exc) or "weekly SQLite identity is missing"
     result["durationSeconds"] = round(time.monotonic() - started, 3)
     result["processedCount"] = int(result["status"] == "complete")
