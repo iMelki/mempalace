@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-10-13 — Count fact-checker edit distance instead of wall-clock time
+
+- Replace the 0.2-second bound on zero-mention entity confusion with a call count.
+- Add a registry-size ratio check that rejects pairwise work and uses no clock.
+- Record the temporary pairwise break and the restored pass in `.gate-evidence.json`.
+
 ## 2026-10-12 — Preserve coverage after snapshot interruption tests (PR #77)
 
 - Restore the borrowed trace observer after lease interruption tests and probe modes.

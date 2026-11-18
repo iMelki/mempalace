@@ -4,6 +4,20 @@
   "exclude": [],
   "gates": [
     {
+      "id": "fact-checker-zero-mention-edit-distance",
+      "path": "tests/test_fact_checker.py",
+      "description": "Zero registry mentions must not run edit-distance comparisons. A wall-clock bound is not the control.",
+      "negativeFixture": "tests/test_fact_checker.py",
+      "observedFailure": {
+        "date": "2026-10-13",
+        "command": "python -B -m pytest tests/test_fact_checker.py::TestEditDistance::test_zero_mentions_do_no_edit_distance -q --tb=short --override-ini=addopts=-p no:cacheprovider --tb=short",
+        "exitCode": 1,
+        "output": "AssertionError: edit distance ran 124750 times with zero mentions; expected no comparisons; assert 124750 == 0; 1 failed in 6.62s",
+        "reason": "Replaced _check_entity_confusion with a pairwise scan over the full registry, including zero mentions. The file blob changed from 50e8842f24cfd47144000629a22a26ef177887d8 to 80b8a263e2569e9a48bc430be0464b146b9c2c0f. After a one-mention positive control observed a call, the 500-name zero-mention case failed because the counter saw 124750 comparisons, which is C(500, 2). The failure was that count, not a timeout, an import error, or an empty-issues assertion.",
+        "restoredPass": "git restore --source=HEAD -- mempalace/fact_checker.py. hash-object matched 50e8842f24cfd47144000629a22a26ef177887d8 and the mutant marker was absent. The same pytest command on TestEditDistance then passed 4 tests in 0.74s at exit 0."
+      }
+    },
+    {
       "id": "snapshot-receipt-cli-weekly-outcome",
       "path": "mempalace/backup_snapshot.py",
       "description": "Both caller entrypoints must expose weekly status and return nonzero on failure or missing/stale warning; nightly valid remains separate.",

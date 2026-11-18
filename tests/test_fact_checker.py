@@ -112,26 +112,76 @@ class TestEditDistance:
         assert _edit_distance("abc", "") == 3
         assert _edit_distance("", "abc") == 3
 
-    def test_performance_bounded_by_mentioned_names(self):
-        """Regression: an earlier implementation did O(n²) pairwise
-        edit-distance over every registry entry on every check_text call.
-        With 100 names and zero mentions, the call must return in a blink
-        because no edit-distance comparison should even start."""
-        import time
+    def test_zero_mentions_do_no_edit_distance(self, monkeypatch):
+        """Zero registry mentions must not run edit distance.
 
-        # 500 random names, none of which appear in the text.
+        Replaces ``test_performance_bounded_by_mentioned_names``, which
+        asserted ``elapsed < 0.2``. That wall-clock bound fails under
+        host load and coverage tracing even when no comparison runs.
+        Count the calls instead. Upstream still uses the clock bound
+        (MemPalace/mempalace develop, introduced in 1263c3c91e).
+        """
+        import mempalace.fact_checker as fact_checker
+
+        calls = {"n": 0}
+
+        def _counting(left, right):
+            calls["n"] += 1
+            return _edit_distance(left, right)
+
+        monkeypatch.setattr(fact_checker, "_edit_distance", _counting)
+        assert fact_checker._edit_distance is _counting
+
+        # Positive control: the counter must see a real comparison, or a
+        # dead patch would make the zero-mention assertion pass for free.
+        fact_checker._check_entity_confusion(
+            "I spoke with Mila today.",
+            {"people": ["Milla", "Mila"]},
+        )
+        assert calls["n"] > 0, "counter did not observe a real comparison"
+
+        calls["n"] = 0
         registry = {"people": [f"Zelda{i:03d}" for i in range(500)]}
         text = "completely irrelevant prose with no registered names at all"
-
-        start = time.perf_counter()
-        issues = _check_entity_confusion(text, registry)
-        elapsed = time.perf_counter() - start
-
+        issues = fact_checker._check_entity_confusion(text, registry)
+        assert calls["n"] == 0, (
+            f"edit distance ran {calls['n']} times with zero mentions; expected no comparisons"
+        )
         assert issues == []
-        # Even an unoptimized implementation should beat this by orders
-        # of magnitude once we've filtered to mentioned names (which is
-        # 0 here) — if it's still doing O(n²), we'll blow past.
-        assert elapsed < 0.2, f"entity confusion took {elapsed:.3f}s on empty mentions"
+
+    def test_edit_distance_work_scales_below_pairwise(self, monkeypatch):
+        """One mention against 5x names must not approach all-pairs work.
+
+        Linear filter: 19 calls at 20 names, 99 at 100, ratio about 5.2.
+        All-pairs is C(100, 2) / C(20, 2) = 26.05. The bound 12 sits
+        between them and uses no wall clock.
+        """
+        import mempalace.fact_checker as fact_checker
+
+        calls = {"n": 0}
+
+        def _counting(left, right):
+            calls["n"] += 1
+            return _edit_distance(left, right)
+
+        monkeypatch.setattr(fact_checker, "_edit_distance", _counting)
+
+        def _calls_for(count):
+            calls["n"] = 0
+            fact_checker._check_entity_confusion(
+                "I spoke with Zelda000 today.",
+                {"people": [f"Zelda{i:03d}" for i in range(count)]},
+            )
+            return calls["n"]
+
+        small = _calls_for(20)
+        large = _calls_for(100)
+        assert small > 0, "counter did not observe a real comparison"
+        ratio = large / small
+        assert ratio < 12, (
+            f"edit-distance calls scaled {ratio:.2f}x for 5x names "
+            f"({small} -> {large}); pairwise work is about 25x"
+        )
 
 
 # ── _flatten_names helper ────────────────────────────────────────────
